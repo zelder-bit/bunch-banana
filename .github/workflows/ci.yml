@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bunch
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: |
+          cp .env.example .env
+          sed -i 's/^BUNCH_ADMIN_TOKEN=$/BUNCH_ADMIN_TOKEN=ci/' .env
+          cp litellm/config.example.yaml litellm/config.yaml
+          docker compose config --quiet
+      - name: Build bunch image
+        run: docker build -t bunch:ci bunch
+      - name: Smoke test container
+        run: |
+          docker run -d --name bunch -e BUNCH_ADMIN_TOKEN=ci -p 8700:8700 bunch:ci
+          for i in $(seq 1 20); do curl -fs localhost:8700/healthz && break; sleep 1; done
+          curl -fs localhost:8700/healthz
+          docker exec bunch python -m bunch.cli add-agent ci-agent
+
+  check-public:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for private info (IPs, emails, keys, home paths)
+        run: SKIP_LLM=1 bash scripts/check-public.sh --all
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

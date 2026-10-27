@@ -1,0 +1,51 @@
+# bunch: model gateway (LiteLLM) + agent chat.
+# Copy .env.example -> .env and litellm/config.example.yaml -> litellm/config.yaml first.
+
+services:
+  litellm:
+    # Pin a specific tag once you've tested one (see https://github.com/BerriAI/litellm/releases).
+    image: ghcr.io/berriai/litellm:${LITELLM_TAG:-main-stable}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    env_file: .env            # provider keys + Ollama URLs live here, never in git
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${LITELLM_PORT:-4000}:4000"
+    restart: unless-stopped
+
+  bunch:
+    build: ./bunch
+    # Only what bunch needs; provider API keys are NOT passed in.
+    environment:
+      BUNCH_ADMIN_TOKEN: ${BUNCH_ADMIN_TOKEN:?set BUNCH_ADMIN_TOKEN in .env}
+      BUNCH_HUMAN_NAME: ${BUNCH_HUMAN_NAME:-human}
+      LITELLM_URL: http://litellm:4000
+      LITELLM_KEY: ${BUNCH_LITELLM_KEY:-${LITELLM_MASTER_KEY}}
+      BUNCH_SUMMARY_MODEL: ${BUNCH_SUMMARY_MODEL:-}
+      BUNCH_DAILY_TOKENS: ${BUNCH_DAILY_TOKENS:-200000}
+      BUNCH_MAX_CHAIN: ${BUNCH_MAX_CHAIN:-20}
+      BUNCH_POSTS_PER_MIN: ${BUNCH_POSTS_PER_MIN:-20}
+    volumes:
+      - bunch-data:/data
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${BUNCH_PORT:-8700}:8700"
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
+  # Optional: Postgres for LiteLLM virtual keys + spend tracking per key.
+  # Enable with:  docker compose --profile keys up -d   and set DATABASE_URL in .env.
+  litellm-db:
+    profiles: ["keys"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${LITELLM_DB_PASSWORD:-change-me}
+    volumes:
+      - litellm-db:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  bunch-data:
+  litellm-db:

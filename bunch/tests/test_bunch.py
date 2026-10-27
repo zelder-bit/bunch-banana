@@ -1,0 +1,244 @@
+import asyncio
+
+import pytest
+from fastapi.testclient import TestClient
+
+from bunch.app import create_app
+from bunch.config import Settings
+from bunch.summarizer import summarize_once
+
+ADMIN = "test-admin-token"
+
+
+class FakeLLM:
+    enabled = True
+
+    def __init__(self):
+        self.calls = []
+
+    async def chat(self, model, messages, max_tokens, user=None):
+        self.calls.append((model, messages, max_tokens, user))
+        return f"answer from {model}", 100
+
+    async def models(self):
+        return ["local/small", "paid/big"]
+
+
+@pytest.fixture
+def env(tmp_path):
+    s = Settings(db_path=str(tmp_path / "hub.db"), admin_token=ADMIN, litellm_url="http://x",
+                 summary_model="local/small", summary_every=3, daily_tokens=250, max_chain=6,
+                 posts_per_min=50, read_limit=5, join_tail=2, get_max=50)
+    llm = FakeLLM()
+    app = create_app(s, llm)
+    with TestClient(app) as c:
+        keys = {}
+        for n in ("alice", "bob", "carol"):
+            r = c.post("/api/admin/agents", json={"name": n}, headers=adm())
+            assert r.status_code == 200, r.text
+            keys[n] = r.json()["key"]
+        yield c, keys, app, llm
+
+
+def adm():
+    return {"Authorization": f"Bearer {ADMIN}"}
+
+
+def h(key):
+    return {"Authorization": f"Bearer {key}"}
+
+
+def mcp(c, key, method, params=None, mid=1):
+    body = {"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}
+    r = c.post("/mcp", json=body, headers=h(key))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def tool(c, key, name, **args):
+    res = mcp(c, key, "tools/call", {"name": name, "arguments": args})["result"]
+    return res["content"][0]["text"], res["isError"]
+
+
+def test_auth_required(env):
+    c, keys, *_ = env
+    assert c.post("/mcp", json={}).status_code == 401
+    assert c.get("/api/v1/rooms", headers=h("nope")).status_code == 401
+    assert c.get("/api/admin/agents", headers=h(keys["alice"])).status_code == 401
+
+
+def test_mcp_handshake_and_tools(env):
+    c, keys, *_ = env
+    init = mcp(c, keys["alice"], "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                                 "clientInfo": {"name": "t", "version": "1"}})
+    assert init["result"]["protocolVersion"] == "2025-06-18"
+    r = c.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=h(keys["alice"]))
+    assert r.status_code == 202
+    tools = mcp(c, keys["alice"], "tools/list")["result"]["tools"]
+    assert [t["name"] for t in tools] == ["read", "post", "get", "ask", "rooms"]
+    # Tool definitions are sent to the model every turn; keep them small.
+    import json
+    assert len(json.dumps(tools)) < 2200
+
+
+def test_addressing_and_cursors(env):
+    c, k, *_ = env
+    assert tool(c, k["alice"], "post", room="general", text="hello everyone")[0] == "ok #1"
+    assert tool(c, k["alice"], "post", room="general", text="@bob please check the logs")[0] == "ok #2"
+    assert tool(c, k["alice"], "post", room="general", text="for carol only", to="carol")[0] == "ok #3"
+
+    # bob has never read general: gets join summary + tail of relevant messages, not carol's
+    out, _ = tool(c, k["bob"], "read", room="general")
+    assert out.startswith("joined general (3 msgs; latest below)")
+    assert "#2 alice>you: @bob please check the logs" in out
+    assert "carol only" not in out.split("\n", 1)[1]
+
+    # second read: nothing new
+    assert tool(c, k["bob"], "read", room="general")[0] == "no new messages"
+    # bob replies with re=: auto-addressed to alice
+    assert tool(c, k["bob"], "post", room="general", text="logs are clean", re=2)[0] == "ok #4"
+    out, _ = tool(c, k["alice"], "read")
+    assert out == "#4 [general] bob>you re#2: logs are clean"
+    # all=true shows other-addressed messages
+    tool(c, k["bob"], "post", room="general", text="note to carol", to="carol")
+    assert "bob>carol" in tool(c, k["alice"], "read", room="general", all=True)[0]
+
+
+def test_mentions_reach_unjoined_agents(env):
+    c, k, *_ = env
+    tool(c, k["alice"], "post", room="ops", text="routine chatter")
+    tool(c, k["alice"], "post", room="ops", text="@carol need you here")
+    out, _ = tool(c, k["carol"], "read")
+    assert out == "#2 [ops] alice>you: @carol need you here"
+
+
+def test_long_message_summary_and_paged_get(env):
+    c, k, app, llm = env
+    long = "Build log line\n" * 20
+    tool(c, k["alice"], "post", room="build", text=long, summary="build passed, 20 lines")
+    out, _ = tool(c, k["bob"], "read", room="build")
+    assert "build passed, 20 lines (+299)" in out
+    page, _ = tool(c, k["bob"], "get", id=1)
+    assert "[chars 0-50 of 299]" in page and "(more: get id=1 offset=50)" in page
+    page2, _ = tool(c, k["bob"], "get", id=1, offset=250)
+    assert "more:" not in page2
+
+
+def test_summarizer(env):
+    c, k, app, llm = env
+    tool(c, k["alice"], "post", room="r", text="x" * 400)  # no summary given -> auto truncated
+    tool(c, k["alice"], "post", room="r", text="two")
+    tool(c, k["alice"], "post", room="r", text="three")
+    hub = app.state.hub
+    n = asyncio.run(summarize_once(hub))
+    assert n == 2  # one message summary + one room summary
+    assert hub.store.message(1)["summary"] == "answer from local/small"
+    assert hub.store.room("r")["summary"] == "answer from local/small"
+    out, _ = tool(c, k["bob"], "read", room="r")
+    assert out.startswith("joined r. summary: answer from local/small")
+
+
+def test_chain_limit_and_human_reset(env):
+    c, k, *_ = env
+    for i in range(6):
+        assert tool(c, k["alice" if i % 2 else "bob"], "post", room="loop", text=f"m{i}")[1] is False
+    out, err = tool(c, k["alice"], "post", room="loop", text="again")
+    assert err and "waiting for a human" in out
+    r = c.post("/api/admin/rooms/loop/messages", json={"room": "loop", "text": "carry on"}, headers=adm())
+    assert r.status_code == 200
+    assert tool(c, k["alice"], "post", room="loop", text="thanks")[1] is False
+
+
+def test_ask_budget_and_room_post(env):
+    c, k, app, llm = env
+    out, _ = tool(c, k["alice"], "ask", model="?")
+    assert out == "models: local/small, paid/big"
+    out, _ = tool(c, k["alice"], "ask", model="paid/big", prompt="hi")
+    assert out == "answer from paid/big"
+    assert llm.calls[-1][3] == "alice"  # spend attributed to the agent
+    out, _ = tool(c, k["alice"], "ask", model="paid/big", prompt="hi", room="results")
+    assert out.startswith("posted #1 [results] alice: answer from paid/big")
+    tool(c, k["alice"], "ask", model="paid/big", prompt="hi")  # 300 >= 250
+    out, err = tool(c, k["alice"], "ask", model="paid/big", prompt="hi")
+    assert err and "budget" in out
+    # budget is per agent
+    assert tool(c, k["bob"], "ask", model="paid/big", prompt="hi")[1] is False
+
+
+def test_rest_api_and_json_read(env):
+    c, k, *_ = env
+    r = c.post("/api/v1/post", json={"room": "dev", "text": "@bob ping"}, headers=h(k["alice"]))
+    assert r.text == "ok #1"
+    r = c.get("/api/v1/read", params={"format": "json"}, headers=h(k["bob"]))
+    msgs = r.json()["messages"]
+    assert msgs[0]["for_me"] and msgs[0]["sender"] == "alice" and "body" not in msgs[0]
+    r = c.get("/api/v1/rooms", headers=h(k["bob"]))
+    assert r.text.startswith("dev (0 new): recent: alice: @bob ping")
+    r = c.get("/api/v1/read", params={"wait": 0.2}, headers=h(k["bob"]))
+    assert r.text == "no new messages"
+
+
+def test_bad_input(env):
+    c, k, *_ = env
+    assert tool(c, k["alice"], "post", room="Bad Room!", text="x")[1]
+    assert tool(c, k["alice"], "get", id=999)[1]
+    assert tool(c, k["alice"], "read", room="nope")[1]
+    assert "unknown tool" in tool(c, k["alice"], "frobnicate")[0]
+    assert mcp(c, k["alice"], "bogus/method")["error"]["code"] == -32601
+
+
+def test_viewer_websocket_gets_live_messages(env):
+    c, k, *_ = env
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"token": ADMIN})
+        assert ws.receive_json()["type"] == "ready"
+        c.post("/api/v1/post", json={"room": "live", "text": "hello viewer"}, headers=h(k["alice"]))
+        ev = ws.receive_json()
+        assert ev["type"] == "message" and ev["message"]["summary"] == "hello viewer"
+
+
+def test_viewer_rejects_bad_token(env):
+    c, *_ = env
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"token": "wrong"})
+        with pytest.raises(Exception):
+            ws.receive_json()
+
+
+def test_admin_agent_lifecycle(env):
+    c, k, *_ = env
+    r = c.post("/api/admin/agents/alice/rotate", headers=adm())
+    new = r.json()["key"]
+    assert c.get("/api/v1/rooms", headers=h(k["alice"])).status_code == 401
+    assert c.get("/api/v1/rooms", headers=h(new)).status_code == 200
+    assert c.put("/api/admin/agents/bob/budget", json={"daily_tokens": 5}, headers=adm()).json()["daily_tokens"] == 5
+    assert c.delete("/api/admin/agents/carol", headers=adm()).status_code == 200
+    names = [a["name"] for a in c.get("/api/admin/agents", headers=adm()).json()]
+    assert "carol" not in names and "human" in names
+
+
+def test_posting_does_not_skip_unread(env):
+    c, k, *_ = env
+    tool(c, k["alice"], "post", room="g", text="start")
+    tool(c, k["bob"], "read", room="g")
+    tool(c, k["alice"], "post", room="g", text="@bob unread question")
+    tool(c, k["bob"], "post", room="g", text="unrelated update")
+    assert "unread question" in tool(c, k["bob"], "read", room="g")[0]
+
+
+def test_underscore_names_do_not_match_as_wildcards(env):
+    c, k, *_ = env
+    for n in ("a_b", "axb"):
+        k[n] = c.post("/api/admin/agents", json={"name": n}, headers=adm()).json()["key"]
+    tool(c, k["alice"], "post", room="w", text="hi")
+    tool(c, k["a_b"], "read", room="w")
+    tool(c, k["alice"], "post", room="w", text="@axb only")
+    assert tool(c, k["a_b"], "read", room="w")[0] == "no new messages"
+
+
+def test_viewer_and_theme_assets_served(env):
+    c, *_ = env
+    assert "static/bunch.css" in c.get("/").text
+    for path in ("/static/bunch.css", "/static/fonts/fredoka.woff2", "/static/fonts/nunito.woff2",
+                 "/static/svg/orange.svg", "/static/svg/bunch.svg", "/static/svg/empty.svg"):
+        assert c.get(path).status_code == 200, path

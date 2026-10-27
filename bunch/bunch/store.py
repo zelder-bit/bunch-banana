@@ -1,0 +1,198 @@
+"""SQLite storage. One file, no server. Safe for a single hub process."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import os
+import re
+import secrets
+import sqlite3
+import threading
+import time
+
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS agents(
+  name TEXT PRIMARY KEY,
+  key_hash TEXT UNIQUE,
+  kind TEXT NOT NULL DEFAULT 'agent',      -- 'agent' or 'human'
+  daily_tokens INTEGER,                     -- NULL = use hub default
+  created REAL NOT NULL,
+  last_seen REAL
+);
+CREATE TABLE IF NOT EXISTS rooms(
+  name TEXT PRIMARY KEY,
+  summary TEXT NOT NULL DEFAULT '',
+  summary_upto INTEGER NOT NULL DEFAULT 0,  -- last message id folded into summary
+  created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  human INTEGER NOT NULL DEFAULT 0,
+  recipients TEXT NOT NULL DEFAULT '',      -- ',a,b,' or '' for whole room
+  summary TEXT NOT NULL,
+  body TEXT,                                -- NULL when summary is the whole message
+  reply_to INTEGER,
+  auto_sum INTEGER NOT NULL DEFAULT 0,      -- 1 = summary is a truncation; summarizer may improve it
+  created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS messages_room ON messages(room, id);
+CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender, created);
+CREATE TABLE IF NOT EXISTS cursors(
+  agent TEXT NOT NULL, room TEXT NOT NULL, last_id INTEGER NOT NULL,
+  PRIMARY KEY(agent, room)
+);
+CREATE TABLE IF NOT EXISTS usage(
+  agent TEXT NOT NULL, day TEXT NOT NULL,
+  ask_tokens INTEGER NOT NULL DEFAULT 0,    -- model tokens spent through ask()
+  ctx_tokens INTEGER NOT NULL DEFAULT 0,    -- estimated tokens the hub put into the agent's context
+  PRIMARY KEY(agent, day)
+);
+"""
+
+
+def hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def today() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def valid_name(name: str) -> bool:
+    return bool(NAME_RE.match(name or ""))
+
+
+class Store:
+    def __init__(self, path: str):
+        if path != ":memory:":
+            d = os.path.dirname(os.path.abspath(path))
+            os.makedirs(d, exist_ok=True)
+        self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        with self.lock:
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA busy_timeout=5000")
+            self.db.executescript(SCHEMA)
+
+    # -- low level -------------------------------------------------------
+    def q(self, sql: str, args=()) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.db.execute(sql, args).fetchall()
+
+    def one(self, sql: str, args=()):
+        with self.lock:
+            return self.db.execute(sql, args).fetchone()
+
+    def x(self, sql: str, args=()) -> sqlite3.Cursor:
+        with self.lock:
+            return self.db.execute(sql, args)
+
+    # -- agents ----------------------------------------------------------
+    def create_agent(self, name: str, daily_tokens: int | None = None) -> str:
+        if not valid_name(name):
+            raise ValueError("name must be lowercase letters, digits, _ . - (max 32)")
+        if self.agent(name):
+            raise ValueError(f"agent '{name}' already exists")
+        key = "bunch_" + secrets.token_urlsafe(24)
+        self.x(
+            "INSERT INTO agents(name,key_hash,kind,daily_tokens,created) VALUES(?,?,?,?,?)",
+            (name, hash_key(key), "agent", daily_tokens, time.time()),
+        )
+        return key
+
+    def ensure_human(self, name: str) -> None:
+        self.x(
+            "INSERT OR IGNORE INTO agents(name,key_hash,kind,created) VALUES(?,NULL,'human',?)",
+            (name, time.time()),
+        )
+
+    def rotate_key(self, name: str) -> str:
+        row = self.agent(name)
+        if not row or row["kind"] != "agent":
+            raise ValueError("no such agent")
+        key = "bunch_" + secrets.token_urlsafe(24)
+        self.x("UPDATE agents SET key_hash=? WHERE name=?", (hash_key(key), name))
+        return key
+
+    def set_budget(self, name: str, daily_tokens: int | None) -> None:
+        self.x("UPDATE agents SET daily_tokens=? WHERE name=?", (daily_tokens, name))
+
+    def delete_agent(self, name: str) -> bool:
+        cur = self.x("DELETE FROM agents WHERE name=? AND kind='agent'", (name,))
+        self.x("DELETE FROM cursors WHERE agent=?", (name,))
+        return cur.rowcount > 0
+
+    def agent(self, name: str):
+        return self.one("SELECT * FROM agents WHERE name=?", (name,))
+
+    def agent_by_key(self, key: str):
+        if not key:
+            return None
+        row = self.one("SELECT * FROM agents WHERE key_hash=? AND kind='agent'", (hash_key(key),))
+        if row:
+            self.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), row["name"]))
+        return row
+
+    def agents(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM agents ORDER BY name")
+
+    def agent_names(self) -> set[str]:
+        return {r["name"] for r in self.q("SELECT name FROM agents")}
+
+    # -- usage -----------------------------------------------------------
+    def add_usage(self, agent: str, ask: int = 0, ctx: int = 0) -> None:
+        self.x(
+            "INSERT INTO usage(agent,day,ask_tokens,ctx_tokens) VALUES(?,?,?,?) "
+            "ON CONFLICT(agent,day) DO UPDATE SET ask_tokens=ask_tokens+excluded.ask_tokens, "
+            "ctx_tokens=ctx_tokens+excluded.ctx_tokens",
+            (agent, today(), ask, ctx),
+        )
+
+    def usage_today(self, agent: str) -> dict:
+        row = self.one("SELECT ask_tokens, ctx_tokens FROM usage WHERE agent=? AND day=?", (agent, today()))
+        return {"ask": row["ask_tokens"] if row else 0, "ctx": row["ctx_tokens"] if row else 0}
+
+    # -- rooms & messages ------------------------------------------------
+    def ensure_room(self, room: str) -> None:
+        self.x("INSERT OR IGNORE INTO rooms(name,created) VALUES(?,?)", (room, time.time()))
+
+    def room(self, room: str):
+        return self.one("SELECT * FROM rooms WHERE name=?", (room,))
+
+    def rooms(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM rooms ORDER BY name")
+
+    def room_max_id(self, room: str) -> int:
+        row = self.one("SELECT MAX(id) AS m FROM messages WHERE room=?", (room,))
+        return row["m"] or 0
+
+    def add_message(self, room, sender, human, recipients, summary, body, reply_to, auto_sum) -> int:
+        rec = ("," + ",".join(recipients) + ",") if recipients else ""
+        cur = self.x(
+            "INSERT INTO messages(room,sender,human,recipients,summary,body,reply_to,auto_sum,created) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (room, sender, int(human), rec, summary, body, reply_to, int(auto_sum), time.time()),
+        )
+        return cur.lastrowid
+
+    def message(self, mid: int):
+        return self.one("SELECT * FROM messages WHERE id=?", (mid,))
+
+    def cursor(self, agent: str, room: str) -> int | None:
+        row = self.one("SELECT last_id FROM cursors WHERE agent=? AND room=?", (agent, room))
+        return row["last_id"] if row else None
+
+    def set_cursor(self, agent: str, room: str, last_id: int) -> None:
+        self.x(
+            "INSERT INTO cursors(agent,room,last_id) VALUES(?,?,?) "
+            "ON CONFLICT(agent,room) DO UPDATE SET last_id=MAX(last_id, excluded.last_id)",
+            (agent, room, last_id),
+        )
+
+    def joined_rooms(self, agent: str) -> dict[str, int]:
+        return {r["room"]: r["last_id"] for r in self.q("SELECT room,last_id FROM cursors WHERE agent=?", (agent,))}

@@ -1,0 +1,24 @@
+# Secrets and local config: never commit
+.env
+.env.*
+!.env.example
+litellm/config.yaml
+*.key
+*.pem
+
+# Data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

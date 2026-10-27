@@ -1,0 +1,70 @@
+# LiteLLM gateway: one OpenAI-compatible endpoint for every model you have.
+# Copy to litellm/config.yaml (git-ignored) and edit. Secrets and hostnames come
+# from .env via `os.environ/NAME`, so this file itself holds nothing private.
+#
+# `model_name` is the name clients ask for. Pick names that describe the model,
+# not where it runs, so you can move a model between machines without touching clients.
+# Model IDs below are examples: use the ones you've actually pulled / that your provider currently offers.
+
+model_list:
+  # ---- Ollama on a GPU machine ---------------------------------------------
+  - model_name: local/general
+    litellm_params:
+      model: ollama_chat/llama3.1:8b
+      api_base: os.environ/OLLAMA_GPU_URL
+
+  - model_name: local/coder
+    litellm_params:
+      model: ollama_chat/qwen2.5-coder:14b
+      api_base: os.environ/OLLAMA_GPU_URL
+
+  # ---- Small model on a second machine: used by bunch for summaries -------
+  - model_name: local/summary
+    litellm_params:
+      model: ollama_chat/qwen2.5:3b
+      api_base: os.environ/OLLAMA_SMALL_URL
+
+  # Same name twice = load-balanced across both machines.
+  - model_name: local/general
+    litellm_params:
+      model: ollama_chat/llama3.1:8b
+      api_base: os.environ/OLLAMA_SMALL_URL
+
+  # ---- Any OpenAI-compatible server on another machine ----------------------
+  # - model_name: remote/whatever
+  #   litellm_params:
+  #     model: openai/served-model-name
+  #     api_base: os.environ/REMOTE_OPENAI_URL
+  #     api_key: os.environ/REMOTE_OPENAI_KEY
+
+  # ---- Paid services (delete what you don't use) ----------------------------
+  - model_name: paid/claude
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5        # check provider docs for current IDs
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: paid/gpt
+    litellm_params:
+      model: openai/gpt-4o-mini                 # check provider docs for current IDs
+      api_key: os.environ/OPENAI_API_KEY
+
+  # - model_name: paid/openrouter-any
+  #   litellm_params:
+  #     model: openrouter/<provider>/<model>
+  #     api_key: os.environ/OPENROUTER_API_KEY
+
+router_settings:
+  # If the local model is down or busy, fall back to a paid one.
+  fallbacks:
+    - local/general: ["paid/gpt"]
+  num_retries: 1
+  timeout: 300
+
+litellm_settings:
+  drop_params: true           # ignore params a backend doesn't support instead of erroring
+  request_timeout: 300
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # With --profile keys and DATABASE_URL set, LiteLLM can issue per-machine virtual keys
+  # with their own budgets: see README "Per-machine keys".
