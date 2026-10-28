@@ -298,6 +298,26 @@
   }
 
   // --- live updates ------------------------------------------------------------------------
+  let wsWasUp = false;
+  function lastShownId() {
+    const all = $("feed").querySelectorAll(".msg");
+    return all.length ? Number(all[all.length - 1].dataset.id) : 0;
+  }
+  function appendMsg(m) {
+    const feed = $("feed");
+    if (feed.querySelector(`.msg[data-id="${m.id}"]`)) return;
+    const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+    if (feed.querySelector(".empty")) feed.replaceChildren();
+    feed.append(renderMsg(m));
+    if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
+  }
+  async function catchUp() {
+    if (!current) return;
+    const room = current;
+    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages?after=" + lastShownId() + "&limit=500");
+    if (room === current) msgs.forEach(appendMsg);
+    await loadRooms();
+  }
   function setLive(on, text) { $("live").classList.toggle("on", on); $("liveText").textContent = text; }
   function connect() {
     clearTimeout(wsTimer);
@@ -306,18 +326,15 @@
     ws.onopen = () => ws.send(JSON.stringify({ token }));   // empty token = use the login cookie
     ws.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
-      if (e.type === "ready") setLive(true, "live");
+      if (e.type === "ready") {
+        setLive(true, "live");
+        if (wsWasUp) catchUp().catch(() => {});   // fetch what was posted while we were away
+        wsWasUp = true;
+      }
       if (e.type !== "message") return;
       const m = e.message;
-      if (m.room === current) {
-        const feed = $("feed");
-        const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
-        if (feed.querySelector(".empty")) feed.replaceChildren();
-        feed.append(renderMsg(m));
-        if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
-      } else {
-        unread[m.room] = (unread[m.room] || 0) + 1;
-      }
+      if (m.room === current) appendMsg(m);
+      else unread[m.room] = (unread[m.room] || 0) + 1;
       loadRooms();
     };
     ws.onclose = () => { setLive(false, "reconnecting"); if (!$("app").hidden) wsTimer = setTimeout(connect, 3000); };

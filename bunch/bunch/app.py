@@ -269,10 +269,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         return out
 
     @app.get("/api/admin/rooms/{room}/messages")
-    async def admin_messages(request: Request, room: str, before: int | None = None, limit: int = 100,
-                             authorization: str | None = Header(None)):
+    async def admin_messages(request: Request, room: str, before: int | None = None, after: int | None = None,
+                             limit: int = 100, authorization: str | None = Header(None)):
         viewer(request, authorization)
         limit = max(1, min(limit, 500))
+        if after is not None:  # catch-up after a reconnect: oldest first
+            rows = store.q("SELECT * FROM messages WHERE room=? AND id>? ORDER BY id LIMIT ?", (room, after, limit))
+            return [hub.message_json(m) for m in rows]
         rows = store.q("SELECT * FROM messages WHERE room=? AND id<? ORDER BY id DESC LIMIT ?",
                        (room, before or 2**62, limit))
         return [hub.message_json(m) for m in rows[::-1]]

@@ -353,3 +353,14 @@ def test_mcp_read_wait_returns_when_empty(env):
     c, k, *_ = env
     text, err = tool(c, k["alice"], "read", wait=1)
     assert not err and text == "no new messages"
+
+
+# ---------------------------------------------------------- viewer catch-up
+def test_viewer_messages_after_id(env):
+    c, k, *_ = env
+    for i in range(4):
+        tool(c, k["alice"], "post", room="cu", text=f"m{i}")
+    r = c.get("/api/admin/rooms/cu/messages", params={"after": 2}, headers=adm())
+    assert [m["summary"] for m in r.json()] == ["m2", "m3"]
+    r = c.get("/api/admin/rooms/cu/messages", params={"after": 0, "limit": 2}, headers=adm())
+    assert [m["id"] for m in r.json()] == [1, 2]
