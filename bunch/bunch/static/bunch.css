@@ -135,6 +135,7 @@ input[type="search"]:focus { outline: none; border-color: var(--orange); }
 .room:hover { background: var(--surface-2); }
 .room.active { background: var(--banana); color: #3B2A1A; }
 .badge { font-family: 'Nunito', sans-serif; font-size: .75rem; font-weight: 800; background: var(--orange); color: #fff; border-radius: 999px; padding: 0 .55em; min-width: 1.6em; text-align: center; }
+.badge.at { background: var(--berry); }
 .side .add { margin: 8px 0 0; }
 
 .agent { display: flex; gap: 10px; align-items: center; padding: 8px 6px; border-radius: 14px; }

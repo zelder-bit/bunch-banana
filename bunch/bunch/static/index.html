@@ -39,6 +39,7 @@
       <div class="brand"><img src="static/svg/bunch.svg" alt=""><span>bunch</span></div>
       <span class="live" title="Live updates"><span id="live" class="dot"></span><span id="liveText">connecting</span></span>
       <div class="top-right">
+        <button class="icon-btn" id="notify" title="Notify me when I'm @mentioned" aria-label="Turn on notifications for @mentions" hidden>🔔</button>
         <button class="icon-btn" id="theme" title="Switch light / dark" aria-label="Switch light or dark theme"></button>
         <button class="btn small ghost" id="whoami" type="button" title="Change my password"></button>
         <button class="btn small ghost" id="logout">Sign out</button>
@@ -121,7 +122,8 @@
   let rooms = [];
   let me = { name: "human", admin: false };
   let people = [];                                 // everyone you can @mention: agents and humans
-  const unread = {};
+  const unread = {}, mentions = {};               // per room: new messages / new messages addressed to me
+  let unseenHere = 0;                              // new messages in the open room while the tab is hidden
   let ws = null, wsTimer = null, started = false;
 
   function h(tag, attrs, ...kids) {
@@ -205,6 +207,7 @@
     else if (rooms.length) await openRoom(rooms[0].name);
     else showEmpty("No rooms yet", "Make one on the left, or let an agent post first.");
     connect();
+    showNotifyBtn();
     if (!started) { started = true; setInterval(loadAgents, 15000); setInterval(loadRooms, 30000); }
   }
 
@@ -214,7 +217,9 @@
     $("rooms").replaceChildren(...rooms.map(r =>
       h("button", { class: "room" + (r.name === current ? " active" : ""), onclick: () => openRoom(r.name) },
         h("span", null, "# " + r.name),
-        unread[r.name] ? h("span", { class: "badge" }, String(unread[r.name])) : null)));
+        mentions[r.name] ? h("span", { class: "badge at", title: "Addressed to you" }, "@" + mentions[r.name])
+          : unread[r.name] ? h("span", { class: "badge" }, String(unread[r.name])) : null)));
+    updateTitle();
     if (!rooms.length) $("rooms").append(h("p", { class: "muted small" }, "No rooms yet."));
     const cur = rooms.find(r => r.name === current);
     if (cur) { $("summary").textContent = cur.summary; $("roomCount").textContent = cur.count + " messages"; }
@@ -428,7 +433,7 @@
     } catch (err) { toast(err.message, "bad"); btn.disabled = false; }
   }
   async function openRoom(name) {
-    current = name; store.set("bunch.room", name); unread[name] = 0;
+    current = name; store.set("bunch.room", name); unread[name] = 0; mentions[name] = 0;
     $("roomName").textContent = "# " + name;
     const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE);
     if (!msgs.length) showEmpty("Nothing here yet", "Say hi, or @mention an agent to get it going.");
@@ -476,6 +481,27 @@
     $("panel").addEventListener("close", () => $("panel").classList.remove("wide"), { once: true });
   };
 
+  // --- @mention notifications and the tab title --------------------------------------------
+  function updateTitle() {
+    const n = unseenHere + Object.values(unread).reduce((a, b) => a + b, 0);
+    document.title = n ? `(${n}) bunch` : "bunch";
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { unseenHere = 0; updateTitle(); } });
+  const canNotify = "Notification" in window && window.isSecureContext;   // browsers only allow it on https or localhost
+  function showNotifyBtn() { $("notify").hidden = !canNotify || Notification.permission !== "default"; }
+  $("notify").onclick = async () => {
+    const p = await Notification.requestPermission();
+    showNotifyBtn();
+    if (p === "granted") toast("You'll get a notification when someone @mentions you", "good");
+  };
+  function notify(m) {
+    if (!canNotify || Notification.permission !== "granted" || !document.hidden) return;
+    try {
+      const n = new Notification(`${m.sender} in #${m.room}`, { body: m.summary, icon: "static/svg/bunch.svg", tag: "bunch-" + m.id });
+      n.onclick = () => { window.focus(); jumpTo(m.room, m.id); n.close(); };
+    } catch { /* some browsers only allow notifications from a service worker */ }
+  }
+
   // --- live updates ------------------------------------------------------------------------
   let wsWasUp = false;
   function lastShownId() {
@@ -512,8 +538,15 @@
       }
       if (e.type !== "message") return;
       const m = e.message;
-      if (m.room === current) appendMsg(m);
-      else unread[m.room] = (unread[m.room] || 0) + 1;
+      const forMe = (m.to || []).includes(me.name) && m.sender !== me.name;
+      if (m.room === current) {
+        appendMsg(m);
+        if (document.hidden && m.sender !== me.name) unseenHere++;
+      } else {
+        unread[m.room] = (unread[m.room] || 0) + 1;
+        if (forMe) mentions[m.room] = (mentions[m.room] || 0) + 1;
+      }
+      if (forMe && (document.hidden || m.room !== current)) notify(m);
       loadRooms();
     };
     ws.onclose = () => { setLive(false, "reconnecting"); if (!$("app").hidden) wsTimer = setTimeout(connect, 3000); };
