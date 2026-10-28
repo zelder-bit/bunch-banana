@@ -31,6 +31,14 @@ def one_line(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _snippet(text: str, q: str, width: int = 160) -> str:
+    """One line of text around the first match of q."""
+    i = text.lower().find(q.lower())
+    start = max(0, i - width // 3) if i >= 0 else 0
+    piece = " ".join(text[start:start + width].split())
+    return ("…" if start else "") + piece + ("…" if start + width < len(text) else "")
+
+
 def _recips(m) -> list[str]:
     return [r for r in (m["recipients"] or "").strip(",").split(",") if r]
 
@@ -44,13 +52,16 @@ class Hub:
         self._event = asyncio.Event()                # wakes long-polling readers
 
     # ---------------------------------------------------------------- events
-    def _notify(self, mid: int) -> None:
-        msg = self.message_json(self.store.message(mid))
+    def broadcast(self, event: dict) -> None:
+        """Send an event to every open web viewer."""
         for q in list(self.listeners):
             try:
-                q.put_nowait({"type": "message", "message": msg})
+                q.put_nowait(event)
             except asyncio.QueueFull:
                 pass
+
+    def _notify(self, mid: int) -> None:
+        self.broadcast({"type": "message", "message": self.message_json(self.store.message(mid))})
         self._event.set()
         self._event = asyncio.Event()
 
@@ -129,14 +140,17 @@ class Hub:
         if row["n"] >= self.s.posts_per_min:
             raise HubError("rate limit: too many posts this minute")
 
-    def _check_chain(self, room: str) -> None:
+    def paused(self, room: str) -> bool:
         """Loop breaker: after max_chain agent-only messages in a row, a human has to speak."""
         n = self.s.max_chain
         if n <= 0:
-            return
+            return False
         rows = self.store.q("SELECT human FROM messages WHERE room=? ORDER BY id DESC LIMIT ?", (room, n))
-        if len(rows) >= n and not any(r["human"] for r in rows):
-            raise HubError(f"paused: {n} agent messages in a row in '{room}'; waiting for a human")
+        return len(rows) >= n and not any(r["human"] for r in rows)
+
+    def _check_chain(self, room: str) -> None:
+        if self.paused(room):
+            raise HubError(f"paused: {self.s.max_chain} agent messages in a row in '{room}'; waiting for a human")
 
     # ------------------------------------------------------------------ read
     def read_rows(self, agent: str, room: str | None = None, everything: bool = False):
@@ -228,6 +242,28 @@ class Hub:
         if not rows:
             return "(empty)"
         return "recent: " + " | ".join(f"{x['sender']}: {one_line(x['summary'], 70)}" for x in rows[::-1])
+
+    # ---------------------------------------------------------------- search
+    def search(self, q: str, room: str | None = None, limit: int = 50) -> list[dict]:
+        """Viewer search: newest messages whose summary or body contains q (case-insensitive for ASCII)."""
+        q = " ".join((q or "").split())
+        if len(q) < 2:
+            raise HubError("search for at least 2 characters")
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where = "(summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')"
+        args: list = [like, like]
+        if room:
+            where += " AND room=?"
+            args.append(room.strip().lower().lstrip("#"))
+        rows = self.store.q(f"SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?",
+                            (*args, max(1, min(int(limit), 200))))
+        out = []
+        for m in rows:
+            j = self.message_json(m)
+            body = j.pop("body")  # bodies can be huge; send a line around the match instead
+            j["snippet"] = j["summary"] if not body or q.lower() in j["summary"].lower() else _snippet(body, q)
+            out.append(j)
+        return out
 
     # ------------------------------------------------------------------- get
     def get(self, agent: str, mid: int, offset: int = 0) -> str:

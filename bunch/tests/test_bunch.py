@@ -144,8 +144,11 @@ def test_chain_limit_and_human_reset(env):
         assert tool(c, k["alice" if i % 2 else "bob"], "post", room="loop", text=f"m{i}")[1] is False
     out, err = tool(c, k["alice"], "post", room="loop", text="again")
     assert err and "waiting for a human" in out
+    paused = lambda: {r["name"]: r["paused"] for r in c.get("/api/admin/rooms", headers=adm()).json()}["loop"]  # noqa: E731
+    assert paused() is True
     r = c.post("/api/admin/rooms/loop/messages", json={"room": "loop", "text": "carry on"}, headers=adm())
     assert r.status_code == 200
+    assert paused() is False
     assert tool(c, k["alice"], "post", room="loop", text="thanks")[1] is False
 
 
@@ -353,3 +356,168 @@ def test_mcp_read_wait_returns_when_empty(env):
     c, k, *_ = env
     text, err = tool(c, k["alice"], "read", wait=1)
     assert not err and text == "no new messages"
+
+
+# ---------------------------------------------------------- viewer catch-up
+def test_viewer_messages_after_id(env):
+    c, k, *_ = env
+    for i in range(4):
+        tool(c, k["alice"], "post", room="cu", text=f"m{i}")
+    r = c.get("/api/admin/rooms/cu/messages", params={"after": 2}, headers=adm())
+    assert [m["summary"] for m in r.json()] == ["m2", "m3"]
+    r = c.get("/api/admin/rooms/cu/messages", params={"after": 0, "limit": 2}, headers=adm())
+    assert [m["id"] for m in r.json()] == [1, 2]
+
+
+def test_password_change_signs_out_other_sessions(env):
+    c, k, app, _ = env
+    app.state.hub.store.create_user("pat", "first password")
+    other = TestClient(app)
+    for cl in (c, other):
+        assert cl.post("/api/auth/login", json={"name": "pat", "password": "first password"}).status_code == 200
+    # pat changes their own password: this session stays in, the other one is signed out.
+    assert c.put("/api/admin/users/pat/password", json={"password": "second password"}).status_code == 200
+    assert c.get("/api/auth/me").status_code == 200
+    assert other.get("/api/auth/me").status_code == 401
+    # an admin reset signs pat out everywhere
+    assert c.put("/api/admin/users/pat/password", json={"password": "third password"}, headers=adm()).status_code == 200
+    c.headers.pop("Authorization", None)
+    assert c.get("/api/auth/me").status_code == 401
+
+
+def test_failed_logins_are_pruned(env, monkeypatch):
+    import bunch.app as appmod
+    c, *_ = env
+    now = [1000.0]
+    monkeypatch.setattr(appmod.time, "time", lambda: now[0])
+    for _ in range(10):
+        c.post("/api/auth/login", json={"name": "x", "password": "y"})
+    assert c.post("/api/auth/login", json={"name": "x", "password": "y"}).status_code == 429
+    now[0] += 301  # old failures expire, and the entry is dropped rather than kept forever
+    assert c.post("/api/auth/login", json={"name": "x", "password": "y"}).status_code == 401
+
+
+def test_secure_cookie_setting(tmp_path):
+    s = Settings(db_path=str(tmp_path / "s.db"), admin_token=ADMIN, secure_cookies=True)
+    app = create_app(s, FakeLLM())
+    app.state.hub.store.create_user("pat", "first password")
+    with TestClient(app, base_url="https://testserver") as c:
+        r = c.post("/api/auth/login", json={"name": "pat", "password": "first password"})
+        assert "secure" in r.headers["set-cookie"].lower()
+
+
+def test_admin_flag_and_last_admin_guard(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    st.create_user("ann", "password one", admin=True)
+    st.create_user("ben", "password two")
+    assert c.put("/api/admin/users/ben/admin", json={"admin": True}, headers=adm()).json()["admin"] is True
+    assert c.put("/api/admin/users/ann/admin", json={"admin": False}, headers=adm()).status_code == 200
+    assert c.put("/api/admin/users/alice/admin", json={"admin": True}, headers=adm()).status_code == 404
+    # ben is now the only admin: signed in, he can't demote or delete himself
+    c.post("/api/auth/login", json={"name": "ben", "password": "password two"})
+    r = c.put("/api/admin/users/ben/admin", json={"admin": False})
+    assert r.status_code == 400 and "last admin" in r.text
+    assert c.delete("/api/admin/users/ben").status_code == 400
+    assert c.delete("/api/admin/users/ann").status_code == 200
+    # ...but the admin token is never locked out
+    assert c.put("/api/admin/users/ben/admin", json={"admin": False}, headers=adm()).status_code == 200
+    # members can't flip the flag
+    st.create_user("cat", "password three")
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"name": "cat", "password": "password three"})
+    assert c.put("/api/admin/users/cat/admin", json={"admin": True}).status_code == 403
+
+
+def test_agent_list_shows_persona_to_admins_only(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    c.put("/api/admin/agents/alice/info", json={"model": "local/small", "system": "be terse"}, headers=adm())
+    c.put("/api/admin/agents/bob/budget", json={"daily_tokens": 0}, headers=adm())
+    rows = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
+    assert rows["alice"]["system"] == "be terse" and rows["alice"]["budget_set"] is None
+    assert rows["bob"]["budget_set"] == 0
+    st.create_user("pat", "password one")
+    c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
+    rows = {a["name"]: a for a in c.get("/api/admin/agents").json()}
+    assert rows["alice"]["system"] is None
+
+
+# ------------------------------------------------------------------- search
+def test_viewer_search(env):
+    c, k, *_ = env
+    tool(c, k["alice"], "post", room="dev", text="the Deploy failed on staging")
+    tool(c, k["bob"], "post", room="ops", text="deploy fixed")
+    long = "x" * 400 + " the needle is here " + "y" * 400
+    tool(c, k["bob"], "post", room="ops", text=long, summary="a long log")
+    tool(c, k["bob"], "post", room="ops", text="100% done_ok")
+    r = c.get("/api/admin/search", params={"q": "deploy"}, headers=adm()).json()
+    assert [m["room"] for m in r] == ["ops", "dev"]  # newest first, case-insensitive
+    assert c.get("/api/admin/search", params={"q": "deploy", "room": "#dev"}, headers=adm()).json()[0]["id"] == 1
+    hit = c.get("/api/admin/search", params={"q": "needle"}, headers=adm()).json()[0]
+    assert "body" not in hit and "needle" in hit["snippet"] and len(hit["snippet"]) < 200
+    assert hit["snippet"].startswith("…") and hit["snippet"].endswith("…")
+    assert len(c.get("/api/admin/search", params={"q": "0%"}, headers=adm()).json()) == 1   # % is literal
+    assert c.get("/api/admin/search", params={"q": "o_e"}, headers=adm()).json() == []      # _ is literal
+    assert c.get("/api/admin/search", params={"q": "x"}, headers=adm()).status_code == 400
+    assert c.get("/api/admin/search", params={"q": "deploy"}).status_code == 401
+
+
+def test_auto_agent_sends_typing_events(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    q = asyncio.Queue()
+    hub.listeners.add(q)
+    hub.post("human", "lobby", "@helper hi", human=True)
+    asyncio.run(autoreply_once(hub))
+    events = [q.get_nowait() for _ in range(q.qsize())]
+    kinds = [(e["type"], e.get("agent"), e.get("done", False)) for e in events]
+    assert kinds == [("message", None, False), ("typing", "helper", False), ("typing", "helper", True),
+                     ("message", None, False)]
+    assert events[1]["room"] == "lobby"
+
+
+# --------------------------------------------------------------- moderation
+def test_admin_deletes_message(env):
+    c, k, app, _ = env
+    tool(c, k["alice"], "post", room="mod", text="oops my key is sk-123")
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"token": ADMIN})
+        assert ws.receive_json()["type"] == "ready"
+        assert c.delete("/api/admin/messages/1", headers=adm()).json() == {"deleted": 1}
+        assert ws.receive_json() == {"type": "deleted", "id": 1, "room": "mod"}
+    assert c.get("/api/admin/rooms/mod/messages", headers=adm()).json() == []
+    assert tool(c, k["bob"], "get", id=1)[1]  # gone for agents too
+    assert c.delete("/api/admin/messages/1", headers=adm()).status_code == 404
+    app.state.hub.store.create_user("pat", "password one")
+    c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
+    tool(c, k["alice"], "post", room="mod", text="another")
+    assert c.delete("/api/admin/messages/2").status_code == 403
+
+
+def test_deleting_a_summarized_message_resets_the_room_summary(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    for i in range(3):
+        tool(c, k["alice"], "post", room="s", text=f"m{i}")
+    st.x("UPDATE rooms SET summary='mentions m1', summary_upto=3 WHERE name='s'")
+    c.delete("/api/admin/messages/2", headers=adm())
+    assert st.room("s")["summary"] == "" and st.room("s")["summary_upto"] == 0
+
+
+# ------------------------------------------------------------------- backup
+def test_cli_backup(env, tmp_path, monkeypatch, capsys):
+    import sqlite3
+    from bunch import cli
+    c, k, app, _ = env
+    tool(c, k["alice"], "post", room="b", text="keep me")
+    monkeypatch.setenv("BUNCH_DB", app.state.hub.s.db_path)
+    out = str(tmp_path / "copy.db")
+    assert cli.main(["backup", out]) == 0
+    db = sqlite3.connect(out)
+    assert db.execute("SELECT summary FROM messages").fetchone()[0] == "keep me"
+    assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert cli.main(["backup", app.state.hub.s.db_path]) == 1   # refuses to overwrite the live file
+    assert "live database" in capsys.readouterr().err

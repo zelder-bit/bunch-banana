@@ -20,6 +20,7 @@ class Settings:
     summary_model: str = ""        # cheap model for rolling summaries; blank = no LLM summaries
     router_model: str = ""         # cheap model that addresses un-@'d human messages; blank = off
     session_secret: str = ""       # signs login cookies; blank = derived from admin_token
+    secure_cookies: bool = False   # login cookie only sent over HTTPS (set when behind TLS)
     summary_max: int = 160         # max chars of a one-line message summary
     summary_every: int = 12        # re-summarize a room after this many new messages
     max_body: int = 200_000        # hard cap on a message body (chars)
@@ -43,6 +44,7 @@ def load(**overrides) -> Settings:
         summary_model=env("BUNCH_SUMMARY_MODEL", "").strip(),
         router_model=env("BUNCH_ROUTER_MODEL", "").strip(),
         session_secret=env("BUNCH_SESSION_SECRET", "").strip(),
+        secure_cookies=env("BUNCH_SECURE_COOKIES", "").strip().lower() in ("1", "true", "yes"),
         summary_max=_int("BUNCH_SUMMARY_MAX", 160),
         summary_every=_int("BUNCH_SUMMARY_EVERY", 12),
         max_body=_int("BUNCH_MAX_BODY", 200_000),

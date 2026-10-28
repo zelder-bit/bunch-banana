@@ -74,6 +74,10 @@ class PasswordIn(BaseModel):
     password: str
 
 
+class AdminFlagIn(BaseModel):
+    admin: bool
+
+
 class BudgetIn(BaseModel):
     daily_tokens: int | None = None
 
@@ -82,6 +86,11 @@ def _bearer(value: str | None) -> str:
     if value and value.lower().startswith("bearer "):
         return value[7:].strip()
     return ""
+
+
+def _pw_mark(pw_hash: str) -> str:
+    """Short fingerprint of a password hash, kept in the session: a new password signs out old sessions."""
+    return hashlib.sha256((pw_hash or "").encode()).hexdigest()[:16]
 
 
 def create_app(settings: Settings | None = None, llm: LLM | None = None) -> FastAPI:
@@ -112,7 +121,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     app.state.hub = hub
     secret = s.session_secret or hmac.new(s.admin_token.encode(), b"bunch-session", hashlib.sha256).hexdigest()
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="bunch_session",
-                       max_age=30 * 86400, same_site="lax", https_only=False)
+                       max_age=30 * 86400, same_site="lax", https_only=s.secure_cookies)
     failed_logins: dict[str, list[float]] = {}
 
     # ---------------------------------------------------------------- auth
@@ -127,7 +136,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     def session_user(session) -> tuple[str, bool] | None:
         row = store.agent(session.get("user", "")) if session.get("user") else None
-        if row and row["kind"] == "human" and row["pw_hash"]:
+        if row and row["kind"] == "human" and row["pw_hash"] and session.get("pw") == _pw_mark(row["pw_hash"]):
             return row["name"], bool(row["is_admin"])
         return None
 
@@ -167,6 +176,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def login(body: LoginIn, request: Request):
         ip = request.client.host if request.client else "?"
         now = time.time()
+        for old in [k for k, ts in failed_logins.items() if ts[-1] < now - 300]:  # keep the dict small
+            del failed_logins[old]
         recent = [t for t in failed_logins.get(ip, []) if t > now - 300]
         if len(recent) >= 10:
             raise HTTPException(429, "too many failed sign-ins; try again in a few minutes")
@@ -176,7 +187,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             await asyncio.sleep(0.5)
             raise HTTPException(401, "wrong name or password")
         failed_logins.pop(ip, None)
+        row = store.agent(row["name"])  # verify_user may have re-hashed the password
         request.session["user"] = row["name"]
+        request.session["pw"] = _pw_mark(row["pw_hash"])
         return {"name": row["name"], "admin": bool(row["is_admin"])}
 
     @app.post("/api/auth/logout")
@@ -265,14 +278,17 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         for r in store.rooms():
             last = store.one("SELECT MAX(id) AS id, COUNT(*) AS n FROM messages WHERE room=?", (r["name"],))
             out.append({"name": r["name"], "summary": hub.room_summary(r["name"]),
-                        "count": last["n"], "last_id": last["id"] or 0})
+                        "count": last["n"], "last_id": last["id"] or 0, "paused": hub.paused(r["name"])})
         return out
 
     @app.get("/api/admin/rooms/{room}/messages")
-    async def admin_messages(request: Request, room: str, before: int | None = None, limit: int = 100,
-                             authorization: str | None = Header(None)):
+    async def admin_messages(request: Request, room: str, before: int | None = None, after: int | None = None,
+                             limit: int = 100, authorization: str | None = Header(None)):
         viewer(request, authorization)
         limit = max(1, min(limit, 500))
+        if after is not None:  # catch-up after a reconnect: oldest first
+            rows = store.q("SELECT * FROM messages WHERE room=? AND id>? ORDER BY id LIMIT ?", (room, after, limit))
+            return [hub.message_json(m) for m in rows]
         rows = store.q("SELECT * FROM messages WHERE room=? AND id<? ORDER BY id DESC LIMIT ?",
                        (room, before or 2**62, limit))
         return [hub.message_json(m) for m in rows[::-1]]
@@ -288,15 +304,31 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         return {"result": hub.post(name, room, body.text, to=to, summary=body.summary,
                                    reply_to=body.re, human=True)}
 
+    @app.get("/api/admin/search")
+    async def admin_search(request: Request, q: str = "", room: str | None = None, limit: int = 50,
+                           authorization: str | None = Header(None)):
+        viewer(request, authorization)
+        return hub.search(q, room, limit)
+
+    @app.delete("/api/admin/messages/{mid}")
+    async def admin_delete_message(request: Request, mid: int, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        row = store.delete_message(mid)
+        if not row:
+            raise HTTPException(404, "no such message")
+        hub.broadcast({"type": "deleted", "id": mid, "room": row["room"]})
+        return {"deleted": mid}
+
     @app.get("/api/admin/agents")
     async def admin_agents(request: Request, authorization: str | None = Header(None)):
-        viewer(request, authorization)
+        _, admin = viewer(request, authorization)
         out = []
         for a in store.agents():
             u = store.usage_today(a["name"])
             out.append({"name": a["name"], "kind": a["kind"], "last_seen": a["last_seen"],
                         "description": a["description"], "model": a["model"],
                         "daily_tokens": hub.budget(a["name"]) if a["kind"] == "agent" else None,
+                        "budget_set": a["daily_tokens"], "system": a["system"] if admin else None,
                         "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"]})
         for system in ("_summarizer", "_router"):
             u = store.usage_today(system)
@@ -364,12 +396,31 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_password(name, body.password)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if who == name and not is_admin(_bearer(authorization)):  # keep the person who changed it signed in
+            request.session["pw"] = _pw_mark(store.agent(name)["pw_hash"])
         return {"name": name}
+
+    @app.put("/api/admin/users/{name}/admin")
+    async def admin_user_flag(request: Request, name: str, body: AdminFlagIn,
+                              authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        try:
+            # signed-in admins can't demote the last admin; the admin token can never be locked out
+            store.set_admin(name, body.admin, keep_one=not is_admin(_bearer(authorization)))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"name": name, "admin": body.admin}
 
     @app.delete("/api/admin/users/{name}")
     async def admin_delete_user(request: Request, name: str, authorization: str | None = Header(None)):
         require_admin(request, authorization)
-        if not store.delete_user(name):
+        try:
+            deleted = store.delete_user(name, keep_one=not is_admin(_bearer(authorization)))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not deleted:
             raise HTTPException(404, "no such user")
         return {"deleted": name}
 

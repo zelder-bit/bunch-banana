@@ -102,6 +102,17 @@ class Store:
                 if col not in have:
                     self.db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
 
+    def backup(self, path: str) -> None:
+        """Copies the database to path using SQLite's online backup, so it's safe while the hub runs."""
+        tmp = path + ".tmp"
+        dst = sqlite3.connect(tmp)
+        try:
+            with self.lock:
+                self.db.backup(dst)
+        finally:
+            dst.close()
+        os.replace(tmp, path)  # never leave a half-written file at path
+
     # -- low level -------------------------------------------------------
     def q(self, sql: str, args=()) -> list[sqlite3.Row]:
         with self.lock:
@@ -180,8 +191,26 @@ class Store:
     def users(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM agents WHERE kind='human' AND pw_hash IS NOT NULL ORDER BY name")
 
-    def delete_user(self, name: str) -> bool:
+    def _check_not_last_admin(self, name: str) -> None:
+        row = self.agent(name)
+        if row and row["is_admin"]:
+            n = self.one("SELECT COUNT(*) AS n FROM agents WHERE kind='human' AND pw_hash IS NOT NULL AND is_admin=1")["n"]
+            if n <= 1:
+                raise ValueError("can't remove the last admin")
+
+    def set_admin(self, name: str, admin: bool, keep_one: bool = True) -> None:
+        row = self.agent(name)
+        if not row or row["kind"] != "human" or not row["pw_hash"]:
+            raise LookupError("no such user")
+        if not admin and keep_one:
+            self._check_not_last_admin(name)
+        self.x("UPDATE agents SET is_admin=? WHERE name=?", (int(admin), name))
+
+    def delete_user(self, name: str, keep_one: bool = False) -> bool:
+        if keep_one:
+            self._check_not_last_admin(name)
         cur = self.x("DELETE FROM agents WHERE name=? AND kind='human' AND pw_hash IS NOT NULL", (name,))
+        self.x("DELETE FROM cursors WHERE agent=?", (name,))
         return cur.rowcount > 0
 
     def ensure_human(self, name: str) -> None:
@@ -258,6 +287,15 @@ class Store:
             (room, sender, int(human), rec, summary, body, reply_to, int(auto_sum), time.time()),
         )
         return cur.lastrowid
+
+    def delete_message(self, mid: int):
+        """Removes a message for good. Returns the deleted row, or None."""
+        row = self.message(mid)
+        if row:
+            self.x("DELETE FROM messages WHERE id=?", (mid,))
+            # the rolling summary may quote it: start the summary over
+            self.x("UPDATE rooms SET summary='', summary_upto=0 WHERE name=? AND summary_upto>=?", (row["room"], mid))
+        return row
 
     def message(self, mid: int):
         return self.one("SELECT * FROM messages WHERE id=?", (mid,))

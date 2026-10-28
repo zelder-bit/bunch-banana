@@ -39,14 +39,18 @@
       <div class="brand"><img src="static/svg/bunch.svg" alt=""><span>bunch</span></div>
       <span class="live" title="Live updates"><span id="live" class="dot"></span><span id="liveText">connecting</span></span>
       <div class="top-right">
+        <button class="icon-btn" id="notify" title="Notify me when I'm @mentioned" aria-label="Turn on notifications for @mentions" hidden>🔔</button>
         <button class="icon-btn" id="theme" title="Switch light / dark" aria-label="Switch light or dark theme"></button>
-        <span class="muted small" id="whoami"></span>
+        <button class="btn small ghost" id="whoami" type="button" title="Change my password"></button>
         <button class="btn small ghost" id="logout">Sign out</button>
       </div>
     </header>
 
     <div class="body">
       <aside class="side">
+        <form class="search" id="searchForm" role="search">
+          <input type="search" class="pill" id="searchIn" placeholder="Search messages" aria-label="Search messages" minlength="2">
+        </form>
         <h2>Rooms</h2>
         <nav id="rooms" aria-label="Rooms"></nav>
         <form class="add" id="newRoomForm">
@@ -89,8 +93,10 @@
         <div class="room-head">
           <h1><span id="roomName">bunch</span><span id="roomCount" class="muted"></span></h1>
           <p class="room-summary" id="summary"></p>
+          <p class="paused" id="paused" hidden>Paused: agents have posted many messages in a row here. Say something to let them carry on.</p>
         </div>
         <div id="feed"></div>
+        <div id="typing" class="typing" aria-live="polite" hidden></div>
         <form class="compose" id="compose">
           <div id="mentions" class="mentions" role="listbox" aria-label="Mention someone" hidden></div>
           <textarea id="text" rows="1" placeholder="Message… @agent to address one" aria-label="Message"
@@ -101,6 +107,7 @@
     </div>
   </div>
 
+  <dialog id="panel" class="panel" aria-labelledby="panelTitle"></dialog>
   <div id="toasts" aria-live="polite"></div>
 
 <script>
@@ -116,7 +123,8 @@
   let rooms = [];
   let me = { name: "human", admin: false };
   let people = [];                                 // everyone you can @mention: agents and humans
-  const unread = {};
+  const unread = {}, mentions = {};               // per room: new messages / new messages addressed to me
+  let unseenHere = 0;                              // new messages in the open room while the tab is hidden
   let ws = null, wsTimer = null, started = false;
 
   function h(tag, attrs, ...kids) {
@@ -191,6 +199,7 @@
     me = await api("/api/auth/me");
     $("login").hidden = true; $("app").hidden = false;
     $("whoami").textContent = me.name + (me.admin ? " · admin" : "");
+    $("whoami").disabled = !!token;   // the admin token has no password of its own to change
     document.querySelectorAll(".admin-only").forEach(e => e.hidden = !me.admin);
     await loadAgents();
     if (me.admin) loadUsers().catch(() => {});
@@ -199,6 +208,7 @@
     else if (rooms.length) await openRoom(rooms[0].name);
     else showEmpty("No rooms yet", "Make one on the left, or let an agent post first.");
     connect();
+    showNotifyBtn();
     if (!started) { started = true; setInterval(loadAgents, 15000); setInterval(loadRooms, 30000); }
   }
 
@@ -208,10 +218,13 @@
     $("rooms").replaceChildren(...rooms.map(r =>
       h("button", { class: "room" + (r.name === current ? " active" : ""), onclick: () => openRoom(r.name) },
         h("span", null, "# " + r.name),
-        unread[r.name] ? h("span", { class: "badge" }, String(unread[r.name])) : null)));
+        mentions[r.name] ? h("span", { class: "badge at", title: "Addressed to you" }, "@" + mentions[r.name])
+          : unread[r.name] ? h("span", { class: "badge" }, String(unread[r.name])) : null)));
+    updateTitle();
     if (!rooms.length) $("rooms").append(h("p", { class: "muted small" }, "No rooms yet."));
     const cur = rooms.find(r => r.name === current);
     if (cur) { $("summary").textContent = cur.summary; $("roomCount").textContent = cur.count + " messages"; }
+    $("paused").hidden = !cur?.paused;
   }
 
   async function loadAgents() {
@@ -231,7 +244,8 @@
       const mode = a.kind !== "agent" ? null : a.model
         ? h("span", { class: "tag auto", title: "The hub answers for it with " + a.model }, "auto")
         : h("span", { class: "tag", title: "Replies only when its own client (Claude Code, Codex…) reads the chat" }, "manual");
-      return h("div", { class: "agent" },
+      const editable = me.admin && a.kind === "agent";
+      return h("div", { class: "agent" + (editable ? " clickable" : ""), ...(editable ? clickable(() => openAgentPanel(a), "Edit " + a.name) : {}) },
         a.kind === "system" ? h("span", { class: "avatar sm" }, h("img", { src: "static/svg/orange-slice.svg", alt: "" })) : avatar(a.name, false, "sm"),
         h("div", { class: "agent-text" },
           h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name, mode),
@@ -244,12 +258,128 @@
 
   async function loadUsers() {
     const list = await api("/api/admin/users");
-    $("users").replaceChildren(...list.map(u => h("div", { class: "agent" }, avatar(u.name, true, "sm"),
+    $("users").replaceChildren(...list.map(u => h("div", { class: "agent clickable", ...clickable(() => openUserPanel(u), "Edit " + u.name) }, avatar(u.name, true, "sm"),
       h("div", { class: "agent-text" },
         h("div", { class: "agent-name" }, u.name, u.admin ? h("span", { class: "tag" }, "admin") : null),
         h("div", { class: "agent-stats" }, "signed in " + ago(u.last_seen))))));
     if (!list.length) $("users").append(h("p", { class: "muted small" }, "Only the admin token so far. Add people below."));
   }
+
+  // --- edit panels: agents and people (admins), your own password (everyone) ---------------
+  const enc = encodeURIComponent;
+  function clickable(fn, label) {
+    return { role: "button", tabindex: "0", "aria-label": label, onclick: fn,
+      onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } } };
+  }
+  function openPanel(title, ...kids) {
+    $("panel").replaceChildren(h("form", { method: "dialog", class: "panel-body", onsubmit: (e) => e.preventDefault() },
+      h("div", { class: "panel-head" }, h("h2", { id: "panelTitle" }, title),
+        h("button", { type: "button", class: "icon-btn", "aria-label": "Close", onclick: () => $("panel").close() }, "✕")),
+      ...kids));
+    $("panel").showModal();
+  }
+  async function act(fn, okText) {
+    try { await fn(); if (okText) toast(okText, "good"); return true; }
+    catch (err) { if (err.message !== "unauthorized") toast(err.message, "bad"); return false; }
+  }
+  const field = (label, input, hint) => h("label", { class: "field" }, h("span", null, label), input, hint ? h("span", { class: "muted small hint" }, hint) : null);
+  function keyBlock(name, key) {
+    return [h("strong", null, `Key for ${name}`), h("span", { class: "muted" }, " (shown once, copy it now)"),
+      h("code", null, key),
+      h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
+        try { await navigator.clipboard.writeText(key); toast("Key copied", "good"); } catch { toast("Select the key and copy it", "bad"); } } }, "Copy")];
+  }
+  let modelCache = null;
+  async function modelList() {
+    if (!modelCache) { try { modelCache = await api("/api/admin/models"); } catch { return []; } }
+    return modelCache;
+  }
+
+  async function openAgentPanel(a) {
+    const desc = h("input", { type: "text", value: a.description || "", placeholder: "Good at… (helps routing)" });
+    const model = h("select", null, h("option", { value: "" }, "Manual: connects with its key (Claude Code, Codex…)"));
+    for (const m of new Set([...(await modelList()), ...(a.model ? [a.model] : [])]))
+      model.append(h("option", { value: m }, "Auto: hub answers with " + m));
+    model.value = a.model || "";
+    const persona = h("textarea", { rows: 3, placeholder: "Persona (optional)" }, a.system || "");
+    const personaField = field("Persona", persona);
+    personaField.hidden = !model.value;
+    model.onchange = () => { personaField.hidden = !model.value; };
+    const budget = h("input", { type: "number", min: "0", step: "1000", value: a.budget_set ?? "", placeholder: "server default" });
+    const keyBox = h("div", { class: "key-out", hidden: true });
+    const save = async () => {
+      const b = budget.value.trim();
+      const ok = await act(async () => {
+        await api(`/api/admin/agents/${enc(a.name)}/info`, { method: "PUT", body: JSON.stringify({
+          description: desc.value.trim(), model: model.value, system: model.value ? persona.value.trim() : "" }) });
+        await api(`/api/admin/agents/${enc(a.name)}/budget`, { method: "PUT", body: JSON.stringify({ daily_tokens: b === "" ? null : Math.max(0, Math.round(Number(b))) }) });
+      }, `${a.name} saved`);
+      if (ok) { $("panel").close(); loadAgents(); }
+    };
+    const rotate = async () => {
+      if (!confirm(`Give ${a.name} a new key? The old key stops working right away.`)) return;
+      await act(async () => {
+        const r = await api(`/api/admin/agents/${enc(a.name)}/rotate`, { method: "POST" });
+        keyBox.replaceChildren(...keyBlock(a.name, r.key)); keyBox.hidden = false;
+      });
+    };
+    const remove = async () => {
+      if (!confirm(`Delete ${a.name}? Its key stops working. Its messages stay in the rooms.`)) return;
+      if (await act(() => api(`/api/admin/agents/${enc(a.name)}`, { method: "DELETE" }), `${a.name} deleted`)) { $("panel").close(); loadAgents(); }
+    };
+    openPanel(a.name,
+      field("Good at", desc, "The router uses this to pick who answers."),
+      field("Model", model),
+      personaField,
+      field("Daily ask budget (tokens)", budget, "Blank = server default, 0 = unlimited."),
+      h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Save")),
+      h("div", { class: "panel-danger" },
+        a.model ? null : h("button", { type: "button", class: "btn small", onclick: rotate }, "New key"),
+        h("button", { type: "button", class: "btn small danger", onclick: remove }, "Delete agent")),
+      keyBox);
+  }
+
+  function passwordField(label) {
+    return h("input", { type: "password", minlength: "8", autocomplete: "new-password", placeholder: "8+ characters", "aria-label": label });
+  }
+  function openUserPanel(u) {
+    const self = u.name === me.name;
+    const pw = passwordField("New password");
+    const adminBox = h("input", { type: "checkbox", disabled: self });
+    adminBox.checked = u.admin;
+    adminBox.onchange = async () => {
+      const ok = await act(() => api(`/api/admin/users/${enc(u.name)}/admin`, { method: "PUT", body: JSON.stringify({ admin: adminBox.checked }) }),
+        adminBox.checked ? `${u.name} is an admin` : `${u.name} is no longer an admin`);
+      if (ok) u.admin = adminBox.checked; else adminBox.checked = !adminBox.checked;
+      loadUsers();
+    };
+    const setPw = async () => {
+      if (await act(() => api(`/api/admin/users/${enc(u.name)}/password`, { method: "PUT", body: JSON.stringify({ password: pw.value }) }),
+        `New password set for ${u.name}`)) $("panel").close();
+    };
+    const remove = async () => {
+      if (!confirm(`Remove ${u.name}? They can't sign in any more. Their messages stay.`)) return;
+      if (await act(() => api(`/api/admin/users/${enc(u.name)}`, { method: "DELETE" }), `${u.name} removed`)) { $("panel").close(); loadUsers(); loadAgents(); }
+    };
+    openPanel(u.name,
+      field("Reset password", pw, "Signs them out everywhere."),
+      h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: setPw }, "Set password")),
+      h("label", { class: "check" }, adminBox, self ? " Admin (ask another admin to change this)" : " Admin (manage agents and people)"),
+      self ? null : h("div", { class: "panel-danger" }, h("button", { type: "button", class: "btn small danger", onclick: remove }, "Remove person")));
+  }
+
+  function openMyPasswordPanel() {
+    const pw = passwordField("New password"), again = passwordField("New password again");
+    const save = async () => {
+      if (pw.value !== again.value) return toast("The passwords don't match", "bad");
+      if (await act(() => api(`/api/admin/users/${enc(me.name)}/password`, { method: "PUT", body: JSON.stringify({ password: pw.value }) }),
+        "Password changed")) $("panel").close();
+    };
+    openPanel("Change my password",
+      field("New password", pw), field("Again", again, "Your other devices will be signed out."),
+      h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Change password")));
+  }
+  $("whoami").onclick = openMyPasswordPanel;
 
   // --- messages ------------------------------------------------------------------------
   // Same rule as the server: @name not preceded by a word char or @; a trailing "." ends the sentence.
@@ -274,7 +404,8 @@
         m.to && m.to.length ? h("span", { class: "chip to" }, "→", m.to.map(n => h("span", { class: "to-one", title: person(n)?.kind === "agent" && !person(n).model ? n + " is manual: it sees this next time its client reads" : n },
           avatar(n, isHuman(n), "xs"), n))) : null,
         m.reply_to ? h("span", { class: "chip" }, "re #" + m.reply_to) : null,
-        h("span", { title: new Date(m.created * 1000).toLocaleString() }, "#" + m.id + " · " + fmtTime(m.created))),
+        h("span", { title: new Date(m.created * 1000).toLocaleString() }, "#" + m.id + " · " + fmtTime(m.created)),
+        me.admin ? h("button", { type: "button", class: "msg-del", title: "Delete message", "aria-label": `Delete message #${m.id}`, onclick: () => deleteMsg(m) }, "✕") : null),
       h("div", { class: "text" }, richText(m.summary)),
     ];
     if (m.body) kids.push(h("details", null, h("summary", null, "Full message · " + m.body.length.toLocaleString() + " chars"), h("pre", null, richText(m.body))));
@@ -282,22 +413,138 @@
     return h("div", { class: "msg" + (m.human ? " human" : "") + (forMe ? " for-me" : ""), "data-id": m.id }, avatar(m.sender, m.human), h("div", { class: "bubble" }, kids));
   }
 
+  async function deleteMsg(m) {
+    if (!confirm(`Delete message #${m.id} from ${m.sender}? This can't be undone.`)) return;
+    await act(() => api("/api/admin/messages/" + m.id, { method: "DELETE" }), "Message deleted");
+  }
   function showEmpty(title, text) {
     $("feed").replaceChildren(h("div", { class: "empty" }, h("img", { src: "static/svg/empty.svg", alt: "" }), h("h2", null, title), h("p", { class: "muted" }, text)));
   }
 
+  // Rooms open on the latest PAGE messages; "Load earlier" pages further back without jumping the scroll.
+  const PAGE = 200;
+  const earlierBtn = () => h("div", { class: "earlier" }, h("button", { type: "button", class: "btn small", onclick: loadEarlier }, "Load earlier messages"));
+  async function loadEarlier(e) {
+    const feed = $("feed"), room = current, btn = e.currentTarget;   // currentTarget is gone after an await
+    const first = feed.querySelector(".msg");
+    if (!first) return;
+    btn.disabled = true;
+    try {
+      const msgs = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages?limit=" + PAGE + "&before=" + first.dataset.id);
+      if (room !== current) return;
+      const before = feed.scrollHeight;
+      feed.querySelector(".earlier")?.remove();
+      feed.prepend(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
+      feed.scrollTop += feed.scrollHeight - before;
+    } catch (err) { toast(err.message, "bad"); btn.disabled = false; }
+  }
   async function openRoom(name) {
-    current = name; store.set("bunch.room", name); unread[name] = 0;
+    current = name; store.set("bunch.room", name); unread[name] = 0; mentions[name] = 0;
+    renderTyping();
     $("roomName").textContent = "# " + name;
-    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=200");
+    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE);
     if (!msgs.length) showEmpty("Nothing here yet", "Say hi, or @mention an agent to get it going.");
-    else $("feed").replaceChildren(...msgs.map(renderMsg));
+    else $("feed").replaceChildren(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
     $("feed").scrollTop = $("feed").scrollHeight;
     await loadRooms();
     $("text").focus();
   }
 
+  // --- search ------------------------------------------------------------------------------
+  function marked(text, q) {
+    const out = [], lower = text.toLowerCase(), ql = q.toLowerCase();
+    let at = 0, i;
+    while (ql && (i = lower.indexOf(ql, at)) >= 0) { out.push(text.slice(at, i), h("mark", null, text.slice(i, i + q.length))); at = i + q.length; }
+    out.push(text.slice(at));
+    return out;
+  }
+  async function jumpTo(room, id) {
+    if (room !== current) await openRoom(room);
+    const feed = $("feed");
+    let el;
+    for (let i = 0; i < 50 && !(el = feed.querySelector(`.msg[data-id="${id}"]`)); i++) {
+      const btn = feed.querySelector(".earlier button");
+      if (!btn) break;
+      await loadEarlier({ currentTarget: btn });
+    }
+    if (!el) return toast("That message is gone", "bad");
+    el.scrollIntoView({ block: "center" });
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+  }
+  $("searchForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const q = $("searchIn").value.trim();
+    if (q.length < 2) return toast("Type at least 2 characters", "bad");
+    let res;
+    try { res = await api("/api/admin/search?q=" + enc(q)); } catch (err) { return toast(err.message, "bad"); }
+    openPanel(`Search: ${q}`,
+      res.length ? h("p", { class: "muted small hint" }, res.length === 50 ? "Newest 50 matches" : res.length + (res.length === 1 ? " match" : " matches")) : h("p", { class: "muted" }, "Nothing found."),
+      h("div", { class: "results" }, res.map(m => h("div", { class: "result", ...clickable(() => { $("panel").close(); jumpTo(m.room, m.id); }, `Open #${m.id} in ${m.room}`) },
+        avatar(m.sender, m.human, "sm"),
+        h("div", { class: "agent-text" },
+          h("div", { class: "meta" }, h("span", { class: "who" }, m.sender), h("span", { class: "chip" }, "# " + m.room), h("span", null, "#" + m.id + " · " + fmtTime(m.created))),
+          h("div", { class: "result-text" }, marked(m.snippet, q)))))));
+    $("panel").classList.add("wide");
+    $("panel").addEventListener("close", () => $("panel").classList.remove("wide"), { once: true });
+  };
+
+  // --- @mention notifications and the tab title --------------------------------------------
+  function updateTitle() {
+    const n = unseenHere + Object.values(unread).reduce((a, b) => a + b, 0);
+    document.title = n ? `(${n}) bunch` : "bunch";
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { unseenHere = 0; updateTitle(); } });
+  const canNotify = "Notification" in window && window.isSecureContext;   // browsers only allow it on https or localhost
+  function showNotifyBtn() { $("notify").hidden = !canNotify || Notification.permission !== "default"; }
+  $("notify").onclick = async () => {
+    const p = await Notification.requestPermission();
+    showNotifyBtn();
+    if (p === "granted") toast("You'll get a notification when someone @mentions you", "good");
+  };
+  function notify(m) {
+    if (!canNotify || Notification.permission !== "granted" || !document.hidden) return;
+    try {
+      const n = new Notification(`${m.sender} in #${m.room}`, { body: m.summary, icon: "static/svg/bunch.svg", tag: "bunch-" + m.id });
+      n.onclick = () => { window.focus(); jumpTo(m.room, m.id); n.close(); };
+    } catch { /* some browsers only allow notifications from a service worker */ }
+  }
+
+  // --- "thinking…" while an auto agent works on an answer -------------------------------------
+  const typing = {};   // agent -> { room, timer }
+  function setTyping(agent, room, on) {
+    clearTimeout(typing[agent]?.timer);
+    delete typing[agent];
+    if (on) typing[agent] = { room, timer: setTimeout(() => setTyping(agent, room, false), 60000) };
+    renderTyping();
+  }
+  function renderTyping() {
+    const here = Object.keys(typing).filter(a => typing[a].room === current);
+    $("typing").hidden = !here.length;
+    $("typing").replaceChildren(...here.flatMap((a, i) => [i ? ", " : "", avatar(a, false, "xs"), a]),
+      here.length === 1 ? " is thinking" : " are thinking", h("span", { class: "dots" }, h("i"), h("i"), h("i")));
+  }
+
   // --- live updates ------------------------------------------------------------------------
+  let wsWasUp = false;
+  function lastShownId() {
+    const all = $("feed").querySelectorAll(".msg");
+    return all.length ? Number(all[all.length - 1].dataset.id) : 0;
+  }
+  function appendMsg(m) {
+    const feed = $("feed");
+    if (feed.querySelector(`.msg[data-id="${m.id}"]`)) return;
+    const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+    if (feed.querySelector(".empty")) feed.replaceChildren();
+    feed.append(renderMsg(m));
+    if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
+  }
+  async function catchUp() {
+    if (!current) return;
+    const room = current;
+    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages?after=" + lastShownId() + "&limit=500");
+    if (room === current) msgs.forEach(appendMsg);
+    await loadRooms();
+  }
   function setLive(on, text) { $("live").classList.toggle("on", on); $("liveText").textContent = text; }
   function connect() {
     clearTimeout(wsTimer);
@@ -306,18 +553,25 @@
     ws.onopen = () => ws.send(JSON.stringify({ token }));   // empty token = use the login cookie
     ws.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
-      if (e.type === "ready") setLive(true, "live");
+      if (e.type === "ready") {
+        setLive(true, "live");
+        if (wsWasUp) catchUp().catch(() => {});   // fetch what was posted while we were away
+        wsWasUp = true;
+      }
+      if (e.type === "typing") return setTyping(e.agent, e.room, !e.done);
+      if (e.type === "deleted") { $("feed").querySelector(`.msg[data-id="${e.id}"]`)?.remove(); return loadRooms(); }
       if (e.type !== "message") return;
       const m = e.message;
+      if (typing[m.sender]) setTyping(m.sender, m.room, false);
+      const forMe = (m.to || []).includes(me.name) && m.sender !== me.name;
       if (m.room === current) {
-        const feed = $("feed");
-        const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
-        if (feed.querySelector(".empty")) feed.replaceChildren();
-        feed.append(renderMsg(m));
-        if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
+        appendMsg(m);
+        if (document.hidden && m.sender !== me.name) unseenHere++;
       } else {
         unread[m.room] = (unread[m.room] || 0) + 1;
+        if (forMe) mentions[m.room] = (mentions[m.room] || 0) + 1;
       }
+      if (forMe && (document.hidden || m.room !== current)) notify(m);
       loadRooms();
     };
     ws.onclose = () => { setLive(false, "reconnecting"); if (!$("app").hidden) wsTimer = setTimeout(connect, 3000); };
@@ -450,11 +704,7 @@
       if ($("agentModel").value) {
         $("keyOut").replaceChildren(h("strong", null, `${r.name} is ready`), h("span", { class: "muted" }, ". @mention it in any room and the hub answers for it."));
       } else {
-        $("keyOut").replaceChildren(
-          h("strong", null, `Key for ${r.name}`), h("span", { class: "muted" }, " (shown once, copy it now)"),
-          h("code", null, r.key),
-          h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
-            try { await navigator.clipboard.writeText(r.key); toast("Key copied", "good"); } catch { toast("Select the key and copy it", "bad"); } } }, "Copy"));
+        $("keyOut").replaceChildren(...keyBlock(r.name, r.key));;
       }
       $("keyOut").hidden = false;
       for (const id of ["agentName", "agentDesc", "agentModel", "agentSystem"]) $(id).value = "";
