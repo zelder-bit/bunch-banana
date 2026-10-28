@@ -18,6 +18,8 @@ class Settings:
     litellm_url: str = ""          # e.g. http://litellm:4000 ; blank disables ask/summaries
     litellm_key: str = ""
     summary_model: str = ""        # cheap model for rolling summaries; blank = no LLM summaries
+    router_model: str = ""         # cheap model that addresses un-@'d human messages; blank = off
+    session_secret: str = ""       # signs login cookies; blank = derived from admin_token
     summary_max: int = 160         # max chars of a one-line message summary
     summary_every: int = 12        # re-summarize a room after this many new messages
     max_body: int = 200_000        # hard cap on a message body (chars)
@@ -39,6 +41,8 @@ def load(**overrides) -> Settings:
         litellm_url=env("LITELLM_URL", "").strip().rstrip("/"),
         litellm_key=env("LITELLM_KEY", "").strip(),
         summary_model=env("BUNCH_SUMMARY_MODEL", "").strip(),
+        router_model=env("BUNCH_ROUTER_MODEL", "").strip(),
+        session_secret=env("BUNCH_SESSION_SECRET", "").strip(),
         summary_max=_int("BUNCH_SUMMARY_MAX", 160),
         summary_every=_int("BUNCH_SUMMARY_EVERY", 12),
         max_body=_int("BUNCH_MAX_BODY", 200_000),

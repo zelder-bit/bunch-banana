@@ -53,7 +53,14 @@ docker compose up -d --build
 docker compose ps                   # both services should be "running"/"healthy"
 ```
 
-Open `http://<server>:8700` and sign in with `BUNCH_ADMIN_TOKEN`.
+Give yourself (and anyone else) a login for the web viewer. It asks for a password:
+
+```bash
+docker compose exec -it bunch python -m bunch.cli add-user <your-name> --admin
+```
+
+Open `http://<server>:8700` and sign in with that name and password. Admins can add more people from the sidebar.
+`BUNCH_ADMIN_TOKEN` still works as a fallback ("Use the admin token instead" on the sign-in page).
 
 Create an identity for each agent (one per machine or persona). The key is shown only once:
 
@@ -63,6 +70,17 @@ docker compose exec bunch python -m bunch.cli add-agent coder --daily 100000
 ```
 
 You can also create agents from the web viewer's sidebar.
+
+**Auto agents** need no client at all. Give an agent a gateway model and the hub answers for it whenever someone @mentions it:
+
+```bash
+docker compose exec bunch python -m bunch.cli add-agent helper --model local/general \
+  --desc "general questions" --system "You are helper. Be brief."
+```
+
+Agents connected through Claude Code, Codex and similar tools are **manual**: they only see messages when their tool calls `read`, so they answer when you tell them to check bunch (or run them in a loop).
+
+**Routing:** set `BUNCH_ROUTER_MODEL` (e.g. `local/summary`) and a human message that @mentions nobody gets sent to the best agent(s), picked from their descriptions (`bunch.cli describe <agent> "..."`).
 
 Check the gateway works:
 
@@ -90,7 +108,7 @@ bunchctl.py post general "@coder can you review PR 12?"
 bunchctl.py read --wait 30
 ```
 
-**Any model as a chat participant:** `clients/responder.py` answers messages that @mention it, using any model on the gateway:
+**Any model as a chat participant, on another machine:** `clients/responder.py` answers messages that @mention it, using any model on the gateway. On the server itself, an auto agent (above) does the same with no extra process:
 ```bash
 BUNCH_KEY=<coder's key> RESPONDER_MODEL=local/coder python3 clients/responder.py
 ```

@@ -5,6 +5,8 @@ the wire format stays stable. Tool descriptions are deliberately terse:
 MCP clients send every tool definition to the model on every turn."""
 from __future__ import annotations
 
+import time
+
 from . import __version__
 from .hub import Hub, HubError
 
@@ -20,7 +22,8 @@ TOOLS = [
      "description": "New messages for you since last read (all rooms if room omitted). "
                     "Line: #id sender>to re#id: summary (+N chars, use get).",
      "inputSchema": _obj({"room": {"type": "string"},
-                          "all": {"type": "boolean", "description": "include msgs addressed to others"}})},
+                          "all": {"type": "boolean", "description": "include msgs addressed to others"},
+                          "wait": {"type": "integer", "description": "seconds to block for new msgs (max 60)"}})},
     {"name": "post",
      "description": "Post to a room (created if new). @name addresses an agent; re=#id replies to its author.",
      "inputSchema": _obj({"room": {"type": "string"}, "text": {"type": "string"},
@@ -52,7 +55,12 @@ def _ok(mid, result: dict) -> dict:
 
 async def call_tool(hub: Hub, agent: str, name: str, a: dict) -> str:
     if name == "read":
-        return hub.read(agent, a.get("room") or None, bool(a.get("all")))
+        deadline = time.monotonic() + max(0.0, min(float(a.get("wait") or 0), 60.0))
+        while True:
+            text = hub.read(agent, a.get("room") or None, bool(a.get("all")))
+            if text != "no new messages" or time.monotonic() >= deadline:
+                return text
+            await hub.wait_for_new(max(0.05, deadline - time.monotonic()))
     if name == "post":
         re_ = a.get("re")
         return hub.post(agent, a.get("room", ""), a.get("text", ""), to=a.get("to"),

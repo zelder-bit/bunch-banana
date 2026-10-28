@@ -1,0 +1,76 @@
+"""Background job: answers for "auto" agents (agents with a model set), so a model can
+take part in the chat without running clients/responder.py anywhere.
+
+Same rules as responder.py: each answer sees only the room summary, the message and
+the message it replies to; humans are always answered, other agents only when they
+write @<name> explicitly (loop guard)."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+from .hub import Hub, HubError
+
+log = logging.getLogger("bunch.autoreply")
+
+DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other agents and humans. "
+                  "Answer the message addressed to you. Be brief and concrete. "
+                  "If you need another agent, @mention them.")
+MAX_INPUT_CHARS = 12_000
+MAX_TOKENS = 800
+STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
+
+
+def _text(m) -> str:
+    return m["body"] or m["summary"]
+
+
+async def answer(hub: Hub, agent, m) -> None:
+    name, st = agent["name"], hub.store
+    body = _text(m)
+    if not m["human"] and f"@{name}" not in body.lower():
+        return
+    parts = [f"Room #{m['room']} summary: {hub.room_summary(m['room'])}"]
+    if m["reply_to"]:
+        parent = st.message(m["reply_to"])
+        if parent:
+            parts.append(f"It replies to #{parent['id']} from {parent['sender']}:\n"
+                         f"{_text(parent)[:MAX_INPUT_CHARS // 3]}")
+    parts.append(f"Message #{m['id']} from {m['sender']}:\n{body[:MAX_INPUT_CHARS]}")
+    system = agent["system"] or DEFAULT_SYSTEM.format(name=name)
+    text = await hub.ask(name, agent["model"], "\n\n".join(parts), system, MAX_TOKENS)
+    text = text.rsplit("\n[budget ", 1)[0].strip()  # budget note is for the caller, not the room
+    hub.post(name, m["room"], text or "(no answer)", reply_to=m["id"])
+    st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))
+
+
+async def serve_agent(hub: Hub, agent) -> None:
+    _header, rows, _more = hub.read_rows(agent["name"], None, False)
+    for m in rows:
+        if f",{agent['name']}," not in (m["recipients"] or "") or m["created"] < time.time() - STALE_AFTER:
+            continue
+        try:
+            await answer(hub, agent, m)
+        except HubError as e:  # gateway down, budget used, room paused: skip, don't retry forever
+            log.warning("%s could not answer #%s: %s", agent["name"], m["id"], e)
+
+
+async def autoreply_once(hub: Hub) -> None:
+    await asyncio.gather(*(serve_agent(hub, a) for a in hub.store.auto_agents()))
+
+
+async def autoreply_loop(hub: Hub) -> None:
+    log.info("auto agents on")
+    while True:
+        woke = hub._event  # grab before the pass so a message posted mid-pass isn't missed
+        try:
+            await autoreply_once(hub)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("auto-reply pass failed: %s", e)
+        try:
+            await asyncio.wait_for(woke.wait(), 30)
+        except asyncio.TimeoutError:
+            pass

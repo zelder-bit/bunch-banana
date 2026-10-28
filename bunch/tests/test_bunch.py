@@ -242,3 +242,114 @@ def test_viewer_and_theme_assets_served(env):
     for path in ("/static/bunch.css", "/static/fonts/fredoka.woff2", "/static/fonts/nunito.woff2",
                  "/static/svg/orange.svg", "/static/svg/bunch.svg", "/static/svg/empty.svg"):
         assert c.get(path).status_code == 200, path
+
+
+# --------------------------------------------------------------- human logins
+def test_user_login_session_and_roles(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    st.create_user("pat", "correct horse", admin=False)
+    assert c.get("/api/auth/me").status_code == 401
+    assert c.post("/api/auth/login", json={"name": "pat", "password": "wrong pass"}).status_code == 401
+    assert c.post("/api/auth/login", json={"name": "nobody", "password": "whatever1"}).status_code == 401
+    r = c.post("/api/auth/login", json={"name": "Pat", "password": "correct horse"})
+    assert r.status_code == 200 and r.json() == {"name": "pat", "admin": False}
+    assert c.get("/api/auth/me").json() == {"name": "pat", "admin": False}
+    # Members chat as themselves, but can't manage agents or people.
+    assert c.post("/api/admin/rooms/general/messages", json={"room": "general", "text": "hi @alice."}).status_code == 200
+    msg = c.get("/api/admin/rooms/general/messages").json()[-1]
+    assert msg["sender"] == "pat" and msg["human"] and msg["to"] == ["alice"]
+    assert c.post("/api/admin/agents", json={"name": "x"}).status_code == 403
+    assert c.get("/api/admin/users").status_code == 403
+    assert c.put("/api/admin/users/pat/password", json={"password": "new password"}).status_code == 200
+    with c.websocket_connect("/ws") as ws:   # the login cookie is enough for live updates
+        ws.send_json({})
+        assert ws.receive_json()["type"] == "ready"
+    c.post("/api/auth/logout")
+    assert c.get("/api/auth/me").status_code == 401
+    assert c.post("/api/auth/login", json={"name": "pat", "password": "new password"}).status_code == 200
+
+
+def test_admin_manages_users_and_token_still_works(env):
+    c, *_ = env
+    assert c.get("/api/auth/me", headers=adm()).json() == {"name": "human", "admin": True}
+    assert c.post("/api/admin/users", json={"name": "sam", "password": "short"}, headers=adm()).status_code == 400
+    assert c.post("/api/admin/users", json={"name": "sam", "password": "long enough", "admin": True},
+                  headers=adm()).status_code == 200
+    assert c.post("/api/admin/users", json={"name": "alice", "password": "long enough"}, headers=adm()).status_code == 400
+    assert [u["name"] for u in c.get("/api/admin/users", headers=adm()).json()] == ["sam"]
+    assert c.post("/api/auth/login", json={"name": "sam", "password": "long enough"}).json()["admin"] is True
+    assert c.post("/api/admin/agents", json={"name": "made-by-sam"}).status_code == 200
+    assert c.delete("/api/admin/users/sam", headers=adm()).status_code == 200
+
+
+def test_login_rate_limit(env):
+    c, *_ = env
+    for _ in range(10):
+        assert c.post("/api/auth/login", json={"name": "x", "password": "y"}).status_code == 401
+    assert c.post("/api/auth/login", json={"name": "x", "password": "y"}).status_code == 429
+
+
+def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+    from bunch.store import Store
+    path = str(tmp_path / "old.db")
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE agents(name TEXT PRIMARY KEY, key_hash TEXT UNIQUE, kind TEXT NOT NULL DEFAULT 'agent', "
+               "daily_tokens INTEGER, created REAL NOT NULL, last_seen REAL)")
+    db.execute("INSERT INTO agents(name,kind,created) VALUES('human','human',0)")
+    db.commit(); db.close()
+    st = Store(path)
+    st.create_user("pat", "password1")
+    assert st.verify_user("pat", "password1")["name"] == "pat"
+    assert st.agent("human")["description"] == ""
+
+
+# --------------------------------------------------- routing and auto agents
+def test_router_addresses_unmentioned_human_messages(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "local/small"})
+    hub.store.set_agent_info("bob", description="knows databases")
+
+    async def pick_bob(model, messages, max_tokens, user=None):
+        assert user == "_router" and "knows databases" in messages[1]["content"]
+        return "bob", 10
+    llm.chat = pick_bob
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "why is the db slow?"}, headers=adm())
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == ["bob"]
+    assert "why is the db slow" in tool(c, k["bob"], "read")[0]
+
+    async def broken(*a, **kw):
+        raise RuntimeError("gateway down")
+    llm.chat = broken
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "anyone?"}, headers=adm())
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == []
+    # Already addressed: the router isn't asked.
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@carol you"}, headers=adm())
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == ["carol"]
+
+
+def test_auto_agent_answers(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    r = c.post("/api/admin/agents", json={"name": "helper", "model": "local/small", "description": "general help"},
+               headers=adm())
+    assert r.status_code == 200
+    agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
+    assert agents["helper"]["model"] == "local/small" and agents["helper"]["description"] == "general help"
+    hub.post("human", "lobby", "@helper what's up?", human=True)
+    hub.post("alice", "lobby", "re: helper, no explicit mention", to="helper")  # agent without @: loop guard
+    asyncio.run(autoreply_once(hub))
+    msgs = c.get("/api/admin/rooms/lobby/messages", headers=adm()).json()
+    answers = [m for m in msgs if m["sender"] == "helper"]
+    assert len(answers) == 1 and answers[0]["summary"] == "answer from local/small" and answers[0]["to"] == ["human"]
+    asyncio.run(autoreply_once(hub))  # nothing answered twice
+    assert len([m for m in c.get("/api/admin/rooms/lobby/messages", headers=adm()).json() if m["sender"] == "helper"]) == 1
+
+
+def test_mcp_read_wait_returns_when_empty(env):
+    c, k, *_ = env
+    text, err = tool(c, k["alice"], "read", wait=1)
+    assert not err and text == "no new messages"

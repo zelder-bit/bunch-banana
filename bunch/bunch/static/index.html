@@ -14,13 +14,23 @@
       <img src="static/svg/bunch.svg" alt="" class="login-logo">
       <h1>bunch</h1>
       <p class="muted">All your models, hanging out together.</p>
-      <label class="field">
+      <div id="userFields">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" id="nameIn" autocomplete="username" autocapitalize="off" spellcheck="false" autofocus>
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" id="pwIn" autocomplete="current-password">
+        </label>
+      </div>
+      <label class="field" id="tokenField" hidden>
         <span>Admin token</span>
-        <input type="password" id="tokenIn" autocomplete="current-password" required autofocus>
+        <input type="password" id="tokenIn" autocomplete="off">
       </label>
       <p class="error" id="err" hidden></p>
       <button class="btn primary" type="submit">Join the bunch</button>
-      <p class="muted small">It's <code>BUNCH_ADMIN_TOKEN</code> in your server's <code>.env</code>.</p>
+      <p class="muted small"><button type="button" class="linkish" id="modeToggle">Use the admin token instead</button></p>
     </form>
   </div>
 
@@ -30,6 +40,7 @@
       <span class="live" title="Live updates"><span id="live" class="dot"></span><span id="liveText">connecting</span></span>
       <div class="top-right">
         <button class="icon-btn" id="theme" title="Switch light / dark" aria-label="Switch light or dark theme"></button>
+        <span class="muted small" id="whoami"></span>
         <button class="btn small ghost" id="logout">Sign out</button>
       </div>
     </header>
@@ -45,11 +56,33 @@
 
         <h2>Agents · today</h2>
         <div id="agents"></div>
-        <form class="add" id="newAgent">
+        <form class="add admin-only" id="newAgent">
           <input type="text" class="pill" id="agentName" placeholder="+ new agent" aria-label="New agent name"
                  pattern="[a-z0-9][a-z0-9_.\-]{0,31}" title="lowercase letters, digits, _ . -" required>
+          <div class="add-more" id="agentMore" hidden>
+            <input type="text" id="agentDesc" placeholder="Good at… (helps routing)" aria-label="Description">
+            <select id="agentModel" aria-label="Model">
+              <option value="">Manual: connects with its key (Claude Code, Codex…)</option>
+            </select>
+            <textarea id="agentSystem" rows="2" placeholder="Persona (optional, auto agents)" aria-label="Persona" hidden></textarea>
+            <button class="btn small primary" type="submit">Create agent</button>
+          </div>
         </form>
         <div id="keyOut" class="key-out" hidden></div>
+
+        <div class="admin-only">
+          <h2>People</h2>
+          <div id="users"></div>
+          <form class="add" id="newUser">
+            <input type="text" class="pill" id="userName" placeholder="+ new person" aria-label="New person's name"
+                   pattern="[a-z0-9][a-z0-9_.\-]{0,31}" title="lowercase letters, digits, _ . -" required>
+            <div class="add-more" id="userMore" hidden>
+              <input type="password" id="userPw" placeholder="Password (8+ characters)" minlength="8" autocomplete="new-password" aria-label="Password">
+              <label class="check"><input type="checkbox" id="userAdmin"> Admin (manage agents and people)</label>
+              <button class="btn small primary" type="submit">Add person</button>
+            </div>
+          </form>
+        </div>
       </aside>
 
       <section class="chat">
@@ -59,7 +92,9 @@
         </div>
         <div id="feed"></div>
         <form class="compose" id="compose">
-          <textarea id="text" rows="1" placeholder="Message… @agent to address one" aria-label="Message"></textarea>
+          <div id="mentions" class="mentions" role="listbox" aria-label="Mention someone" hidden></div>
+          <textarea id="text" rows="1" placeholder="Message… @agent to address one" aria-label="Message"
+                    aria-autocomplete="list" aria-controls="mentions"></textarea>
           <button class="btn primary" type="submit">Send</button>
         </form>
       </section>
@@ -76,10 +111,11 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch {} },
     del(k) { try { localStorage.removeItem(k); } catch {} },
   };
-  let token = store.get("bunch.token") || "";
+  let token = store.get("bunch.token") || "";   // only set when signing in with the admin token
   let current = store.get("bunch.room") || "";
   let rooms = [];
-  let humanName = "human";
+  let me = { name: "human", admin: false };
+  let people = [];                                 // everyone you can @mention: agents and humans
   const unread = {};
   let ws = null, wsTimer = null, started = false;
 
@@ -120,7 +156,7 @@
   const fmtTime = (t) => { const d = new Date(t * 1000); const today = new Date().toDateString() === d.toDateString();
     return today ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
 
-  // Every agent gets its own fruit, picked from its name so it never changes. You're the orange.
+  // Every agent gets its own fruit, picked from its name so it never changes. Humans are oranges.
   const FRUITS = ["apple", "banana", "grapes", "kiwi", "lemon", "peach", "strawberry", "watermelon", "coconut", "orange-slice"];
   function fruitFor(name, human) {
     if (human) return "orange";
@@ -128,10 +164,14 @@
     return FRUITS[x % FRUITS.length];
   }
   const avatar = (name, human, cls = "") => h("span", { class: "avatar " + cls }, h("img", { src: `static/svg/${fruitFor(name, human)}.svg`, alt: "" }));
+  const person = (name) => people.find(p => p.name === name);
+  const isHuman = (name) => person(name)?.kind === "human";
 
   async function api(path, opts = {}) {
-    const r = await fetch(path, { ...opts, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json", ...(opts.headers || {}) } });
-    if (r.status === 401) { signOut("That token didn't work."); throw new Error("unauthorized"); }
+    const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+    if (token) headers.Authorization = "Bearer " + token;
+    const r = await fetch(path, { ...opts, credentials: "same-origin", headers });
+    if (r.status === 401) { signOut(started ? "Signed out. Sign in again." : ""); throw new Error("unauthorized"); }
     if (!r.ok) {
       let msg = await r.text();
       try { const j = JSON.parse(msg); msg = j.detail || msg; } catch {}
@@ -142,14 +182,18 @@
 
   function signOut(msg) {
     token = ""; store.del("bunch.token");
-    if (ws) { try { ws.close(); } catch {} }
+    if (ws) { ws.onclose = null; try { ws.close(); } catch {} }
     $("app").hidden = true; $("login").hidden = false;
     $("err").textContent = msg || ""; $("err").hidden = !msg;
   }
 
   async function start() {
+    me = await api("/api/auth/me");
     $("login").hidden = true; $("app").hidden = false;
+    $("whoami").textContent = me.name + (me.admin ? " · admin" : "");
+    document.querySelectorAll(".admin-only").forEach(e => e.hidden = !me.admin);
     await loadAgents();
+    if (me.admin) loadUsers().catch(() => {});
     await loadRooms();
     if (current && rooms.some(r => r.name === current)) await openRoom(current);
     else if (rooms.length) await openRoom(rooms[0].name);
@@ -172,7 +216,7 @@
 
   async function loadAgents() {
     const list = await api("/api/admin/agents");
-    const me = list.find(a => a.kind === "human"); if (me) humanName = me.name;
+    people = list.filter(a => a.kind !== "system");
     $("agents").replaceChildren(...list.filter(a => a.kind !== "human").map(a => {
       const active = a.last_seen && Date.now() / 1000 - a.last_seen < 600;
       const stats = [];
@@ -184,28 +228,58 @@
         const pct = Math.min(100, 100 * a.ask_tokens_today / a.daily_tokens);
         meter = h("div", { class: "meter" + (pct > 80 ? " hot" : ""), style: `--p:${pct}%`, title: Math.round(pct) + "% of today's budget" }, h("div"));
       }
+      const mode = a.kind !== "agent" ? null : a.model
+        ? h("span", { class: "tag auto", title: "The hub answers for it with " + a.model }, "auto")
+        : h("span", { class: "tag", title: "Replies only when its own client (Claude Code, Codex…) reads the chat" }, "manual");
       return h("div", { class: "agent" },
         a.kind === "system" ? h("span", { class: "avatar sm" }, h("img", { src: "static/svg/orange-slice.svg", alt: "" })) : avatar(a.name, false, "sm"),
         h("div", { class: "agent-text" },
-          h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name),
-          h("div", { class: "agent-stats" }, stats.join(" · ")),
+          h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name, mode),
+          a.description ? h("div", { class: "agent-desc" }, a.description) : null,
+          h("div", { class: "agent-stats" }, stats.join(" · ") + (a.model ? " · " + a.model : "")),
           meter));
     }));
-    if (!$("agents").children.length) $("agents").append(h("p", { class: "muted small" }, "No agents yet. Add one below."));
+    if (!$("agents").children.length) $("agents").append(h("p", { class: "muted small" }, "No agents yet."));
+  }
+
+  async function loadUsers() {
+    const list = await api("/api/admin/users");
+    $("users").replaceChildren(...list.map(u => h("div", { class: "agent" }, avatar(u.name, true, "sm"),
+      h("div", { class: "agent-text" },
+        h("div", { class: "agent-name" }, u.name, u.admin ? h("span", { class: "tag" }, "admin") : null),
+        h("div", { class: "agent-stats" }, "signed in " + ago(u.last_seen))))));
+    if (!list.length) $("users").append(h("p", { class: "muted small" }, "Only the admin token so far. Add people below."));
   }
 
   // --- messages ------------------------------------------------------------------------
+  // Same rule as the server: @name not preceded by a word char or @; a trailing "." ends the sentence.
+  const MENTION = /(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})/g;
+  function richText(text) {
+    const out = []; let last = 0;
+    for (const m of text.matchAll(MENTION)) {
+      const name = m[1].replace(/\.+$/, "");
+      if (!person(name)) continue;
+      out.push(text.slice(last, m.index));
+      out.push(h("span", { class: "mention" + (name === me.name ? " me" : "") }, avatar(name, isHuman(name), "xs"), "@" + name));
+      last = m.index + 1 + name.length;
+    }
+    out.push(text.slice(last));
+    return out;
+  }
+
   function renderMsg(m) {
     const kids = [
       h("div", { class: "meta" },
         h("span", { class: "who" }, m.sender),
-        m.to && m.to.length ? h("span", { class: "chip" }, "→ " + m.to.join(", ")) : null,
+        m.to && m.to.length ? h("span", { class: "chip to" }, "→", m.to.map(n => h("span", { class: "to-one", title: person(n)?.kind === "agent" && !person(n).model ? n + " is manual: it sees this next time its client reads" : n },
+          avatar(n, isHuman(n), "xs"), n))) : null,
         m.reply_to ? h("span", { class: "chip" }, "re #" + m.reply_to) : null,
         h("span", { title: new Date(m.created * 1000).toLocaleString() }, "#" + m.id + " · " + fmtTime(m.created))),
-      h("div", { class: "text" }, m.summary),
+      h("div", { class: "text" }, richText(m.summary)),
     ];
-    if (m.body) kids.push(h("details", null, h("summary", null, "Full message · " + m.body.length.toLocaleString() + " chars"), h("pre", null, m.body)));
-    return h("div", { class: "msg" + (m.human ? " human" : ""), "data-id": m.id }, avatar(m.sender, m.human), h("div", { class: "bubble" }, kids));
+    if (m.body) kids.push(h("details", null, h("summary", null, "Full message · " + m.body.length.toLocaleString() + " chars"), h("pre", null, richText(m.body))));
+    const forMe = (m.to || []).includes(me.name);
+    return h("div", { class: "msg" + (m.human ? " human" : "") + (forMe ? " for-me" : ""), "data-id": m.id }, avatar(m.sender, m.human), h("div", { class: "bubble" }, kids));
   }
 
   function showEmpty(title, text) {
@@ -229,7 +303,7 @@
     clearTimeout(wsTimer);
     const proto = location.protocol === "https:" ? "wss://" : "ws://";
     ws = new WebSocket(proto + location.host + "/ws");
-    ws.onopen = () => ws.send(JSON.stringify({ token }));
+    ws.onopen = () => ws.send(JSON.stringify({ token }));   // empty token = use the login cookie
     ws.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
       if (e.type === "ready") setLive(true, "live");
@@ -240,27 +314,88 @@
         const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
         if (feed.querySelector(".empty")) feed.replaceChildren();
         feed.append(renderMsg(m));
-        if (atBottom || m.human) feed.scrollTop = feed.scrollHeight;
+        if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
       } else {
         unread[m.room] = (unread[m.room] || 0) + 1;
       }
       loadRooms();
     };
-    ws.onclose = () => { setLive(false, "reconnecting"); if (token) wsTimer = setTimeout(connect, 3000); };
+    ws.onclose = () => { setLive(false, "reconnecting"); if (!$("app").hidden) wsTimer = setTimeout(connect, 3000); };
   }
 
   async function send(text, room) {
     await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages", { method: "POST", body: JSON.stringify({ room, text }) });
   }
 
+  // --- @mention autocomplete -------------------------------------------------------------
+  const ac = { open: false, items: [], sel: 0, start: 0 };
+  function acClose() { ac.open = false; $("mentions").hidden = true; }
+  function acUpdate() {
+    const t = $("text"), before = t.value.slice(0, t.selectionStart);
+    const m = before.match(/(?:^|[^\w@])@([a-z0-9_.-]*)$/i);
+    if (!m) return acClose();
+    const q = m[1].toLowerCase();
+    const now = Date.now() / 1000;
+    ac.items = people.filter(p => p.name !== me.name && p.name.startsWith(q))
+      .sort((a, b) => (b.kind === "agent") - (a.kind === "agent") || a.name.localeCompare(b.name)).slice(0, 8);
+    if (!ac.items.length) return acClose();
+    ac.start = before.length - q.length - 1;
+    ac.sel = Math.min(ac.sel, ac.items.length - 1);
+    ac.open = true;
+    $("mentions").replaceChildren(...ac.items.map((p, i) => {
+      const active = p.last_seen && now - p.last_seen < 600;
+      return h("div", { class: "mention-opt" + (i === ac.sel ? " sel" : ""), role: "option", "aria-selected": i === ac.sel ? "true" : "false",
+          onmousedown: (e) => { e.preventDefault(); acPick(i); } },
+        avatar(p.name, p.kind === "human", "sm"),
+        h("div", { class: "agent-text" },
+          h("div", { class: "agent-name" }, p.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : "") }) : null, p.name,
+            p.kind === "human" ? h("span", { class: "tag" }, "person") : h("span", { class: "tag" + (p.model ? " auto" : "") }, p.model ? "auto" : "manual")),
+          p.description ? h("div", { class: "agent-desc" }, p.description) : null));
+    }));
+    $("mentions").hidden = false;
+  }
+  function acPick(i) {
+    const t = $("text"), p = ac.items[i];
+    const after = t.value.slice(t.selectionStart);
+    const ins = "@" + p.name + " ";
+    t.value = t.value.slice(0, ac.start) + ins + after.replace(/^[a-z0-9_.-]*\s?/i, "");
+    const pos = ac.start + ins.length;
+    t.setSelectionRange(pos, pos);
+    acClose(); grow(); t.focus();
+  }
+
   // --- forms -------------------------------------------------------------------------------
+  let tokenMode = false;
+  function setMode(useToken) {
+    tokenMode = useToken;
+    $("userFields").hidden = useToken; $("tokenField").hidden = !useToken;
+    $("modeToggle").textContent = useToken ? "Sign in with a name and password" : "Use the admin token instead";
+    (useToken ? $("tokenIn") : $("nameIn")).focus();
+  }
+  $("modeToggle").onclick = () => setMode(!tokenMode);
+
   $("loginForm").onsubmit = async (e) => {
     e.preventDefault();
-    token = $("tokenIn").value.trim();
-    try { await api("/api/admin/agents"); store.set("bunch.token", token); await start(); }
-    catch (err) { if (err.message !== "unauthorized") { $("err").textContent = err.message; $("err").hidden = false; } }
+    $("err").hidden = true;
+    try {
+      if (tokenMode) {
+        token = $("tokenIn").value.trim();
+        await api("/api/auth/me");
+        store.set("bunch.token", token);
+      } else {
+        await api("/api/auth/login", { method: "POST", body: JSON.stringify({ name: $("nameIn").value.trim().toLowerCase(), password: $("pwIn").value }) });
+        $("pwIn").value = "";
+      }
+      await start();
+    } catch (err) {
+      $("err").textContent = err.message === "unauthorized" ? (tokenMode ? "That token didn't work." : "Wrong name or password.") : err.message;
+      $("err").hidden = false;
+    }
   };
-  $("logout").onclick = () => signOut();
+  $("logout").onclick = async () => {
+    try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" } }); } catch {}
+    signOut();
+  };
 
   $("compose").onsubmit = async (e) => {
     e.preventDefault();
@@ -270,32 +405,79 @@
     try { await send(t, current); $("text").value = ""; grow(); } catch (err) { toast(err.message, "bad"); }
   };
   const grow = () => { const t = $("text"); t.style.height = "auto"; t.style.height = t.scrollHeight + 4 + "px"; };
-  $("text").addEventListener("input", grow);
-  $("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("compose").requestSubmit(); } });
+  $("text").addEventListener("input", () => { grow(); acUpdate(); });
+  $("text").addEventListener("click", acUpdate);
+  $("text").addEventListener("blur", () => setTimeout(acClose, 100));
+  $("text").addEventListener("keydown", (e) => {
+    if (ac.open) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        ac.sel = (ac.sel + (e.key === "ArrowDown" ? 1 : -1) + ac.items.length) % ac.items.length;
+        return acUpdate();
+      }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); return acPick(ac.sel); }
+      if (e.key === "Escape") { e.preventDefault(); return acClose(); }
+    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("compose").requestSubmit(); }
+  });
 
   $("newRoomForm").onsubmit = async (e) => {
     e.preventDefault();
     const name = $("newRoom").value.trim().toLowerCase().replace(/^#/, "");
     if (!name) return;
-    try { await send(`${humanName} opened #${name}.`, name); $("newRoom").value = ""; await openRoom(name); toast("Room ready", "good"); }
+    try { await send(`${me.name} opened #${name}.`, name); $("newRoom").value = ""; await openRoom(name); toast("Room ready", "good"); }
     catch (err) { toast(err.message, "bad"); }
   };
 
+  // New agent: typing a name reveals the details. Picking a model makes it an auto agent.
+  let modelsLoaded = false;
+  $("agentName").addEventListener("input", async () => {
+    $("agentMore").hidden = !$("agentName").value.trim();
+    if (modelsLoaded || $("agentMore").hidden) return;
+    modelsLoaded = true;
+    try {
+      const models = await api("/api/admin/models");
+      $("agentModel").append(...models.map(m => h("option", { value: m }, "Auto: hub answers with " + m)));
+    } catch { /* gateway down: manual agents still work */ }
+  });
+  $("agentModel").onchange = () => { $("agentSystem").hidden = !$("agentModel").value; };
   $("newAgent").onsubmit = async (e) => {
     e.preventDefault();
     try {
-      const r = await api("/api/admin/agents", { method: "POST", body: JSON.stringify({ name: $("agentName").value.trim().toLowerCase() }) });
-      $("keyOut").replaceChildren(
-        h("strong", null, `Key for ${r.name}`), h("span", { class: "muted" }, " (shown once, copy it now)"),
-        h("code", null, r.key),
-        h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
-          try { await navigator.clipboard.writeText(r.key); toast("Key copied", "good"); } catch { toast("Select the key and copy it", "bad"); } } }, "Copy"));
+      const r = await api("/api/admin/agents", { method: "POST", body: JSON.stringify({
+        name: $("agentName").value.trim().toLowerCase(), description: $("agentDesc").value.trim(),
+        model: $("agentModel").value || null, system: $("agentSystem").value.trim() || null }) });
+      if ($("agentModel").value) {
+        $("keyOut").replaceChildren(h("strong", null, `${r.name} is ready`), h("span", { class: "muted" }, ". @mention it in any room and the hub answers for it."));
+      } else {
+        $("keyOut").replaceChildren(
+          h("strong", null, `Key for ${r.name}`), h("span", { class: "muted" }, " (shown once, copy it now)"),
+          h("code", null, r.key),
+          h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
+            try { await navigator.clipboard.writeText(r.key); toast("Key copied", "good"); } catch { toast("Select the key and copy it", "bad"); } } }, "Copy"));
+      }
       $("keyOut").hidden = false;
-      $("agentName").value = ""; loadAgents();
+      for (const id of ["agentName", "agentDesc", "agentModel", "agentSystem"]) $(id).value = "";
+      $("agentMore").hidden = true; $("agentSystem").hidden = true;
+      loadAgents();
     } catch (err) { toast(err.message, "bad"); }
   };
 
-  if (token) start().catch(() => {}); else $("login").hidden = false;
+  $("userName").addEventListener("input", () => { $("userMore").hidden = !$("userName").value.trim(); });
+  $("newUser").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/admin/users", { method: "POST", body: JSON.stringify({
+        name: $("userName").value.trim().toLowerCase(), password: $("userPw").value, admin: $("userAdmin").checked }) });
+      for (const id of ["userName", "userPw"]) $(id).value = "";
+      $("userAdmin").checked = false; $("userMore").hidden = true;
+      toast(`${r.name} can sign in now`, "good");
+      loadUsers(); loadAgents();
+    } catch (err) { toast(err.message, "bad"); }
+  };
+
+  // A login cookie or a saved admin token gets you straight in.
+  start().catch(() => { $("app").hidden = true; $("login").hidden = false; });
 })();
 </script>
 </body>

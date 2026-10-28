@@ -10,6 +10,9 @@ import sqlite3
 import threading
 import time
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
+
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
 
 SCHEMA = """
@@ -19,7 +22,12 @@ CREATE TABLE IF NOT EXISTS agents(
   kind TEXT NOT NULL DEFAULT 'agent',      -- 'agent' or 'human'
   daily_tokens INTEGER,                     -- NULL = use hub default
   created REAL NOT NULL,
-  last_seen REAL
+  last_seen REAL,
+  description TEXT NOT NULL DEFAULT '',     -- what this agent is good at (used by the router)
+  model TEXT,                               -- set = the hub answers for this agent (auto agent)
+  system TEXT,                              -- persona prompt for auto agents
+  pw_hash TEXT,                             -- humans: argon2 password hash
+  is_admin INTEGER NOT NULL DEFAULT 0       -- humans: may manage agents and users
 );
 CREATE TABLE IF NOT EXISTS rooms(
   name TEXT PRIMARY KEY,
@@ -53,6 +61,17 @@ CREATE TABLE IF NOT EXISTS usage(
 );
 """
 
+# Columns added after the first release; ALTERed into older databases on startup.
+AGENT_COLUMNS = {
+    "description": "TEXT NOT NULL DEFAULT ''",
+    "model": "TEXT",
+    "system": "TEXT",
+    "pw_hash": "TEXT",
+    "is_admin": "INTEGER NOT NULL DEFAULT 0",
+}
+
+_ph = PasswordHasher()
+
 
 def hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
@@ -78,6 +97,10 @@ class Store:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.executescript(SCHEMA)
+            have = {r["name"] for r in self.db.execute("PRAGMA table_info(agents)")}
+            for col, decl in AGENT_COLUMNS.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
 
     # -- low level -------------------------------------------------------
     def q(self, sql: str, args=()) -> list[sqlite3.Row]:
@@ -93,17 +116,73 @@ class Store:
             return self.db.execute(sql, args)
 
     # -- agents ----------------------------------------------------------
-    def create_agent(self, name: str, daily_tokens: int | None = None) -> str:
+    def _check_new_name(self, name: str) -> None:
         if not valid_name(name):
             raise ValueError("name must be lowercase letters, digits, _ . - (max 32)")
         if self.agent(name):
-            raise ValueError(f"agent '{name}' already exists")
+            raise ValueError(f"'{name}' already exists")
+
+    def create_agent(self, name: str, daily_tokens: int | None = None, description: str = "",
+                     model: str | None = None, system: str | None = None) -> str:
+        self._check_new_name(name)
         key = "bunch_" + secrets.token_urlsafe(24)
         self.x(
-            "INSERT INTO agents(name,key_hash,kind,daily_tokens,created) VALUES(?,?,?,?,?)",
-            (name, hash_key(key), "agent", daily_tokens, time.time()),
+            "INSERT INTO agents(name,key_hash,kind,daily_tokens,created,description,model,system) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (name, hash_key(key), "agent", daily_tokens, time.time(), description or "",
+             model or None, system or None),
         )
         return key
+
+    def set_agent_info(self, name: str, **fields) -> None:
+        """Update description / model / system for an agent. Blank model/system = NULL."""
+        for col in ("description", "model", "system"):
+            if col in fields:
+                val = (fields[col] or "").strip()
+                if col != "description":
+                    val = val or None
+                self.x(f"UPDATE agents SET {col}=? WHERE name=?", (val, name))
+
+    def auto_agents(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM agents WHERE kind='agent' AND model IS NOT NULL AND model!='' ORDER BY name")
+
+    # -- human users -----------------------------------------------------
+    def create_user(self, name: str, password: str, admin: bool = False) -> None:
+        self._check_new_name(name)
+        if len(password or "") < 8:
+            raise ValueError("password must be at least 8 characters")
+        self.x("INSERT INTO agents(name,key_hash,kind,created,pw_hash,is_admin) VALUES(?,NULL,'human',?,?,?)",
+               (name, time.time(), _ph.hash(password), int(admin)))
+
+    def set_password(self, name: str, password: str) -> None:
+        row = self.agent(name)
+        if not row or row["kind"] != "human":
+            raise ValueError("no such user")
+        if len(password or "") < 8:
+            raise ValueError("password must be at least 8 characters")
+        self.x("UPDATE agents SET pw_hash=? WHERE name=?", (_ph.hash(password), name))
+
+    def verify_user(self, name: str, password: str):
+        """Returns the user row if the password matches, else None."""
+        row = self.agent((name or "").strip().lower())
+        if not row or row["kind"] != "human" or not row["pw_hash"]:
+            _ph.hash("timing-equaliser")  # don't reveal which names exist by response time
+            return None
+        try:
+            _ph.verify(row["pw_hash"], password or "")
+        except (VerificationError, InvalidHashError):
+            return None
+        if _ph.check_needs_rehash(row["pw_hash"]):
+            self.x("UPDATE agents SET pw_hash=? WHERE name=?", (_ph.hash(password), row["name"]))
+        self.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), row["name"]))
+        return row
+
+    def users(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM agents WHERE kind='human' AND pw_hash IS NOT NULL ORDER BY name")
+
+    def delete_user(self, name: str) -> bool:
+        cur = self.x("DELETE FROM agents WHERE name=? AND kind='human' AND pw_hash IS NOT NULL", (name,))
+        return cur.rowcount > 0
 
     def ensure_human(self, name: str) -> None:
         self.x(

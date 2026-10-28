@@ -180,6 +180,41 @@ pre { background: var(--surface-2); padding: 12px; border-radius: 12px; white-sp
 
 .compose { display: flex; gap: 10px; align-items: flex-end; padding: 12px 24px 16px; border-top: 2px solid var(--line); }
 .compose textarea { resize: none; min-height: 46px; max-height: 40vh; border-radius: 22px; padding: .65em 1em; }
+.compose { position: relative; }
+
+/* --- @mentions ------------------------------------------------------------------------ */
+
+.mentions {
+  position: absolute; left: 24px; bottom: calc(100% - 8px); z-index: 30; width: min(360px, calc(100% - 48px));
+  max-height: 320px; overflow-y: auto; padding: 6px; background: var(--surface); border: 2px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); animation: pop .15s ease-out;
+}
+.mention-opt { display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 12px; cursor: pointer; }
+.mention-opt.sel, .mention-opt:hover { background: var(--surface-2); }
+.mention-opt.sel { box-shadow: inset 3px 0 0 var(--orange); }
+.mention {
+  display: inline-flex; align-items: center; gap: 3px; vertical-align: baseline; padding: 0 .45em 0 .15em;
+  border-radius: 999px; background: color-mix(in srgb, var(--banana) 35%, var(--surface-2)); font-weight: 800;
+}
+.mention.me { background: var(--orange); color: #fff; }
+.avatar.xs { width: 18px; height: 18px; background: transparent; display: inline-grid; vertical-align: -3px; }
+.avatar.xs img { width: 16px; }
+.chip.to { display: inline-flex; align-items: center; gap: 4px; }
+.to-one { display: inline-flex; align-items: center; gap: 2px; }
+.msg.for-me .bubble { border-color: color-mix(in srgb, var(--banana) 70%, transparent); }
+.tag { font-family: 'Nunito', sans-serif; font-size: .68rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
+  padding: 0 .5em; border-radius: 999px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
+.tag.auto { background: color-mix(in srgb, var(--leaf) 18%, var(--surface)); color: var(--leaf); border-color: transparent; }
+.agent-desc { font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- sidebar forms ----------------------------------------------------------------------- */
+
+.add-more { display: grid; gap: 6px; margin-top: 6px; }
+.add-more select { font: inherit; padding: .5em .7em; border: 2px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); width: 100%; }
+.add-more textarea { resize: vertical; }
+.check { display: flex; gap: 6px; align-items: center; font-size: .85rem; }
+.linkish { background: none; border: 0; padding: 0; color: var(--orange-deep); font: inherit; font-weight: 700; cursor: pointer; text-decoration: underline; }
+#userFields { display: grid; gap: 12px; }
 
 /* --- toasts ------------------------------------------------------------------------- */
 

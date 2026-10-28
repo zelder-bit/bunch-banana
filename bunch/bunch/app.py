@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import time
@@ -12,12 +13,15 @@ from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocke
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
 from . import mcp as mcpmod
+from .autoreply import autoreply_loop
 from .config import Settings, load
-from .hub import Hub, HubError
-from .llm import LLM
+from .hub import MENTION_RE, Hub, HubError
+from .llm import LLM, LLMError
+from .router import route
 from .store import Store
 from .summarizer import summarizer_loop
 
@@ -44,6 +48,30 @@ class AskIn(BaseModel):
 class AgentIn(BaseModel):
     name: str
     daily_tokens: int | None = None
+    description: str = ""
+    model: str | None = None
+    system: str | None = None
+
+
+class AgentInfoIn(BaseModel):
+    description: str | None = None
+    model: str | None = None
+    system: str | None = None
+
+
+class LoginIn(BaseModel):
+    name: str
+    password: str
+
+
+class UserIn(BaseModel):
+    name: str
+    password: str
+    admin: bool = False
+
+
+class PasswordIn(BaseModel):
+    password: str
 
 
 class BudgetIn(BaseModel):
@@ -68,18 +96,24 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub._event = asyncio.Event()  # bind to the running loop
-        task = None
+        tasks = []
         if s.summary_model and llm.enabled:
-            task = asyncio.create_task(summarizer_loop(hub))
+            tasks.append(asyncio.create_task(summarizer_loop(hub)))
         else:
             log.info("summarizer off (set BUNCH_SUMMARY_MODEL to enable)")
+        if llm.enabled:
+            tasks.append(asyncio.create_task(autoreply_loop(hub)))
         yield
-        if task:
-            task.cancel()
+        for t in tasks:
+            t.cancel()
 
     app = FastAPI(title="bunch", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.hub = hub
+    secret = s.session_secret or hmac.new(s.admin_token.encode(), b"bunch-session", hashlib.sha256).hexdigest()
+    app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="bunch_session",
+                       max_age=30 * 86400, same_site="lax", https_only=False)
+    failed_logins: dict[str, list[float]] = {}
 
     # ---------------------------------------------------------------- auth
     def agent_of(authorization: str | None) -> str:
@@ -91,9 +125,26 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     def is_admin(token: str) -> bool:
         return bool(token) and hmac.compare_digest(token.encode(), s.admin_token.encode())
 
-    def require_admin(authorization: str | None) -> None:
-        if not is_admin(_bearer(authorization)):
-            raise HTTPException(401, "admin token required", headers={"WWW-Authenticate": "Bearer"})
+    def session_user(session) -> tuple[str, bool] | None:
+        row = store.agent(session.get("user", "")) if session.get("user") else None
+        if row and row["kind"] == "human" and row["pw_hash"]:
+            return row["name"], bool(row["is_admin"])
+        return None
+
+    def viewer(request: Request, authorization: str | None) -> tuple[str, bool]:
+        """(name, is_admin) of the human using the web viewer: a signed-in user or the admin token."""
+        if is_admin(_bearer(authorization)):
+            return s.human_name, True
+        who = session_user(request.session)
+        if not who:
+            raise HTTPException(401, "sign in required", headers={"WWW-Authenticate": "Bearer"})
+        return who
+
+    def require_admin(request: Request, authorization: str | None) -> str:
+        name, admin = viewer(request, authorization)
+        if not admin:
+            raise HTTPException(403, "admins only")
+        return name
 
     @app.exception_handler(HubError)
     async def _hub_error(_req: Request, exc: HubError):
@@ -110,6 +161,33 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     # Theme assets (CSS, fonts, fruit artwork), shared look with fruit-fs.
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    # ---------------------------------------------------------------- login
+    @app.post("/api/auth/login")
+    async def login(body: LoginIn, request: Request):
+        ip = request.client.host if request.client else "?"
+        now = time.time()
+        recent = [t for t in failed_logins.get(ip, []) if t > now - 300]
+        if len(recent) >= 10:
+            raise HTTPException(429, "too many failed sign-ins; try again in a few minutes")
+        row = store.verify_user(body.name, body.password)
+        if not row:
+            failed_logins[ip] = recent + [now]
+            await asyncio.sleep(0.5)
+            raise HTTPException(401, "wrong name or password")
+        failed_logins.pop(ip, None)
+        request.session["user"] = row["name"]
+        return {"name": row["name"], "admin": bool(row["is_admin"])}
+
+    @app.post("/api/auth/logout")
+    async def logout(request: Request):
+        request.session.clear()
+        return {"ok": True}
+
+    @app.get("/api/auth/me")
+    async def me(request: Request, authorization: str | None = Header(None)):
+        name, admin = viewer(request, authorization)
+        return {"name": name, "admin": admin}
 
     # ----------------------------------------------------------------- MCP
     @app.post("/mcp")
@@ -178,9 +256,11 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         return PlainTextResponse(hub.rooms(agent_of(authorization)))
 
     # --------------------------------------------- admin / web viewer (full detail)
+    # Chat routes (rooms, messages, agent list) are open to any signed-in human;
+    # agent keys, budgets and users are admin-only.
     @app.get("/api/admin/rooms")
-    async def admin_rooms(authorization: str | None = Header(None)):
-        require_admin(authorization)
+    async def admin_rooms(request: Request, authorization: str | None = Header(None)):
+        viewer(request, authorization)
         out = []
         for r in store.rooms():
             last = store.one("SELECT MAX(id) AS id, COUNT(*) AS n FROM messages WHERE room=?", (r["name"],))
@@ -189,62 +269,129 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         return out
 
     @app.get("/api/admin/rooms/{room}/messages")
-    async def admin_messages(room: str, before: int | None = None, limit: int = 100,
-                       authorization: str | None = Header(None)):
-        require_admin(authorization)
+    async def admin_messages(request: Request, room: str, before: int | None = None, limit: int = 100,
+                             authorization: str | None = Header(None)):
+        viewer(request, authorization)
         limit = max(1, min(limit, 500))
         rows = store.q("SELECT * FROM messages WHERE room=? AND id<? ORDER BY id DESC LIMIT ?",
                        (room, before or 2**62, limit))
         return [hub.message_json(m) for m in rows[::-1]]
 
     @app.post("/api/admin/rooms/{room}/messages")
-    async def admin_post(room: str, body: PostIn, authorization: str | None = Header(None)):
-        require_admin(authorization)
-        return {"result": hub.post(s.human_name, room, body.text, to=body.to, summary=body.summary,
+    async def admin_post(request: Request, room: str, body: PostIn, authorization: str | None = Header(None)):
+        name, _ = viewer(request, authorization)
+        to = body.to
+        known = store.agent_names()
+        addressed = to or body.re is not None or any(n.rstrip(".") in known for n in MENTION_RE.findall(body.text or ""))
+        if not addressed and (body.text or "").strip():
+            to = await route(hub, room.strip().lower().lstrip("#"), body.text) or None
+        return {"result": hub.post(name, room, body.text, to=to, summary=body.summary,
                                    reply_to=body.re, human=True)}
 
     @app.get("/api/admin/agents")
-    async def admin_agents(authorization: str | None = Header(None)):
-        require_admin(authorization)
+    async def admin_agents(request: Request, authorization: str | None = Header(None)):
+        viewer(request, authorization)
         out = []
         for a in store.agents():
             u = store.usage_today(a["name"])
             out.append({"name": a["name"], "kind": a["kind"], "last_seen": a["last_seen"],
+                        "description": a["description"], "model": a["model"],
                         "daily_tokens": hub.budget(a["name"]) if a["kind"] == "agent" else None,
                         "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"]})
-        u = store.usage_today("_summarizer")
-        out.append({"name": "_summarizer", "kind": "system", "last_seen": None, "daily_tokens": None,
-                    "ask_tokens_today": u["ask"], "ctx_tokens_today": 0})
+        for system in ("_summarizer", "_router"):
+            u = store.usage_today(system)
+            if system == "_summarizer" or u["ask"]:
+                out.append({"name": system, "kind": "system", "last_seen": None, "description": "",
+                            "model": None, "daily_tokens": None,
+                            "ask_tokens_today": u["ask"], "ctx_tokens_today": 0})
         return out
 
-    @app.post("/api/admin/agents")
-    async def admin_add_agent(body: AgentIn, authorization: str | None = Header(None)):
-        require_admin(authorization)
+    @app.get("/api/admin/models")
+    async def admin_models(request: Request, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        if not llm.enabled:
+            return []
         try:
-            key = store.create_agent(body.name.strip().lower(), body.daily_tokens)
+            return await llm.models()
+        except LLMError as e:
+            raise HTTPException(502, str(e))
+
+    @app.post("/api/admin/agents")
+    async def admin_add_agent(request: Request, body: AgentIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        name = body.name.strip().lower()
+        try:
+            key = store.create_agent(name, body.daily_tokens, body.description.strip(),
+                                     (body.model or "").strip() or None, (body.system or "").strip() or None)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {"name": body.name.strip().lower(), "key": key, "note": "shown once; store it on the agent's machine"}
+        return {"name": name, "key": key, "note": "shown once; store it on the agent's machine"}
+
+    @app.put("/api/admin/agents/{name}/info")
+    async def admin_agent_info(request: Request, name: str, body: AgentInfoIn,
+                               authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        row = store.agent(name)
+        if not row or row["kind"] != "agent":
+            raise HTTPException(404, "no such agent")
+        store.set_agent_info(name, **body.model_dump(exclude_none=True))
+        row = store.agent(name)
+        return {"name": name, "description": row["description"], "model": row["model"], "system": row["system"]}
+
+    # ---------------------------------------------------------------- users
+    @app.get("/api/admin/users")
+    async def admin_users(request: Request, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        return [{"name": u["name"], "admin": bool(u["is_admin"]), "last_seen": u["last_seen"]} for u in store.users()]
+
+    @app.post("/api/admin/users")
+    async def admin_add_user(request: Request, body: UserIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        name = body.name.strip().lower()
+        try:
+            store.create_user(name, body.password, body.admin)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"name": name, "admin": body.admin}
+
+    @app.put("/api/admin/users/{name}/password")
+    async def admin_user_password(request: Request, name: str, body: PasswordIn,
+                                  authorization: str | None = Header(None)):
+        who, admin = viewer(request, authorization)
+        if who != name and not admin:
+            raise HTTPException(403, "admins only")
+        try:
+            store.set_password(name, body.password)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"name": name}
+
+    @app.delete("/api/admin/users/{name}")
+    async def admin_delete_user(request: Request, name: str, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        if not store.delete_user(name):
+            raise HTTPException(404, "no such user")
+        return {"deleted": name}
 
     @app.post("/api/admin/agents/{name}/rotate")
-    async def admin_rotate(name: str, authorization: str | None = Header(None)):
-        require_admin(authorization)
+    async def admin_rotate(request: Request, name: str, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
         try:
             return {"name": name, "key": store.rotate_key(name)}
         except ValueError as e:
             raise HTTPException(404, str(e))
 
     @app.put("/api/admin/agents/{name}/budget")
-    async def admin_budget(name: str, body: BudgetIn, authorization: str | None = Header(None)):
-        require_admin(authorization)
+    async def admin_budget(request: Request, name: str, body: BudgetIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
         if not store.agent(name):
             raise HTTPException(404, "no such agent")
         store.set_budget(name, body.daily_tokens)
         return {"name": name, "daily_tokens": hub.budget(name)}
 
     @app.delete("/api/admin/agents/{name}")
-    async def admin_delete(name: str, authorization: str | None = Header(None)):
-        require_admin(authorization)
+    async def admin_delete(request: Request, name: str, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
         if not store.delete_agent(name):
             raise HTTPException(404, "no such agent")
         return {"deleted": name}
@@ -257,7 +404,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         except Exception:
             await socket.close(code=4401)
             return
-        if not is_admin(str(hello.get("token", ""))):
+        origin = socket.headers.get("origin", "")
+        same_origin = not origin or origin.split("://", 1)[-1] == socket.headers.get("host", "")
+        if not (is_admin(str(hello.get("token", ""))) or (same_origin and session_user(socket.session))):
             await socket.close(code=4401)
             return
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)

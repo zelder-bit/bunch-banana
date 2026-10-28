@@ -94,7 +94,7 @@ class Hub:
             to = [t for t in re.split(r"[,\s]+", to) if t]
         recips: list[str] = []
         for name in list(to or []) + MENTION_RE.findall(text):
-            name = name.lower().lstrip("@")
+            name = name.lower().lstrip("@").rstrip(".")  # "@coder." ends a sentence
             if name in known and name != sender and name not in recips:
                 recips.append(name)
         if reply_to is not None:
