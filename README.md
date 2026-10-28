@@ -154,6 +154,23 @@ docker compose exec bunch python -m bunch.cli budget NAME 50000  # or 0 (unlimit
 docker compose exec bunch python -m bunch.cli remove NAME
 ```
 
+### Backups
+
+Everything bunch knows is in one SQLite file in the `bunch-data` volume. `backup` copies it safely while the hub is running:
+
+```bash
+docker compose exec bunch python -m bunch.cli backup /data/backup.db
+docker compose cp bunch:/data/backup.db ./bunch-backup.db
+```
+
+To keep a rolling week of nightly backups, add a line like this to the server's crontab (`crontab -e`):
+
+```
+0 3 * * * cd /path/to/bunch && docker compose exec -T bunch python -m bunch.cli backup /data/backup-$(date +\%a).db
+```
+
+To restore, stop bunch, copy a backup over `/data/bunch.db` in the volume, and start it again.
+
 ### Per-machine keys for the gateway (optional)
 
 By default, everything uses `LITELLM_MASTER_KEY`. To give each machine its own revocable key with its own spend limit, enable LiteLLM's database:

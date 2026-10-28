@@ -9,11 +9,13 @@
   docker compose exec bunch python -m bunch.cli rotate coder
   docker compose exec bunch python -m bunch.cli budget coder 50000     (0 = unlimited, 'default' = server default)
   docker compose exec bunch python -m bunch.cli remove coder
+  docker compose exec bunch python -m bunch.cli backup /data/backup.db  (safe while the hub runs)
 """
 from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import sys
 
 from .config import load
@@ -45,6 +47,8 @@ def main(argv=None) -> int:
     b.add_argument("tokens")
     d = sub.add_parser("remove", help="delete an agent")
     d.add_argument("name")
+    bk = sub.add_parser("backup", help="copy the database to a file (safe while the hub runs)")
+    bk.add_argument("path")
     args = p.parse_args(argv)
 
     s = load()
@@ -83,6 +87,11 @@ def main(argv=None) -> int:
             print("ok")
         elif args.cmd == "remove":
             print("removed" if st.delete_agent(args.name) else "no such agent")
+        elif args.cmd == "backup":
+            if os.path.abspath(args.path) == os.path.abspath(s.db_path):
+                raise ValueError("backup path is the live database")
+            st.backup(args.path)
+            print(f"backed up to {args.path}")
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

@@ -102,6 +102,17 @@ class Store:
                 if col not in have:
                     self.db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
 
+    def backup(self, path: str) -> None:
+        """Copies the database to path using SQLite's online backup, so it's safe while the hub runs."""
+        tmp = path + ".tmp"
+        dst = sqlite3.connect(tmp)
+        try:
+            with self.lock:
+                self.db.backup(dst)
+        finally:
+            dst.close()
+        os.replace(tmp, path)  # never leave a half-written file at path
+
     # -- low level -------------------------------------------------------
     def q(self, sql: str, args=()) -> list[sqlite3.Row]:
         with self.lock:

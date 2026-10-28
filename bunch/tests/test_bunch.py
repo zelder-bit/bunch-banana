@@ -505,3 +505,19 @@ def test_deleting_a_summarized_message_resets_the_room_summary(env):
     st.x("UPDATE rooms SET summary='mentions m1', summary_upto=3 WHERE name='s'")
     c.delete("/api/admin/messages/2", headers=adm())
     assert st.room("s")["summary"] == "" and st.room("s")["summary_upto"] == 0
+
+
+# ------------------------------------------------------------------- backup
+def test_cli_backup(env, tmp_path, monkeypatch, capsys):
+    import sqlite3
+    from bunch import cli
+    c, k, app, _ = env
+    tool(c, k["alice"], "post", room="b", text="keep me")
+    monkeypatch.setenv("BUNCH_DB", app.state.hub.s.db_path)
+    out = str(tmp_path / "copy.db")
+    assert cli.main(["backup", out]) == 0
+    db = sqlite3.connect(out)
+    assert db.execute("SELECT summary FROM messages").fetchone()[0] == "keep me"
+    assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert cli.main(["backup", app.state.hub.s.db_path]) == 1   # refuses to overwrite the live file
+    assert "live database" in capsys.readouterr().err
