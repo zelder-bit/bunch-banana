@@ -84,6 +84,11 @@ def _bearer(value: str | None) -> str:
     return ""
 
 
+def _pw_mark(pw_hash: str) -> str:
+    """Short fingerprint of a password hash, kept in the session: a new password signs out old sessions."""
+    return hashlib.sha256((pw_hash or "").encode()).hexdigest()[:16]
+
+
 def create_app(settings: Settings | None = None, llm: LLM | None = None) -> FastAPI:
     s = settings or load()
     if not s.admin_token:
@@ -112,7 +117,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     app.state.hub = hub
     secret = s.session_secret or hmac.new(s.admin_token.encode(), b"bunch-session", hashlib.sha256).hexdigest()
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="bunch_session",
-                       max_age=30 * 86400, same_site="lax", https_only=False)
+                       max_age=30 * 86400, same_site="lax", https_only=s.secure_cookies)
     failed_logins: dict[str, list[float]] = {}
 
     # ---------------------------------------------------------------- auth
@@ -127,7 +132,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     def session_user(session) -> tuple[str, bool] | None:
         row = store.agent(session.get("user", "")) if session.get("user") else None
-        if row and row["kind"] == "human" and row["pw_hash"]:
+        if row and row["kind"] == "human" and row["pw_hash"] and session.get("pw") == _pw_mark(row["pw_hash"]):
             return row["name"], bool(row["is_admin"])
         return None
 
@@ -167,6 +172,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def login(body: LoginIn, request: Request):
         ip = request.client.host if request.client else "?"
         now = time.time()
+        for old in [k for k, ts in failed_logins.items() if ts[-1] < now - 300]:  # keep the dict small
+            del failed_logins[old]
         recent = [t for t in failed_logins.get(ip, []) if t > now - 300]
         if len(recent) >= 10:
             raise HTTPException(429, "too many failed sign-ins; try again in a few minutes")
@@ -176,7 +183,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             await asyncio.sleep(0.5)
             raise HTTPException(401, "wrong name or password")
         failed_logins.pop(ip, None)
+        row = store.agent(row["name"])  # verify_user may have re-hashed the password
         request.session["user"] = row["name"]
+        request.session["pw"] = _pw_mark(row["pw_hash"])
         return {"name": row["name"], "admin": bool(row["is_admin"])}
 
     @app.post("/api/auth/logout")
@@ -367,6 +376,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_password(name, body.password)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if who == name and not is_admin(_bearer(authorization)):  # keep the person who changed it signed in
+            request.session["pw"] = _pw_mark(store.agent(name)["pw_hash"])
         return {"name": name}
 
     @app.delete("/api/admin/users/{name}")

@@ -140,6 +140,7 @@ All settings live in `.env`. See [.env.example](.env.example) for the full list 
 | `BUNCH_DAILY_TOKENS` | `200000` | Default per-agent daily `ask` budget (`0` = unlimited). Override per agent with the CLI. |
 | `BUNCH_MAX_CHAIN` | `20` | Agent-only messages in a row before a room pauses for a human (`0` = off). |
 | `BUNCH_POSTS_PER_MIN` | `20` | Per-agent post rate limit. |
+| `BUNCH_SECURE_COOKIES` | (off) | Set to `1` when bunch is served over HTTPS, so login cookies are never sent over plain HTTP. |
 
 Advanced tuning variables (`BUNCH_SUMMARY_MAX`, `BUNCH_GET_MAX`, `BUNCH_READ_LIMIT`, `BUNCH_JOIN_TAIL`, `BUNCH_SUMMARY_EVERY`, `BUNCH_MAX_BODY`, `BUNCH_ASK_MAX_TOKENS`) are documented in [bunch/bunch/config.py](bunch/bunch/config.py). To use them in Docker, add them to the `bunch` service's `environment:` block in `docker-compose.yml`.
 

@@ -364,3 +364,40 @@ def test_viewer_messages_after_id(env):
     assert [m["summary"] for m in r.json()] == ["m2", "m3"]
     r = c.get("/api/admin/rooms/cu/messages", params={"after": 0, "limit": 2}, headers=adm())
     assert [m["id"] for m in r.json()] == [1, 2]
+
+
+def test_password_change_signs_out_other_sessions(env):
+    c, k, app, _ = env
+    app.state.hub.store.create_user("pat", "first password")
+    other = TestClient(app)
+    for cl in (c, other):
+        assert cl.post("/api/auth/login", json={"name": "pat", "password": "first password"}).status_code == 200
+    # pat changes their own password: this session stays in, the other one is signed out.
+    assert c.put("/api/admin/users/pat/password", json={"password": "second password"}).status_code == 200
+    assert c.get("/api/auth/me").status_code == 200
+    assert other.get("/api/auth/me").status_code == 401
+    # an admin reset signs pat out everywhere
+    assert c.put("/api/admin/users/pat/password", json={"password": "third password"}, headers=adm()).status_code == 200
+    c.headers.pop("Authorization", None)
+    assert c.get("/api/auth/me").status_code == 401
+
+
+def test_failed_logins_are_pruned(env, monkeypatch):
+    import bunch.app as appmod
+    c, *_ = env
+    now = [1000.0]
+    monkeypatch.setattr(appmod.time, "time", lambda: now[0])
+    for _ in range(10):
+        c.post("/api/auth/login", json={"name": "x", "password": "y"})
+    assert c.post("/api/auth/login", json={"name": "x", "password": "y"}).status_code == 429
+    now[0] += 301  # old failures expire, and the entry is dropped rather than kept forever
+    assert c.post("/api/auth/login", json={"name": "x", "password": "y"}).status_code == 401
+
+
+def test_secure_cookie_setting(tmp_path):
+    s = Settings(db_path=str(tmp_path / "s.db"), admin_token=ADMIN, secure_cookies=True)
+    app = create_app(s, FakeLLM())
+    app.state.hub.store.create_user("pat", "first password")
+    with TestClient(app, base_url="https://testserver") as c:
+        r = c.post("/api/auth/login", json={"name": "pat", "password": "first password"})
+        assert "secure" in r.headers["set-cookie"].lower()
