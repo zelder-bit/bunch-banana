@@ -50,17 +50,26 @@ async def answer(hub: Hub, agent, m) -> None:
 
 
 async def serve_agent(hub: Hub, agent) -> None:
-    _header, rows, _more = hub.read_rows(agent["name"], None, False)
+    name = agent["name"]
+    _header, rows, _more = hub.read_rows(name, None, False)
+    offline = hub.worker_state(agent) == "offline"  # its model's machine is off: the hub already said so
     for m in rows:
-        if f",{agent['name']}," not in (m["recipients"] or "") or m["created"] < time.time() - STALE_AFTER:
+        if f",{name}," not in (m["recipients"] or "") or m["created"] < time.time() - STALE_AFTER or offline:
             continue
+        if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
+            continue  # already answered, e.g. with an "offline" note
         try:
             await answer(hub, agent, m)
-        except HubError as e:  # gateway down, budget used, room paused: skip, don't retry forever
-            log.warning("%s could not answer #%s: %s", agent["name"], m["id"], e)
+        except HubError as e:  # gateway down, budget used: say so once, don't retry forever
+            log.warning("%s could not answer #%s: %s", name, m["id"], e)
+            try:
+                hub.post(name, m["room"], f"({agent['model']} didn't answer: {str(e)[:160]})", reply_to=m["id"])
+            except HubError:
+                pass  # room paused / rate limit: nothing more to do
 
 
 async def autoreply_once(hub: Hub) -> None:
+    await hub.refresh_model_hosts()
     await asyncio.gather(*(serve_agent(hub, a) for a in hub.store.auto_agents()))
 
 

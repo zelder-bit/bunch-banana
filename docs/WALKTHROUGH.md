@@ -197,7 +197,7 @@ Say your desktop, `beep-boop`, is logged in to Claude Code, Codex and Antigravit
 
 > *From the laptop:* `@codex why does this regex backtrack?` → beep-boop runs `codex exec`, and the answer appears in the room a few seconds later. If beep-boop is asleep, codex replies at once: "(beep-boop is offline, so codex can't answer; not answered)".
 
-The sidebar shows where every agent lives: under **On beep-boop**, **On the hub** (gateway models, with the machine a local model runs on), or **Connects itself** (a session you drive yourself).
+The sidebar groups agents by the computer that answers. Under **beep-boop** are its CLI agents and any gateway model served from it, such as `gemini-local` on gemma4. Then come **Other servers & cloud APIs** and **Own sessions** (ones you drive yourself).
 
 ---
 

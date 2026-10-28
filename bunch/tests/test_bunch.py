@@ -715,18 +715,64 @@ def test_router_prefers_cheap_and_skips_cooling_and_offline(env):
     assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == ["alice"]
 
 
+def _hosts(app, llm, table):
+    async def hosts():
+        return table
+    llm.model_hosts = hosts
+    app.state.hub._hosts_at = 0  # drop the cache the startup pass filled
+
+
 def test_gateway_models_show_which_machine_they_run_on(env):
     c, k, app, llm = env
-
-    async def hosts():
-        return {"local/small": "192.0.2.7", "paid/big": "api.example.com"}
-    llm.model_hosts = hosts
+    _hosts(app, llm, {"local/small": "192.0.2.7", "paid/big": "api.example.com"})
     _machine(c)
     c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
     c.post("/api/admin/agents", json={"name": "big", "model": "paid/big"}, headers=adm())
     agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
     assert agents["helper"]["runs_on"] == "beep-boop" and agents["big"]["runs_on"] == "api.example.com"
     assert agents["alice"]["runs_on"] is None
+    # Grouped by the computer that answers: the local model lives on beep-boop, the API on no machine.
+    assert agents["helper"]["machine"] == "beep-boop" and agents["big"]["machine"] is None
+    models = {m["name"]: m for m in c.get("/api/admin/models", headers=adm()).json()}
+    assert models["local/small"] == {"name": "local/small", "runs_on": "beep-boop", "machine": "beep-boop"}
+    assert models["paid/big"]["machine"] is None and models["paid/big"]["runs_on"] == "api.example.com"
+
+
+def test_gateway_agent_goes_offline_with_its_machine(env):
+    import time
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    _hosts(app, llm, {"local/small": "beep-boop.example.ts.net"})
+    _machine(c)
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    asyncio.run(hub.refresh_model_hosts())
+    hub.store.x("UPDATE machines SET last_seen=? WHERE name='beep-boop'", (time.time() - 600,))
+    calls = len(llm.calls)
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@helper still there?"}, headers=adm())
+    asyncio.run(autoreply_once(hub))
+    msgs = c.get("/api/admin/rooms/r/messages", headers=adm()).json()
+    assert msgs[-1]["sender"] == "helper" and "beep-boop is offline, so local/small can't answer" in msgs[-1]["summary"]
+    assert len(llm.calls) == calls  # the model wasn't asked
+    assert {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}["helper"]["state"] == "offline"
+
+
+def test_gateway_error_gets_a_note_not_silence(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+
+    async def down(*a, **kw):
+        from bunch.llm import LLMError
+        raise LLMError("gateway unreachable: ConnectError")
+    llm.chat = down
+    hub.post("human", "r", "@helper hi", human=True)
+    asyncio.run(autoreply_once(hub))
+    last = c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]
+    assert last["sender"] == "helper" and "local/small didn't answer: gateway unreachable" in last["summary"]
+    asyncio.run(autoreply_once(hub))  # not retried or repeated
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["id"] == last["id"]
 
 
 def test_worker_power_is_clamped_by_host():

@@ -25,6 +25,7 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
     st, s = hub.store, hub.s
     if not s.router_model or not hub.llm.enabled:
         return []
+    await hub.refresh_model_hosts()  # a gateway model whose machine is off is offline too
     cutoff = time.time() - 600
     agents = []
     for a in st.agents():

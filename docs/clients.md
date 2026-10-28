@@ -23,11 +23,11 @@ Add `--scope user` to make it available in every project. Then, for example:
 
 To keep context small, tell the agent to rely on `read` and to use `get` only when a summary isn't enough. The tools already work that way; this just reinforces it.
 
-Claude Code connected this way **connects itself**: it only sees the chat when it calls `read`, which happens when you prompt it. To have it keep listening while a session is open, use `read` with `wait` (it blocks up to 60 s until something arrives), for example:
+Claude Code connected this way is **its own session**: it only sees the chat when it calls `read`, which happens when you prompt it. To have it keep listening while a session is open, use `read` with `wait` (it blocks up to 60 s until something arrives), for example:
 
 > /loop Check bunch with read wait=60. Answer anything addressed to you, then loop.
 
-To have a computer answer with its Claude Code, Codex or Antigravity login while you're somewhere else, pair it as a [machine](#machines) instead. To have a gateway model answer with nothing running anywhere, put the agent on the hub: pick "On the hub" in the viewer's "+ new agent" form, or `bunch.cli add-agent helper --model local/general`.
+To have a computer answer with its Claude Code, Codex or Antigravity login while you're somewhere else, pair it as a [machine](#machines) instead. To have a gateway model answer with no client running, pick that model under "Who answers?" in the viewer's "+ new agent" form, or run `bunch.cli add-agent helper --model local/general`.
 
 ## Other MCP clients (JSON config)
 
@@ -137,8 +137,7 @@ This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your 
 
 3. The machine turns **online** in the sidebar. Click its name to see the CLIs and versions it found, and what it allows.
 
-**Put agents on it:** in **+ new agent**, choose **Where does it run? → On beep-boop**, then:
-- **CLI**: only the ones that machine reported.
+**Put agents on it:** in **+ new agent**, under **Who answers?**, pick one of that computer's CLIs (only the ones it reported, e.g. *beep-boop: Claude Code*), then:
 - **Model**: suggestions come from the machine (Claude's aliases, Antigravity's `agy models`). Blank uses the CLI's default. Cheaper models stretch a plan further.
 - **Deep model**: used only when a message contains `!deep`.
 - **Powers**:
@@ -147,7 +146,7 @@ This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your 
   - **Edit files and run commands in a folder**: anyone who can @mention it can change things there.
 - **Max answer** in tokens, and an optional **Persona**.
 
-Agents on a machine have no key of their own; the machine speaks for them. Move an agent between machines (or to the hub) from its panel at any time.
+Agents on a machine have no key of their own; the machine speaks for them. Switch what answers for an agent (another CLI, another computer, or a gateway model) from its panel at any time.
 
 **This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only.
 
@@ -170,7 +169,7 @@ Agents on a machine have no key of their own; the machine speaks for them. Move 
   | Antigravity | about 8k | no plan mode, which writes a plan file instead of answering |
   | Codex | about 15k (mostly cached) | |
 
-  For quick questions, Claude or a hub agent on a local model is cheapest.
+  For quick questions, Claude or a gateway agent on a local model is cheapest.
 - Jobs run one at a time per machine. Backlog older than 5 minutes is skipped when the service starts. Other agents get an answer only when they write `@name`.
 - On a plan-limit error, that CLI cools down until the reset time in its message (or `WORKER_COOLDOWN`). Every agent on that CLI shows **cooling · 14:05**, and the hub answers for them with a short note until then.
 - Tokens and calls count toward each agent's daily budget, shown in the sidebar.

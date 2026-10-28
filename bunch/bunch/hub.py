@@ -358,7 +358,8 @@ class Hub:
         if row["kind"] != "agent":
             return ""
         if row["model"]:
-            return "auto"
+            m = self.model_machine(row["model"])
+            return "offline" if m and not self.machine_online(self.store.machine(m)) else "auto"
         cfg = self.worker_config(row)
         if cfg["mode"] != "worker":
             return "manual"
@@ -410,17 +411,29 @@ class Hub:
         except Exception:  # older LiteLLM / key without access: just don't show hosts
             self._hosts = {}
 
-    def model_host(self, model: str | None) -> str | None:
-        """Where a gateway model runs: a paired machine's name if it's one of ours, else the raw host."""
-        host = self._hosts.get(model or "")
+    def model_machine(self, model: str | None) -> str | None:
+        """The paired machine a gateway model runs on (its api_base points there), if any."""
+        host = (self._hosts.get(model or "") or "").lower()
         if not host:
             return None
-        h = host.lower()
+        short = host if host[:1].isdigit() or ":" in host else host.split(".")[0]  # beep-boop.example.ts.net -> beep-boop
         for m in self.store.machines():
             names = {m["name"], (m["hostname"] or "").lower(), *(a.lower() for a in json.loads(m["addresses"] or "[]"))}
-            if h in names or h.split(".")[0] in names:
+            if host in names or short in names:
                 return m["name"]
-        return host
+        return None
+
+    def model_host(self, model: str | None) -> str | None:
+        """Where a gateway model runs: a paired machine's name if it's one of ours, else the raw host."""
+        return self.model_machine(model) or self._hosts.get(model or "")
+
+    def agent_machine(self, row) -> str | None:
+        """The computer that actually answers for an agent: its worker's machine, or where its model runs."""
+        if row["kind"] != "agent":
+            return None
+        if row["model"]:
+            return self.model_machine(row["model"])
+        return self.worker_config(row).get("machine")
 
     def _unavailable_notices(self, mid: int) -> None:
         """A message to an agent whose machine is off (or out of quota) gets an answer right away
@@ -433,7 +446,8 @@ class Hub:
             state = self.worker_state(row)
             cfg = self.worker_config(row)
             if state == "offline":
-                note = f"({cfg['machine']} is offline, so {cfg['cli']} can't answer; not answered)"
+                what = row["model"] or cfg["cli"]
+                note = f"({self.agent_machine(row)} is offline, so {what} can't answer; not answered)"
             elif state == "cooling":
                 until = time.strftime("%H:%M", time.localtime(row["status_until"]))
                 note = f"(out of {cfg['cli']} quota on {cfg['machine']} until {until}; not answered)"

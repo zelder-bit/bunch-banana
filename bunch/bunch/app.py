@@ -467,12 +467,14 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "sub_tokens_today": u["sub"], "sub_calls_today": u["calls"],
                         "state": hub.worker_state(a), "status_until": a["status_until"],
                         "worker": _worker_view(hub.worker_config(a), admin),
-                        "runs_on": hub.model_host(a["model"]) if a["model"] else None})
-        for system in ("_summarizer", "_router"):
+                        "runs_on": hub.model_host(a["model"]) if a["model"] else None,
+                        "machine": hub.agent_machine(a)})
+        for system, model in (("_summarizer", s.summary_model), ("_router", s.router_model)):
             u = store.usage_today(system)
             if system == "_summarizer" or u["ask"]:
                 out.append({"name": system, "kind": "system", "last_seen": None, "description": "",
-                            "model": None, "daily_tokens": None,
+                            "model": model or None, "daily_tokens": None,
+                            "runs_on": hub.model_host(model) if model else None, "machine": hub.model_machine(model),
                             "ask_tokens_today": u["ask"], "ctx_tokens_today": 0})
         return out
 
@@ -482,9 +484,11 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         if not llm.enabled:
             return []
         try:
-            return await llm.models()
+            names = await llm.models()
         except LLMError as e:
             raise HTTPException(502, str(e))
+        await hub.refresh_model_hosts()
+        return [{"name": n, "runs_on": hub.model_host(n), "machine": hub.model_machine(n)} for n in names]
 
     @app.post("/api/admin/agents")
     async def admin_add_agent(request: Request, body: AgentIn, authorization: str | None = Header(None)):

@@ -241,7 +241,7 @@
       const active = a.last_seen && Date.now() / 1000 - a.last_seen < 600;
       const stats = [];
       if (a.worker?.mode === "worker") stats.push(CLI_NAMES[a.worker.cli] + (a.worker.model ? " · " + a.worker.model : ""));
-      else if (a.model) stats.push(a.model + (a.runs_on ? " on " + a.runs_on : ""));
+      else if (a.model) stats.push(a.model + " · via gateway" + (!a.machine && a.runs_on ? " on " + a.runs_on : ""));
       else if (a.kind === "agent") stats.push("seen " + ago(a.last_seen));
       const spent = a.ask_tokens_today + (a.sub_tokens_today || 0);
       if (a.ask_tokens_today || a.kind !== "agent" || !a.sub_calls_today)
@@ -266,28 +266,32 @@
       : null;
     const head = (title, note, extra = {}) => h("div", { class: "group-head", ...extra }, ...title, note ? h("span", { class: "muted" }, note) : null);
     const agents = list.filter(a => a.kind === "agent");
-    const onMachine = (a) => a.worker?.mode === "worker";
+    const systems = list.filter(a => a.kind === "system");
+    const viaGateway = (a) => !!a.model;
+    // Grouped by the computer that actually answers: a CLI login there, or a gateway model served from it.
     $("agents").replaceChildren(...[
       ...ms.map(m => group(head(
-        [h("span", { class: "dot" + (m.online ? " on" : ""), title: m.online ? "worker running" : "off, or its worker isn't running" }), "On " + m.name],
+        [h("span", { class: "dot" + (m.online ? " on" : ""), title: m.online ? "worker running" : "off, or its worker isn't running" }), m.name],
         m.online ? "online" : "offline · seen " + ago(m.last_seen),
         me.admin ? { class: "group-head clickable", ...clickable(() => openMachinePanel(m), "Machine " + m.name) } : {}),
-        agents.filter(a => onMachine(a) && a.worker.machine === m.name),
-        me.admin ? "No agents here yet. Add one below and pick this machine." : "No agents here yet.")),
-      group(head(["On the hub"], "gateway models"), [...agents.filter(a => a.model), ...list.filter(a => a.kind === "system")]),
-      group(head(["Connects itself"], "with its own key"), agents.filter(a => !a.model && !onMachine(a))),
+        [...agents.filter(a => a.machine === m.name), ...systems.filter(a => a.machine === m.name)],
+        me.admin ? "Nothing here yet. Add an agent below and pick this computer." : "Nothing here yet.")),
+      group(head(["Other servers & cloud APIs"], "via gateway"),
+        [...agents.filter(a => viaGateway(a) && !a.machine), ...systems.filter(a => !a.machine)]),
+      group(head(["Own sessions"], "connect with a key"), agents.filter(a => !viaGateway(a) && a.worker?.mode !== "worker")),
     ].filter(Boolean));
     if (!agents.length && !ms.length) $("agents").append(h("p", { class: "muted small" }, "No agents yet."));
   }
 
   function stateTag(a) {
     const until = a.status_until ? new Date(a.status_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-    const where = a.worker?.machine;
+    const where = a.machine;
     switch (a.state) {
       case "online": return h("span", { class: "tag worker", title: `${where} answers with ${CLI_NAMES[a.worker.cli]}` }, a.worker.cli);
       case "busy": return h("span", { class: "tag worker", title: `${where} is running ${CLI_NAMES[a.worker.cli]} on a message` }, "busy");
       case "cooling": return h("span", { class: "tag cooling", title: `Hit the ${CLI_NAMES[a.worker.cli]} plan limit; messages get a note until ${until}` }, "cooling · " + until);
-      case "offline": return h("span", { class: "tag", title: `${where} is off or its worker isn't running; messages get an "offline" note` }, "offline");
+      case "offline": return h("span", { class: "tag", title: a.model ? `${where} is off, so ${a.model} can't answer; messages get an "offline" note`
+        : `${where} is off or its worker isn't running; messages get an "offline" note` }, "offline");
       default: return null;
     }
   }
@@ -331,22 +335,30 @@
     return modelCache;
   }
 
-  // "Where does it run?" — the one choice that decides how an agent answers. Used by the
-  // new-agent form and the agent panel. Returns the fields plus a payload() for saving.
+  // "Who answers?" — the one choice that decides how an agent answers, listed by the computer that
+  // runs it: a CLI login there, or a gateway model served from it. Used by the new-agent form and
+  // the agent panel. Returns the fields plus a payload() for saving.
   let pickerId = 0;
   async function wherePicker(a) {
     const w = a?.worker || { mode: "manual" };
     const opt = (v, label, extra = {}) => h("option", { value: v, ...extra }, label);
-    const models = [...new Set([...(await modelList()), ...(a?.model ? [a.model] : [])])];
-    const where = h("select", { "aria-label": "Where does it run?" },
-      ...machines.map(m => opt("m:" + m.name, `On ${m.name}${m.online ? "" : " (offline now)"}, with its CLI login`)),
-      opt("hub", models.length ? "On the hub, with a gateway model" : "On the hub (no gateway models)", models.length ? {} : { disabled: true }),
-      opt("self", "It connects itself, with its own key"));
-    where.value = w.mode === "worker" ? "m:" + w.machine : a?.model ? "hub" : a ? "self"
-      : machines.length ? "m:" + (machines.find(m => m.online) || machines[0]).name : models.length ? "hub" : "self";
-    const hubModel = h("select", { "aria-label": "Gateway model" }, ...models.map(m => opt(m, m)));
-    if (a?.model) hubModel.value = a.model;
-    const cli = h("select", { "aria-label": "CLI" });
+    const models = [...await modelList()];
+    if (a?.model && !models.some(m => m.name === a.model)) models.push({ name: a.model, runs_on: a.runs_on, machine: a.machine });
+    const who = h("select", { "aria-label": "Who answers?" },
+      ...machines.map(m => h("optgroup", { label: m.name + (m.online ? "" : " (offline now)") },
+        ...(m.clis.length ? m.clis.map(c => opt(`cli:${m.name}:${c.cli}`, `${CLI_NAMES[c.cli] || c.cli}: your subscription login`))
+          : [opt("", "(run the install command on it first)", { disabled: true })]),
+        ...models.filter(x => x.machine === m.name).map(x => opt("model:" + x.name, `${x.name}, via the gateway`)))),
+      ...(models.some(x => !x.machine) ? [h("optgroup", { label: "Other servers & cloud APIs" },
+        ...models.filter(x => !x.machine).map(x => opt("model:" + x.name, x.name + (x.runs_on ? ` on ${x.runs_on}` : " (API)"))))] : []),
+      h("optgroup", { label: "Not run by bunch" }, opt("self", "Its own session (e.g. a Claude Code you drive), with a key")));
+    const firstCli = machines.flatMap(m => m.clis.map(c => `cli:${m.name}:${c.cli}`))[0];
+    const want = w.mode === "worker" ? `cli:${w.machine}:${w.cli}` : a?.model ? "model:" + a.model : a ? "self"
+      : firstCli || (models[0] ? "model:" + models[0].name : "self");
+    who.value = want;
+    if (who.value !== want)  // e.g. its machine stopped reporting that CLI: keep the current choice, don't silently change it
+      who.prepend(opt(want, w.mode === "worker" ? `${CLI_NAMES[w.cli] || w.cli} on ${w.machine} (not reported there)` : want));
+    who.value = want;
     const listId = "cliModels" + (++pickerId);
     const suggestions = h("datalist", { id: listId });
     const cliModel = h("input", { type: "text", list: listId, value: w.model || "", placeholder: "CLI default" });
@@ -358,49 +370,46 @@
     const maxOut = h("input", { type: "number", min: "50", max: "8000", step: "50", value: w.max_output || 800 });
     const persona = h("textarea", { rows: 2, placeholder: "Persona (optional)" }, a?.system || "");
     const powerHint = h("span", { class: "muted small hint" });
-    const dirField = field("Folder", dir, "Must also be in WORKER_DIRS on that machine.");
-    const machineBox = h("div", { class: "field-group" },
-      field("CLI", cli), field("Model", cliModel, "Blank = the CLI's default. A cheaper model stretches the plan."), suggestions,
+    const dirField = field("Folder", dir, "Must also be in WORKER_DIRS on that computer.");
+    const cliBox = h("div", { class: "field-group" },
+      field("Model", cliModel, "Blank = the CLI's default. A cheaper model stretches the plan."), suggestions,
       field("Deep model", deep, "Used only when a message contains !deep."),
       field("Powers", power, powerHint), dirField, field("Max answer (tokens)", maxOut));
-    const hubBox = field("Gateway model", hubModel, "The hub answers right away using this model.");
-    const selfNote = h("p", { class: "muted small hint" }, "It gets a key to paste into that tool's bunch settings (e.g. Claude Code's MCP). It only sees messages when that session checks the chat.");
+    const whoHint = h("span", { class: "muted small hint" });
     const personaField = field("Persona", persona);
-    const machineOf = () => machines.find(m => "m:" + m.name === where.value);
-    const fillCli = () => {
-      const m = machineOf();
-      const clis = m?.clis?.length ? m.clis : Object.keys(CLI_NAMES).map(c => ({ cli: c, models: [] }));
-      const keep = clis.some(c => c.cli === cli.value) ? cli.value : clis.some(c => c.cli === w.cli) ? w.cli : clis[0].cli;
-      cli.replaceChildren(...clis.map(c => opt(c.cli, CLI_NAMES[c.cli] || c.cli)));
-      cli.value = keep;
-      fillModels();
-    };
-    const fillModels = () => {
-      const c = (machineOf()?.clis || []).find(c => c.cli === cli.value);
-      suggestions.replaceChildren(...(c?.models || []).map(m => h("option", { value: m })));
+    const picked = () => {
+      const [kind, m, c] = who.value.split(":");
+      if (kind === "cli") return { kind, machine: machines.find(x => x.name === m), cli: c };
+      if (kind === "model") return { kind, model: who.value.slice(6) };
+      return { kind: "self" };
     };
     const sync = () => {
-      const m = machineOf(), v = where.value;
-      machineBox.hidden = !m; hubBox.hidden = v !== "hub"; selfNote.hidden = v !== "self"; personaField.hidden = v === "self";
+      const p = picked();
+      const m = p.machine;
+      cliBox.hidden = p.kind !== "cli"; personaField.hidden = p.kind === "self";
       dirField.hidden = power.value === "answer";
+      const info = p.kind === "model" ? models.find(x => x.name === p.model) : null;
+      whoHint.textContent = p.kind === "cli" ? `${m.name} runs ${CLI_NAMES[p.cli]} with the login on it, and answers while it's on.`
+        : p.kind === "model" ? `The gateway sends each message to ${p.model}` + (info?.runs_on ? ` on ${info.runs_on}` : "") + ". It answers right away."
+        : "It gets a key to paste into that tool's bunch settings (e.g. Claude Code's MCP). It only sees messages when that session checks the chat.";
+      const c = m?.clis.find(x => x.cli === p.cli);
+      suggestions.replaceChildren(...(c?.models || []).map(x => h("option", { value: x })));
       const rank = ["answer", "read", "full"];
       const capped = m && rank.indexOf(power.value) > rank.indexOf(m.max_power || "answer");
       powerHint.textContent = (capped ? `${m.name} only allows "${m.max_power}" (WORKER_MAX_POWER there), so it will run as that. ` : "")
         + (power.value === "full" ? "Anyone who can @mention this agent can make it change files and run commands there."
           : power.value === "read" ? "Can read anything in the folder and quote it into the chat." : "");
     };
-    where.onchange = () => { fillCli(); sync(); };
-    cli.onchange = fillModels;
-    power.onchange = sync;
-    fillCli(); sync();
+    who.onchange = power.onchange = sync;
+    sync();
     return {
-      fields: [field("Where does it run?", where), machineBox, hubBox, selfNote, personaField],
+      fields: [field("Who answers?", who, whoHint), cliBox, personaField],
       payload() {
-        const m = machineOf();
-        if (m) return { model: "", system: persona.value.trim(), worker: { mode: "worker", machine: m.name, cli: cli.value,
-          model: cliModel.value.trim(), deep_model: deep.value.trim(), power: power.value, dir: dir.value.trim(),
+        const p = picked();
+        if (p.kind === "cli") return { model: "", system: persona.value.trim(), worker: { mode: "worker", machine: p.machine.name,
+          cli: p.cli, model: cliModel.value.trim(), deep_model: deep.value.trim(), power: power.value, dir: dir.value.trim(),
           max_output: Math.round(Number(maxOut.value) || 800) } };
-        if (where.value === "hub") return { model: hubModel.value, system: persona.value.trim(), worker: { mode: "manual" } };
+        if (p.kind === "model") return { model: p.model, system: persona.value.trim(), worker: { mode: "manual" } };
         return { model: "", system: "", worker: { mode: "manual" } };
       },
     };
@@ -437,7 +446,7 @@
     openPanel(a.name,
       field("Good at", desc, "The router uses this to pick who answers."),
       ...picker.fields,
-      field("Daily token budget", budget, "Gateway asks plus CLI runs on a machine. Blank = server default, 0 = unlimited."),
+      field("Daily token budget", budget, "Gateway model calls plus CLI runs. Blank = server default, 0 = unlimited."),
       h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Save")),
       h("div", { class: "panel-danger" },
         selfAgent ? h("button", { type: "button", class: "btn small", onclick: rotate }, "New key") : null,
@@ -846,7 +855,7 @@
     catch (err) { toast(err.message, "bad"); }
   };
 
-  // New agent: typing a name reveals "Where does it run?" and what that choice needs.
+  // New agent: typing a name reveals "Who answers?" and what that choice needs.
   let newPicker = null;
   $("agentName").addEventListener("input", async () => {
     $("agentMore").hidden = !$("agentName").value.trim();
@@ -864,7 +873,8 @@
       if (r.machine) {
         $("keyOut").replaceChildren(h("strong", null, `${r.name} lives on ${r.machine}`), h("span", { class: "muted" }, `. @mention it from any device; ${r.machine} answers while it's on.`));
       } else if (p.model) {
-        $("keyOut").replaceChildren(h("strong", null, `${r.name} is ready`), h("span", { class: "muted" }, ". @mention it in any room and the hub answers for it."));
+        const where = (await modelList()).find(x => x.name === p.model)?.runs_on;
+        $("keyOut").replaceChildren(h("strong", null, `${r.name} answers with ${p.model}${where ? " on " + where : ""}`), h("span", { class: "muted" }, ". @mention it in any room."));
       } else {
         $("keyOut").replaceChildren(...keyBlock(r.name, r.key));
       }

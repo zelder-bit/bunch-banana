@@ -96,13 +96,15 @@ docker compose exec bunch python -m bunch.cli add-agent coder --daily 100000
 
 You can also create agents from the web viewer's sidebar.
 
-**Where an agent lives.** Every agent answers from one of three places, and the viewer groups them that way:
+**Who answers.** The viewer groups agents by the computer that actually does the work, and the "Who answers?" picker lists the choices the same way:
 
-| Place | Who answers | Set up |
+| Choice | What happens | Set up |
 |---|---|---|
-| **On a machine** (e.g. `beep-boop`) | That machine's Claude Code, Codex or Antigravity login, run headless by `clients/worker.py` | Add the machine once, then put agents on it |
-| **On the hub** | A gateway model (Ollama anywhere, paid APIs), answered by the hub itself | Pick a gateway model |
-| **Connects itself** | A session you drive, e.g. Claude Code with the bunch MCP server and the agent's key | Paste its key into that tool |
+| **A CLI on a computer** (e.g. Claude Code on `beep-boop`) | `clients/worker.py` on that computer runs the CLI headless with its subscription login | Pair the computer once, then pick its CLI |
+| **A gateway model** (e.g. `gemma4:26b`, listed under `beep-boop` when its Ollama runs there) | The hub sends the message through the gateway to that model | Pick the model |
+| **Its own session** | A session you drive, e.g. Claude Code with the bunch MCP server and the agent's key | Paste its key into that tool |
+
+Models on servers that aren't paired, and paid APIs, are listed under "Other servers & cloud APIs".
 
 **Machines** let you reach the paid CLIs on one computer from any other device. In the viewer, type a name in "+ add machine". It shows an install command once; run it on that computer, as the user logged in to the CLIs:
 
@@ -110,7 +112,7 @@ You can also create agents from the web viewer's sidebar.
 python3 clients/worker.py install --hub http://<server>:8700 --key bunchm_...
 ```
 
-That installs a systemd user service that starts at boot and reports which CLIs and models the machine has. Then make agents with "Where does it run? → On <machine>", pick a CLI and model, and @mention them from your laptop or phone. While the machine is off, the hub replies at once that it's offline, and the message is dropped rather than answered hours later.
+That installs a systemd user service that starts at boot and reports which CLIs and models the machine has. Then make agents with "Who answers? → <machine>: Claude Code" (or Codex, Antigravity), pick a model, and @mention them from your laptop or phone. While the machine is off, the hub replies at once that it's offline, and the message is dropped rather than answered hours later.
 
 It's built to make a $20 plan last:
 - Every run starts fresh with only the room summary and the message.
@@ -122,16 +124,16 @@ It's built to make a $20 plan last:
 
 See [docs/clients.md](docs/clients.md#machines).
 
-The hub also asks LiteLLM where each gateway model runs. A local model served from a paired machine shows "gemma4:26b on beep-boop".
+The hub asks LiteLLM where each gateway model runs, so a local model served from a paired computer is grouped under it. If that computer is off, the model's agents reply "offline" too.
 
-Hub agents can also be made from the CLI:
+Gateway-model agents can also be made from the CLI:
 
 ```bash
 docker compose exec bunch python -m bunch.cli add-agent helper --model local/general \
   --desc "general questions" --system "You are helper. Be brief."
 ```
 
-**Routing:** set `BUNCH_ROUTER_MODEL` (e.g. `local/summary`) and a human message that @mentions nobody gets sent to the best agent(s), picked from their descriptions (`bunch.cli describe <agent> "..."`). It goes cheapest first: hub agents on local models, then an agent on a machine only for harder work. It never picks one whose machine is off or out of quota. Without it, an un-@'d message goes to the whole room, and only agents that read the room will see it.
+**Routing:** set `BUNCH_ROUTER_MODEL` (e.g. `local/summary`) and a human message that @mentions nobody gets sent to the best agent(s), picked from their descriptions (`bunch.cli describe <agent> "..."`). It goes cheapest first: gateway agents on local models, then a CLI agent only for harder work. It never picks one whose machine is off or out of quota. Without it, an un-@'d message goes to the whole room, and only agents that read the room will see it.
 
 Check the gateway works:
 
