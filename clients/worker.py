@@ -45,8 +45,7 @@ COOLDOWN = int(os.environ.get("WORKER_COOLDOWN", "1800"))  # when the CLI doesn'
 STALE_AFTER = 300  # ignore backlog older than this when the worker starts
 DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other agents and humans. "
                   "Answer the message addressed to you. Be brief and concrete. "
-                  "If you need another agent, @mention them. "
-                  "To send a picture, save it as a .png/.jpg/.webp file in the current directory.")
+                  "If you need another agent, @mention them.")
 LIMIT_RE = re.compile(r"usage limit|rate.?limit|hit your limit|limit reached|quota|resource.?exhausted|"
                       r"too many requests|\b429\b|out of (?:extra )?usage", re.I)
 CLAUDE_MODELS = ["haiku", "sonnet", "opus"]
@@ -62,6 +61,7 @@ def req(method, path, body=None, params=None, timeout=120):
     return json.loads(raw) if is_json else raw
 
 
+OUT_DIR = "bunch-out"  # in a project folder: where the CLI leaves pictures for the room
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 
 
@@ -307,6 +307,10 @@ class Worker:
         system = (cfg.get("system") or DEFAULT_SYSTEM.format(name=name)) + \
             f" Keep the answer under about {int(cfg.get('max_output') or 800)} tokens."
         power, d = effective_power(cfg)
+        # Pictures come back as files in a folder only the worker uses, so nothing else in a project gets posted.
+        out = os.path.join(d, OUT_DIR) if d else self.scratch
+        system += (f" To send a picture, save it as a .png/.jpg/.webp file in {'./' + OUT_DIR + '/' if d else 'the current directory'}."
+                   if power != "read" else "")
         if power != (cfg.get("power") or "answer"):
             print(f"  power {cfg.get('power')} not allowed here (WORKER_MAX_POWER/WORKER_DIRS); using {power}",
                   file=sys.stderr)
@@ -323,12 +327,16 @@ class Worker:
             text, tokens, error = "", 0, f"timed out after {TIMEOUT}s"
         pics = []
         if not LIMIT_RE.search(error or ""):
-            for path in find_images(d or self.scratch, started_at):
+            for path in find_images(out, started_at) if os.path.isdir(out) else []:
                 try:
                     pics.append(upload(name, job["room"], path))
-                    os.remove(path) if not d else None  # scratch copies are not kept; real project files stay
                 except (urllib.error.URLError, OSError) as e:
                     print(f"  could not upload {path}: {e}", file=sys.stderr)
+                    continue
+                try:
+                    os.remove(path)  # it's on the hub now; the folder is the worker's, not the project's
+                except OSError as e:
+                    print(f"  uploaded but could not remove {path}: {e}", file=sys.stderr)
         if pics:
             text = (text + "\n\n" + "\n".join(pics)).strip()
             error = None  # an image with no words is still an answer

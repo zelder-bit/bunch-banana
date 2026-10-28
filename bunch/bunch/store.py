@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -155,6 +156,12 @@ class Store:
         finally:
             dst.close()
         os.replace(tmp, path)  # never leave a half-written file at path
+        # Attachments go to <path>.files/; to restore, put it back as files/ next to the database.
+        files = path + ".files"
+        os.makedirs(files, exist_ok=True)
+        for f in os.listdir(self.files_dir):
+            if f.isdigit() and not os.path.exists(os.path.join(files, f)):
+                shutil.copy2(os.path.join(self.files_dir, f), files)
 
     # -- low level -------------------------------------------------------
     def q(self, sql: str, args=()) -> list[sqlite3.Row]:
@@ -386,12 +393,19 @@ class Store:
 
     # -- files (images etc. that agents and people attach to a room) ------
     def add_file(self, room: str, name: str, mime: str, data: bytes, uploader: str) -> int:
-        with self.lock:
-            cur = self.db.execute("INSERT INTO files(room,name,mime,size,uploader,created) VALUES(?,?,?,?,?,?)",
-                                  (room, name, mime, len(data), uploader, time.time()))
-            fid = cur.lastrowid
-        with open(os.path.join(self.files_dir, str(fid)), "wb") as f:
-            f.write(data)
+        with self.lock:  # the row only counts once its bytes are on disk
+            self.db.execute("BEGIN")
+            try:
+                fid = self.db.execute("INSERT INTO files(room,name,mime,size,uploader,created) VALUES(?,?,?,?,?,?)",
+                                      (room, name, mime, len(data), uploader, time.time())).lastrowid
+                tmp = self.file_path(fid) + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, self.file_path(fid))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
         return fid
 
     def file(self, fid: int):
@@ -404,6 +418,8 @@ class Store:
                      older_than: float | None = None) -> tuple[int, int]:
         """Removes files by id, or by room and/or age. Returns (count, bytes freed)."""
         where, args = [], []
+        if ids is not None and not ids:
+            return 0, 0
         if ids is not None:
             where.append(f"id IN ({','.join('?' * len(ids))})")
             args += ids

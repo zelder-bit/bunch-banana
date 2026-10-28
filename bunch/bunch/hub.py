@@ -17,6 +17,7 @@ WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edi
 WORKER_STATUSES = ("online", "busy", "cooling")
 WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long = off or not running
 
+FILE_REF = re.compile(r"!\[([^\]]*)\]\(file:(\d+)\)")  # an attached file, see /api/v1/machine/file
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
 
 
@@ -130,7 +131,7 @@ class Hub:
         elif len(text) <= self.s.summary_max and "\n" not in text:
             summ, body = text, None
         else:  # keep formatting in the body; summarizer may later improve a truncated summary
-            summ, body = one_line(text, self.s.summary_max), text
+            summ, body = one_line(FILE_REF.sub(lambda m: f"[{m[1] or 'file'}]", text), self.s.summary_max), text
             auto = len(text) > self.s.summary_max
 
         self.store.ensure_room(room)
@@ -476,7 +477,8 @@ class Hub:
         return f"ok {used}/{budget or 'unlimited'}"
 
     async def ask(self, agent: str, model: str, prompt: str | None = None, system: str | None = None,
-                  max_tokens: int | None = None, room: str | None = None) -> str:
+                  max_tokens: int | None = None, room: str | None = None, raw: bool = False) -> str:
+        """raw: return just the model's text ("" when it said nothing), for the hub's own callers."""
         if not self.llm.enabled:
             raise HubError("no model gateway configured (LITELLM_URL)")
         model = (model or "").strip()
@@ -496,6 +498,8 @@ class Hub:
             raise HubError(str(e)) from e
         self.store.add_usage(agent, ask=tokens)
         used += tokens
+        if raw:
+            return self._charge_ctx(agent, text or "")
         note = f"\n[budget {used}/{budget} today]" if budget and used > 0.8 * budget else ""
         if room:  # put the answer in a room for visibility; hand back only the short line
             res = self.post(agent, room, text or "(empty answer)")

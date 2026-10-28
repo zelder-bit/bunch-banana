@@ -10,6 +10,7 @@
   docker compose exec bunch python -m bunch.cli budget coder 50000     (0 = unlimited, 'default' = server default)
   docker compose exec bunch python -m bunch.cli remove coder
   docker compose exec bunch python -m bunch.cli backup /data/backup.db  (safe while the hub runs)
+      attachments are copied to /data/backup.db.files/ (restore it as /data/files/)
 """
 from __future__ import annotations
 

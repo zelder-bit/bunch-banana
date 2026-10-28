@@ -882,6 +882,11 @@ def test_files_upload_serve_and_purge(env):
     listing = c.get("/api/admin/files", headers=adm()).json()
     assert listing["rooms"][0]["n"] == 2 and len(listing["files"]) == 2
     assert c.post("/api/admin/files/purge", json={}, headers=adm()).status_code == 400
+    assert c.post("/api/admin/files/purge", json={"ids": []}, headers=adm()).json()["deleted"] == 0
+    uni = up("ハロウィン.pdf", "application/pdf", b"%PDF").json()["id"]  # non-Latin-1 name downloads
+    r = c.get(f"/api/admin/files/{uni}", headers=adm())
+    assert r.status_code == 200 and "filename*=UTF-8''%E3%83%8F" in r.headers["content-disposition"]
+    c.post("/api/admin/files/purge", json={"ids": [uni]}, headers=adm())
     assert c.post("/api/admin/files/purge", json={"ids": [svg]}, headers=adm()).json()["deleted"] == 1
     assert c.put("/api/admin/files/retention", json={"days": 7}, headers=adm()).json()["retention_days"] == 7
     assert c.get(f"/api/admin/files/{fid}", headers=adm()).status_code == 200  # younger than 7 days
@@ -897,14 +902,31 @@ def test_auto_agent_stays_quiet_when_model_returns_nothing_to_an_agent(env):
     c, k, app, _ = env
     hub = app.state.hub
 
-    async def empty(*a, **kw):
-        return "(empty answer)"
+    async def empty(*a, raw=False, **kw):
+        return "" if raw else "(empty answer)"
     hub.ask = empty
     app.state.hub.store.x("UPDATE agents SET model='m' WHERE name='bob'")
     tool(c, k["alice"], "post", room="r", text="@bob hello", to="bob")
     asyncio.run(autoreply_once(hub))
     asyncio.run(autoreply_once(hub))
     assert not hub.store.q("SELECT 1 FROM messages WHERE sender='bob'")
-    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@bob you there?"}, headers=adm())
+    hub.post("human", "r", "@bob you there?", human=True)
     asyncio.run(autoreply_once(hub))
     assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
+
+
+def test_long_reply_summary_names_attachments_instead_of_cutting_them(env):
+    c, k, app, _ = env
+    hub = app.state.hub
+    hub.post("alice", "r", "x" * 150 + "\n\n![halloween-1.png](file:12)")
+    m = hub.store.q("SELECT * FROM messages ORDER BY id DESC LIMIT 1")[0]
+    assert "file:" not in m["summary"] and "(file:12)" in m["body"]
+
+
+def test_backup_copies_attachments(tmp_path):
+    from bunch.store import Store
+    st = Store(str(tmp_path / "live" / "bunch.db"))
+    st.ensure_room("r")
+    fid = st.add_file("r", "a.png", "image/png", PNG, "alice")
+    st.backup(str(tmp_path / "bk.db"))
+    assert (tmp_path / "bk.db.files" / str(fid)).read_bytes() == PNG

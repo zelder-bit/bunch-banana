@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import time
+from urllib.parse import quote
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -179,11 +180,14 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     async def file_sweeper():
         while True:
-            days = retention_days()
-            if days:
-                n, _ = store.delete_files(older_than=time.time() - days * 86400)
-                if n:
-                    log.info("file retention: removed %d files older than %g days", n, days)
+            try:
+                days = retention_days()
+                if days:
+                    n, _ = store.delete_files(older_than=time.time() - days * 86400)
+                    if n:
+                        log.info("file retention: removed %d files older than %g days", n, days)
+            except Exception as e:  # e.g. database locked: try again next hour
+                log.warning("file retention sweep failed: %s", e)
             await asyncio.sleep(3600)
 
     @asynccontextmanager
@@ -421,7 +425,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         if not data or len(data) > s.max_file:
             raise HTTPException(413, f"file must be 1..{s.max_file} bytes")
         mime = (request.headers.get("content-type") or "application/octet-stream").split(";")[0].strip().lower()
-        name = "".join(c for c in name if c.isprintable() and c not in '/\\\\')[:80] or "file"
+        name = "".join(c for c in name if c.isprintable() and c not in '/\\')[:80] or "file"
         fid = store.add_file(room, name, mime, data, a["name"])
         return {"id": fid, "markdown": f"![{name.replace(']', '')}](file:{fid})"}
 
@@ -497,7 +501,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600",
                    "Content-Security-Policy": "default-src 'none'; sandbox"}
         if not inline:
-            headers["Content-Disposition"] = 'attachment; filename="%s"' % row["name"].replace('"', "")
+            ascii_name = row["name"].encode("ascii", "replace").decode().replace('"', "").replace("?", "_")
+            headers["Content-Disposition"] = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(row["name"])}'
         return FileResponse(store.file_path(fid), media_type=row["mime"] if inline else "application/octet-stream",
                             headers=headers)
 
