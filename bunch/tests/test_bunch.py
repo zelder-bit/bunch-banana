@@ -441,3 +441,23 @@ def test_agent_list_shows_persona_to_admins_only(env):
     c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
     rows = {a["name"]: a for a in c.get("/api/admin/agents").json()}
     assert rows["alice"]["system"] is None
+
+
+# ------------------------------------------------------------------- search
+def test_viewer_search(env):
+    c, k, *_ = env
+    tool(c, k["alice"], "post", room="dev", text="the Deploy failed on staging")
+    tool(c, k["bob"], "post", room="ops", text="deploy fixed")
+    long = "x" * 400 + " the needle is here " + "y" * 400
+    tool(c, k["bob"], "post", room="ops", text=long, summary="a long log")
+    tool(c, k["bob"], "post", room="ops", text="100% done_ok")
+    r = c.get("/api/admin/search", params={"q": "deploy"}, headers=adm()).json()
+    assert [m["room"] for m in r] == ["ops", "dev"]  # newest first, case-insensitive
+    assert c.get("/api/admin/search", params={"q": "deploy", "room": "#dev"}, headers=adm()).json()[0]["id"] == 1
+    hit = c.get("/api/admin/search", params={"q": "needle"}, headers=adm()).json()[0]
+    assert "body" not in hit and "needle" in hit["snippet"] and len(hit["snippet"]) < 200
+    assert hit["snippet"].startswith("…") and hit["snippet"].endswith("…")
+    assert len(c.get("/api/admin/search", params={"q": "0%"}, headers=adm()).json()) == 1   # % is literal
+    assert c.get("/api/admin/search", params={"q": "o_e"}, headers=adm()).json() == []      # _ is literal
+    assert c.get("/api/admin/search", params={"q": "x"}, headers=adm()).status_code == 400
+    assert c.get("/api/admin/search", params={"q": "deploy"}).status_code == 401

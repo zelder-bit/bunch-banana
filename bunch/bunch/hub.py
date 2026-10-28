@@ -31,6 +31,14 @@ def one_line(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _snippet(text: str, q: str, width: int = 160) -> str:
+    """One line of text around the first match of q."""
+    i = text.lower().find(q.lower())
+    start = max(0, i - width // 3) if i >= 0 else 0
+    piece = " ".join(text[start:start + width].split())
+    return ("…" if start else "") + piece + ("…" if start + width < len(text) else "")
+
+
 def _recips(m) -> list[str]:
     return [r for r in (m["recipients"] or "").strip(",").split(",") if r]
 
@@ -231,6 +239,28 @@ class Hub:
         if not rows:
             return "(empty)"
         return "recent: " + " | ".join(f"{x['sender']}: {one_line(x['summary'], 70)}" for x in rows[::-1])
+
+    # ---------------------------------------------------------------- search
+    def search(self, q: str, room: str | None = None, limit: int = 50) -> list[dict]:
+        """Viewer search: newest messages whose summary or body contains q (case-insensitive for ASCII)."""
+        q = " ".join((q or "").split())
+        if len(q) < 2:
+            raise HubError("search for at least 2 characters")
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where = "(summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')"
+        args: list = [like, like]
+        if room:
+            where += " AND room=?"
+            args.append(room.strip().lower().lstrip("#"))
+        rows = self.store.q(f"SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?",
+                            (*args, max(1, min(int(limit), 200))))
+        out = []
+        for m in rows:
+            j = self.message_json(m)
+            body = j.pop("body")  # bodies can be huge; send a line around the match instead
+            j["snippet"] = j["summary"] if not body or q.lower() in j["summary"].lower() else _snippet(body, q)
+            out.append(j)
+        return out
 
     # ------------------------------------------------------------------- get
     def get(self, agent: str, mid: int, offset: int = 0) -> str:

@@ -47,6 +47,9 @@
 
     <div class="body">
       <aside class="side">
+        <form class="search" id="searchForm" role="search">
+          <input type="search" class="pill" id="searchIn" placeholder="Search messages" aria-label="Search messages" minlength="2">
+        </form>
         <h2>Rooms</h2>
         <nav id="rooms" aria-label="Rooms"></nav>
         <form class="add" id="newRoomForm">
@@ -434,6 +437,44 @@
     await loadRooms();
     $("text").focus();
   }
+
+  // --- search ------------------------------------------------------------------------------
+  function marked(text, q) {
+    const out = [], lower = text.toLowerCase(), ql = q.toLowerCase();
+    let at = 0, i;
+    while (ql && (i = lower.indexOf(ql, at)) >= 0) { out.push(text.slice(at, i), h("mark", null, text.slice(i, i + q.length))); at = i + q.length; }
+    out.push(text.slice(at));
+    return out;
+  }
+  async function jumpTo(room, id) {
+    if (room !== current) await openRoom(room);
+    const feed = $("feed");
+    let el;
+    for (let i = 0; i < 50 && !(el = feed.querySelector(`.msg[data-id="${id}"]`)); i++) {
+      const btn = feed.querySelector(".earlier button");
+      if (!btn) break;
+      await loadEarlier({ currentTarget: btn });
+    }
+    if (!el) return toast("That message is gone", "bad");
+    el.scrollIntoView({ block: "center" });
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+  }
+  $("searchForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const q = $("searchIn").value.trim();
+    if (q.length < 2) return toast("Type at least 2 characters", "bad");
+    let res;
+    try { res = await api("/api/admin/search?q=" + enc(q)); } catch (err) { return toast(err.message, "bad"); }
+    openPanel(`Search: ${q}`,
+      res.length ? h("p", { class: "muted small hint" }, res.length === 50 ? "Newest 50 matches" : res.length + (res.length === 1 ? " match" : " matches")) : h("p", { class: "muted" }, "Nothing found."),
+      h("div", { class: "results" }, res.map(m => h("div", { class: "result", ...clickable(() => { $("panel").close(); jumpTo(m.room, m.id); }, `Open #${m.id} in ${m.room}`) },
+        avatar(m.sender, m.human, "sm"),
+        h("div", { class: "agent-text" },
+          h("div", { class: "meta" }, h("span", { class: "who" }, m.sender), h("span", { class: "chip" }, "# " + m.room), h("span", null, "#" + m.id + " · " + fmtTime(m.created))),
+          h("div", { class: "result-text" }, marked(m.snippet, q)))))));
+    $("panel").classList.add("wide");
+    $("panel").addEventListener("close", () => $("panel").classList.remove("wide"), { once: true });
+  };
 
   // --- live updates ------------------------------------------------------------------------
   let wsWasUp = false;

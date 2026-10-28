@@ -123,6 +123,9 @@ input.pill { border-radius: 999px; }
 .side { overflow-y: auto; padding: 16px var(--gutter) 24px; border-right: 2px solid var(--line); }
 .side h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 22px 4px 8px; }
 .side h2:first-child { margin-top: 0; }
+.search { margin-bottom: 18px; }
+input[type="search"] { font: inherit; color: var(--ink); background: var(--surface); border: 2px solid var(--line); padding: .45em .9em; width: 100%; }
+input[type="search"]:focus { outline: none; border-color: var(--orange); }
 
 .room {
   display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%;
@@ -239,6 +242,14 @@ dialog.panel::backdrop { background: rgb(59 42 26 / 35%); backdrop-filter: blur(
 .btn.danger { color: var(--berry); }
 .btn.danger:hover { border-color: var(--berry); }
 .btn:disabled { opacity: .6; cursor: default; }
+dialog.panel.wide { width: min(640px, calc(100vw - 2 * var(--gutter))); }
+.results { display: grid; gap: 2px; margin: 0 -8px; }
+.result { display: flex; gap: 10px; align-items: flex-start; padding: 8px; border-radius: 14px; cursor: pointer; }
+.result:hover, .result:focus-visible { background: var(--surface-2); }
+.result-text { font-size: .92rem; overflow-wrap: anywhere; }
+mark { background: color-mix(in srgb, var(--banana) 70%, transparent); color: inherit; border-radius: 4px; padding: 0 2px; }
+.msg.flash .bubble { animation: flash 2s ease-out; }
+@keyframes flash { 0%, 30% { box-shadow: 0 0 0 4px var(--banana); } }
 
 /* --- toasts ------------------------------------------------------------------------- */
 

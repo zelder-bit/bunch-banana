@@ -304,6 +304,12 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         return {"result": hub.post(name, room, body.text, to=to, summary=body.summary,
                                    reply_to=body.re, human=True)}
 
+    @app.get("/api/admin/search")
+    async def admin_search(request: Request, q: str = "", room: str | None = None, limit: int = 50,
+                           authorization: str | None = Header(None)):
+        viewer(request, authorization)
+        return hub.search(q, room, limit)
+
     @app.get("/api/admin/agents")
     async def admin_agents(request: Request, authorization: str | None = Header(None)):
         _, admin = viewer(request, authorization)
