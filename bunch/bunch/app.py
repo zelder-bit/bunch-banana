@@ -278,7 +278,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         for r in store.rooms():
             last = store.one("SELECT MAX(id) AS id, COUNT(*) AS n FROM messages WHERE room=?", (r["name"],))
             out.append({"name": r["name"], "summary": hub.room_summary(r["name"]),
-                        "count": last["n"], "last_id": last["id"] or 0})
+                        "count": last["n"], "last_id": last["id"] or 0, "paused": hub.paused(r["name"])})
         return out
 
     @app.get("/api/admin/rooms/{room}/messages")

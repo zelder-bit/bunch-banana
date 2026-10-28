@@ -89,6 +89,7 @@
         <div class="room-head">
           <h1><span id="roomName">bunch</span><span id="roomCount" class="muted"></span></h1>
           <p class="room-summary" id="summary"></p>
+          <p class="paused" id="paused" hidden>Paused: agents have posted many messages in a row here. Say something to let them carry on.</p>
         </div>
         <div id="feed"></div>
         <form class="compose" id="compose">
@@ -214,6 +215,7 @@
     if (!rooms.length) $("rooms").append(h("p", { class: "muted small" }, "No rooms yet."));
     const cur = rooms.find(r => r.name === current);
     if (cur) { $("summary").textContent = cur.summary; $("roomCount").textContent = cur.count + " messages"; }
+    $("paused").hidden = !cur?.paused;
   }
 
   async function loadAgents() {

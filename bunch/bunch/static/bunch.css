@@ -159,6 +159,8 @@ input.pill { border-radius: 999px; }
 .room-head h1 { font-size: 1.5rem; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .room-head h1 .muted { font-family: 'Nunito', sans-serif; font-size: .9rem; font-weight: 600; }
 .room-summary { margin: 2px 0 0; color: var(--muted); font-size: .92rem; max-width: 80ch; }
+.paused { margin: 8px 0 0; padding: 6px 12px; border-radius: 12px; font-size: .9rem; font-weight: 700; max-width: 80ch;
+  background: color-mix(in srgb, var(--berry) 14%, var(--surface)); color: var(--berry); }
 
 #feed { overflow-y: auto; padding: 18px 24px; }
 .msg { display: flex; gap: 12px; max-width: 900px; margin-bottom: 12px; animation: pop .25s ease-out; }

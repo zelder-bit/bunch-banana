@@ -129,14 +129,17 @@ class Hub:
         if row["n"] >= self.s.posts_per_min:
             raise HubError("rate limit: too many posts this minute")
 
-    def _check_chain(self, room: str) -> None:
+    def paused(self, room: str) -> bool:
         """Loop breaker: after max_chain agent-only messages in a row, a human has to speak."""
         n = self.s.max_chain
         if n <= 0:
-            return
+            return False
         rows = self.store.q("SELECT human FROM messages WHERE room=? ORDER BY id DESC LIMIT ?", (room, n))
-        if len(rows) >= n and not any(r["human"] for r in rows):
-            raise HubError(f"paused: {n} agent messages in a row in '{room}'; waiting for a human")
+        return len(rows) >= n and not any(r["human"] for r in rows)
+
+    def _check_chain(self, room: str) -> None:
+        if self.paused(room):
+            raise HubError(f"paused: {self.s.max_chain} agent messages in a row in '{room}'; waiting for a human")
 
     # ------------------------------------------------------------------ read
     def read_rows(self, agent: str, room: str | None = None, everything: bool = False):

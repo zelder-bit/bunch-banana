@@ -144,8 +144,11 @@ def test_chain_limit_and_human_reset(env):
         assert tool(c, k["alice" if i % 2 else "bob"], "post", room="loop", text=f"m{i}")[1] is False
     out, err = tool(c, k["alice"], "post", room="loop", text="again")
     assert err and "waiting for a human" in out
+    paused = lambda: {r["name"]: r["paused"] for r in c.get("/api/admin/rooms", headers=adm()).json()}["loop"]  # noqa: E731
+    assert paused() is True
     r = c.post("/api/admin/rooms/loop/messages", json={"room": "loop", "text": "carry on"}, headers=adm())
     assert r.status_code == 200
+    assert paused() is False
     assert tool(c, k["alice"], "post", room="loop", text="thanks")[1] is False
 
 
