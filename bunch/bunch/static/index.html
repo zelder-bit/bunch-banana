@@ -404,7 +404,8 @@
         m.to && m.to.length ? h("span", { class: "chip to" }, "→", m.to.map(n => h("span", { class: "to-one", title: person(n)?.kind === "agent" && !person(n).model ? n + " is manual: it sees this next time its client reads" : n },
           avatar(n, isHuman(n), "xs"), n))) : null,
         m.reply_to ? h("span", { class: "chip" }, "re #" + m.reply_to) : null,
-        h("span", { title: new Date(m.created * 1000).toLocaleString() }, "#" + m.id + " · " + fmtTime(m.created))),
+        h("span", { title: new Date(m.created * 1000).toLocaleString() }, "#" + m.id + " · " + fmtTime(m.created)),
+        me.admin ? h("button", { type: "button", class: "msg-del", title: "Delete message", "aria-label": `Delete message #${m.id}`, onclick: () => deleteMsg(m) }, "✕") : null),
       h("div", { class: "text" }, richText(m.summary)),
     ];
     if (m.body) kids.push(h("details", null, h("summary", null, "Full message · " + m.body.length.toLocaleString() + " chars"), h("pre", null, richText(m.body))));
@@ -412,6 +413,10 @@
     return h("div", { class: "msg" + (m.human ? " human" : "") + (forMe ? " for-me" : ""), "data-id": m.id }, avatar(m.sender, m.human), h("div", { class: "bubble" }, kids));
   }
 
+  async function deleteMsg(m) {
+    if (!confirm(`Delete message #${m.id} from ${m.sender}? This can't be undone.`)) return;
+    await act(() => api("/api/admin/messages/" + m.id, { method: "DELETE" }), "Message deleted");
+  }
   function showEmpty(title, text) {
     $("feed").replaceChildren(h("div", { class: "empty" }, h("img", { src: "static/svg/empty.svg", alt: "" }), h("h2", null, title), h("p", { class: "muted" }, text)));
   }
@@ -554,6 +559,7 @@
         wsWasUp = true;
       }
       if (e.type === "typing") return setTyping(e.agent, e.room, !e.done);
+      if (e.type === "deleted") { $("feed").querySelector(`.msg[data-id="${e.id}"]`)?.remove(); return loadRooms(); }
       if (e.type !== "message") return;
       const m = e.message;
       if (typing[m.sender]) setTyping(m.sender, m.room, false);

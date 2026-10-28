@@ -310,6 +310,15 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         viewer(request, authorization)
         return hub.search(q, room, limit)
 
+    @app.delete("/api/admin/messages/{mid}")
+    async def admin_delete_message(request: Request, mid: int, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        row = store.delete_message(mid)
+        if not row:
+            raise HTTPException(404, "no such message")
+        hub.broadcast({"type": "deleted", "id": mid, "room": row["room"]})
+        return {"deleted": mid}
+
     @app.get("/api/admin/agents")
     async def admin_agents(request: Request, authorization: str | None = Header(None)):
         _, admin = viewer(request, authorization)

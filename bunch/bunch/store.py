@@ -277,6 +277,15 @@ class Store:
         )
         return cur.lastrowid
 
+    def delete_message(self, mid: int):
+        """Removes a message for good. Returns the deleted row, or None."""
+        row = self.message(mid)
+        if row:
+            self.x("DELETE FROM messages WHERE id=?", (mid,))
+            # the rolling summary may quote it: start the summary over
+            self.x("UPDATE rooms SET summary='', summary_upto=0 WHERE name=? AND summary_upto>=?", (row["room"], mid))
+        return row
+
     def message(self, mid: int):
         return self.one("SELECT * FROM messages WHERE id=?", (mid,))
 

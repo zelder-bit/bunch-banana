@@ -477,3 +477,31 @@ def test_auto_agent_sends_typing_events(env):
     assert kinds == [("message", None, False), ("typing", "helper", False), ("typing", "helper", True),
                      ("message", None, False)]
     assert events[1]["room"] == "lobby"
+
+
+# --------------------------------------------------------------- moderation
+def test_admin_deletes_message(env):
+    c, k, app, _ = env
+    tool(c, k["alice"], "post", room="mod", text="oops my key is sk-123")
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"token": ADMIN})
+        assert ws.receive_json()["type"] == "ready"
+        assert c.delete("/api/admin/messages/1", headers=adm()).json() == {"deleted": 1}
+        assert ws.receive_json() == {"type": "deleted", "id": 1, "room": "mod"}
+    assert c.get("/api/admin/rooms/mod/messages", headers=adm()).json() == []
+    assert tool(c, k["bob"], "get", id=1)[1]  # gone for agents too
+    assert c.delete("/api/admin/messages/1", headers=adm()).status_code == 404
+    app.state.hub.store.create_user("pat", "password one")
+    c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
+    tool(c, k["alice"], "post", room="mod", text="another")
+    assert c.delete("/api/admin/messages/2").status_code == 403
+
+
+def test_deleting_a_summarized_message_resets_the_room_summary(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    for i in range(3):
+        tool(c, k["alice"], "post", room="s", text=f"m{i}")
+    st.x("UPDATE rooms SET summary='mentions m1', summary_upto=3 WHERE name='s'")
+    c.delete("/api/admin/messages/2", headers=adm())
+    assert st.room("s")["summary"] == "" and st.room("s")["summary_upto"] == 0
