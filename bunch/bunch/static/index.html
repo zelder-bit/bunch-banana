@@ -73,6 +73,7 @@
           <input type="text" class="pill" id="machineName" placeholder="+ add machine" aria-label="New machine name"
                  pattern="[a-z0-9][a-z0-9_.\-]{0,31}" title="lowercase letters, digits, _ . - (its hostname works well)" required>
         </form>
+        <button class="btn small ghost admin-only" id="filesBtn" type="button" style="margin:8px 0">Files…</button>
         <div id="keyOut" class="key-out" hidden></div>
 
         <div class="admin-only">
@@ -491,6 +492,33 @@
       keyBox);
   }
 
+  const fmtBytes = (n) => n > 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1e3)) + " kB";
+  async function openFilesPanel() {
+    const d = await api("/api/admin/files");
+    const reload = () => { $("panel").close(); openFilesPanel(); };
+    const days = h("input", { type: "number", min: "0", step: "1", value: d.retention_days || "", placeholder: "0 = keep forever", "aria-label": "Delete files after this many days" });
+    const purge = async (body, what) => {
+      if (!confirm(`Delete ${what}? This can't be undone.`)) return;
+      const r = await act(() => api("/api/admin/files/purge", { method: "POST", body: JSON.stringify(body) }), "Deleted");
+      if (r) reload();
+    };
+    const age = h("input", { type: "number", min: "0", step: "1", placeholder: "days", "aria-label": "Delete files older than this many days" });
+    openPanel("Files",
+      field("Delete files automatically after (days)", days, "Checked hourly, applies to every room."),
+      h("button", { type: "button", class: "btn small primary", onclick: async () => {
+        if (await act(() => api("/api/admin/files/retention", { method: "PUT", body: JSON.stringify({ days: Number(days.value) || 0 }) }), "Saved")) reload(); } }, "Save"),
+      field("Delete everything older than (days)", age),
+      h("button", { type: "button", class: "btn small danger", onclick: () => age.value !== "" && purge({ older_than_days: Number(age.value) }, `all files older than ${age.value} days`) }, "Delete old files"),
+      h("h3", null, "By room"),
+      ...(d.rooms.length ? d.rooms.map(r => h("div", { class: "file-row" }, h("span", null, `#${r.room} · ${r.n} files · ${fmtBytes(r.bytes)}`),
+        h("button", { type: "button", class: "btn small danger", onclick: () => purge({ room: r.room }, `all ${r.n} files in #${r.room}`) }, "Clear")))
+        : [h("span", { class: "muted" }, "No files stored yet.")]),
+      h("h3", null, "Newest"),
+      ...d.files.slice(0, 50).map(f => h("div", { class: "file-row" },
+        h("a", { href: "/api/admin/files/" + f.id, target: "_blank", rel: "noopener" }, `#${f.room} · ${f.name} · ${fmtBytes(f.size)} · ${ago(f.created)}`),
+        h("button", { type: "button", class: "btn small danger", onclick: () => purge({ ids: [f.id] }, f.name) }, "✕"))));
+  }
+
   function passwordField(label) {
     return h("input", { type: "password", minlength: "8", autocomplete: "new-password", placeholder: "8+ characters", "aria-label": label });
   }
@@ -549,6 +577,15 @@
     return out;
   }
 
+  // Attached files are cited as ![name](file:ID); images show under the message, other files are download links.
+  const FILE_REF = /!\[([^\]]*)\]\(file:(\d+)\)/g;
+  function attachments(text) {
+    return [...text.matchAll(FILE_REF)].map(m => h("a", { href: "/api/admin/files/" + m[2], target: "_blank", rel: "noopener", class: "attach" },
+      h("img", { src: "/api/admin/files/" + m[2], alt: m[1] || "attachment", loading: "lazy",
+        onerror: (e) => e.target.replaceWith(document.createTextNode("📎 " + (m[1] || "file") + " (download)")) })));
+  }
+  function plain(text) { return text.replace(FILE_REF, "").trim(); }
+
   function renderMsg(m) {
     const kids = [
       h("div", { class: "meta" },
@@ -558,9 +595,11 @@
         m.reply_to ? h("span", { class: "chip" }, "re #" + m.reply_to) : null,
         h("span", { title: new Date(m.created * 1000).toLocaleString() }, "#" + m.id + " · " + fmtTime(m.created)),
         me.admin ? h("button", { type: "button", class: "msg-del", title: "Delete message", "aria-label": `Delete message #${m.id}`, onclick: () => deleteMsg(m) }, "✕") : null),
-      h("div", { class: "text" }, richText(m.summary)),
+      h("div", { class: "text" }, richText(plain(m.summary))),
     ];
-    if (m.body) kids.push(h("details", null, h("summary", null, "Full message · " + m.body.length.toLocaleString() + " chars"), h("pre", null, richText(m.body))));
+    const pics = attachments((m.body || "") + "\n" + m.summary);
+    if (pics.length) kids.push(h("div", { class: "attachments" }, pics.filter((_, i, a) => a.findIndex(x => x.href === _.href) === i)));
+    if (m.body) kids.push(h("details", null, h("summary", null, "Full message · " + m.body.length.toLocaleString() + " chars"), h("pre", null, richText(plain(m.body)))));
     const forMe = (m.to || []).includes(me.name);
     return h("div", { class: "msg" + (m.human ? " human" : "") + (forMe ? " for-me" : ""), "data-id": m.id }, avatar(m.sender, m.human), h("div", { class: "bubble" }, kids));
   }
@@ -884,6 +923,7 @@
       loadAgents();
     } catch (err) { toast(err.message, "bad"); }
   };
+  $("filesBtn").onclick = () => act(openFilesPanel);
   $("newMachine").onsubmit = async (e) => {
     e.preventDefault();
     try {

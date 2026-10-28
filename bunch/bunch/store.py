@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import threading
 import time
 
@@ -68,6 +69,17 @@ CREATE TABLE IF NOT EXISTS machines(
   max_power TEXT NOT NULL DEFAULT 'answer',
   dirs TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS files(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room TEXT NOT NULL,
+  name TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  uploader TEXT NOT NULL,
+  created REAL NOT NULL                     -- the bytes live on disk as <files dir>/<id>
+);
+CREATE INDEX IF NOT EXISTS files_room ON files(room, created);
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS usage(
   agent TEXT NOT NULL, day TEXT NOT NULL,
   ask_tokens INTEGER NOT NULL DEFAULT 0,    -- model tokens spent through ask()
@@ -117,6 +129,9 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
+        self.files_dir = os.path.join(os.path.dirname(os.path.abspath(path)), "files") if path != ":memory:" \
+            else tempfile.mkdtemp(prefix="bunch-files-")
+        os.makedirs(self.files_dir, exist_ok=True)
         with self.lock:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
@@ -356,6 +371,7 @@ class Store:
         Returns how many messages went, or None if there was no such room."""
         if not self.room(room):
             return None
+        self.delete_files(room=room)
         with self.lock:  # all or nothing
             self.db.execute("BEGIN")
             try:
@@ -367,6 +383,54 @@ class Store:
                 self.db.execute("ROLLBACK")
                 raise
         return n
+
+    # -- files (images etc. that agents and people attach to a room) ------
+    def add_file(self, room: str, name: str, mime: str, data: bytes, uploader: str) -> int:
+        with self.lock:
+            cur = self.db.execute("INSERT INTO files(room,name,mime,size,uploader,created) VALUES(?,?,?,?,?,?)",
+                                  (room, name, mime, len(data), uploader, time.time()))
+            fid = cur.lastrowid
+        with open(os.path.join(self.files_dir, str(fid)), "wb") as f:
+            f.write(data)
+        return fid
+
+    def file(self, fid: int):
+        return self.one("SELECT * FROM files WHERE id=?", (fid,))
+
+    def file_path(self, fid: int) -> str:
+        return os.path.join(self.files_dir, str(int(fid)))
+
+    def delete_files(self, ids: list[int] | None = None, room: str | None = None,
+                     older_than: float | None = None) -> tuple[int, int]:
+        """Removes files by id, or by room and/or age. Returns (count, bytes freed)."""
+        where, args = [], []
+        if ids is not None:
+            where.append(f"id IN ({','.join('?' * len(ids))})")
+            args += ids
+        if room:
+            where.append("room=?")
+            args.append(room)
+        if older_than is not None:
+            where.append("created<?")
+            args.append(older_than)
+        if not where:
+            return 0, 0
+        with self.lock:
+            rows = self.db.execute("SELECT id,size FROM files WHERE " + " AND ".join(where), args).fetchall()
+            self.db.execute("DELETE FROM files WHERE " + " AND ".join(where), args)
+        for r in rows:
+            try:
+                os.remove(self.file_path(r["id"]))
+            except FileNotFoundError:
+                pass
+        return len(rows), sum(r["size"] for r in rows)
+
+    def setting(self, k: str, default: str = "") -> str:
+        row = self.one("SELECT v FROM settings WHERE k=?", (k,))
+        return row["v"] if row else default
+
+    def set_setting(self, k: str, v: str) -> None:
+        self.x("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
 
     def room_max_id(self, room: str) -> int:
         row = self.one("SELECT MAX(id) AS m FROM messages WHERE room=?", (room,))

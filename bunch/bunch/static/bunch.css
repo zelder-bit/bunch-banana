@@ -309,3 +309,8 @@ mark { background: color-mix(in srgb, var(--banana) 70%, transparent); color: in
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.attach img { display: block; max-width: min(100%, 420px); max-height: 360px; border-radius: 10px; border: 1px solid var(--border, #0003); }
+.file-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: .85rem; }
+.file-row a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

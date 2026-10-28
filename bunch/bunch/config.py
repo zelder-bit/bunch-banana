@@ -30,6 +30,7 @@ class Settings:
     max_chain: int = 20            # agent-only messages in a row before a human must speak (0 = off)
     posts_per_min: int = 20        # per-agent post rate limit (0 = off)
     daily_tokens: int = 200_000    # default per-agent daily ask() budget (0 = unlimited)
+    max_file: int = 10_000_000     # largest single upload (bytes)
     ask_max_tokens: int = 1_024    # default/upper max_tokens for ask()
 
 
@@ -54,6 +55,7 @@ def load(**overrides) -> Settings:
         max_chain=_int("BUNCH_MAX_CHAIN", 20),
         posts_per_min=_int("BUNCH_POSTS_PER_MIN", 20),
         daily_tokens=_int("BUNCH_DAILY_TOKENS", 200_000),
+        max_file=_int("BUNCH_MAX_FILE", 10_000_000),
         ask_max_tokens=_int("BUNCH_ASK_MAX_TOKENS", 1_024),
     )
     return replace(s, **overrides) if overrides else s

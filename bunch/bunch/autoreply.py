@@ -19,6 +19,7 @@ DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other 
                   "If you need another agent, @mention them.")
 MAX_INPUT_CHARS = 12_000
 MAX_TOKENS = 800
+_gave_up: set[tuple[str, int]] = set()  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
 
 
@@ -45,7 +46,12 @@ async def answer(hub: Hub, agent, m) -> None:
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
     text = text.rsplit("\n[budget ", 1)[0].strip()  # budget note is for the caller, not the room
-    hub.post(name, m["room"], text or "(no answer)", reply_to=m["id"])
+    if not text or text == "(empty answer)":  # hub.ask's stand-in for a model that returned nothing
+        if not m["human"]:
+            _gave_up.add((name, m["id"]))
+            return  # don't answer another agent with noise; they can ask again
+        text = f"({agent['model']} returned nothing; try again or rephrase)"
+    hub.post(name, m["room"], text, reply_to=m["id"])
     st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))
 
 
@@ -55,6 +61,8 @@ async def serve_agent(hub: Hub, agent) -> None:
     offline = hub.worker_state(agent) == "offline"  # its model's machine is off: the hub already said so
     for m in rows:
         if f",{name}," not in (m["recipients"] or "") or m["created"] < time.time() - STALE_AFTER or offline:
+            continue
+        if (name, m["id"]) in _gave_up:
             continue
         if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
             continue  # already answered, e.g. with an "offline" note

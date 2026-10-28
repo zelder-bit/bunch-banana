@@ -45,7 +45,8 @@ COOLDOWN = int(os.environ.get("WORKER_COOLDOWN", "1800"))  # when the CLI doesn'
 STALE_AFTER = 300  # ignore backlog older than this when the worker starts
 DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other agents and humans. "
                   "Answer the message addressed to you. Be brief and concrete. "
-                  "If you need another agent, @mention them.")
+                  "If you need another agent, @mention them. "
+                  "To send a picture, save it as a .png/.jpg/.webp file in the current directory.")
 LIMIT_RE = re.compile(r"usage limit|rate.?limit|hit your limit|limit reached|quota|resource.?exhausted|"
                       r"too many requests|\b429\b|out of (?:extra )?usage", re.I)
 CLAUDE_MODELS = ["haiku", "sonnet", "opus"]
@@ -59,6 +60,36 @@ def req(method, path, body=None, params=None, timeout=120):
         raw = resp.read().decode()
         is_json = resp.headers.get("Content-Type", "").startswith("application/json")
     return json.loads(raw) if is_json else raw
+
+
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def find_images(root, since):
+    """Image files the CLI wrote under root (3 levels deep) since `since`: how a CLI hands back a picture."""
+    found = []
+    base = root.rstrip(os.sep).count(os.sep)
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if not x.startswith(".") and d.count(os.sep) - base < 2]
+        for f in files:
+            p = os.path.join(d, f)
+            try:
+                if os.path.splitext(f)[1].lower() in IMAGE_TYPES and os.path.getmtime(p) >= since:
+                    found.append(p)
+            except OSError:
+                pass
+    return sorted(found)[:4]
+
+
+def upload(agent, room, path):
+    """Stores the file on the hub; returns the ![name](file:ID) text that makes the viewer show it."""
+    with open(path, "rb") as f:
+        data = f.read()
+    q = urllib.parse.urlencode({"agent": agent, "room": room, "name": os.path.basename(path)})
+    r = urllib.request.Request(f"{HUB}/api/v1/machine/file?{q}", method="POST", data=data, headers={
+        "Authorization": "Bearer " + KEY, "Content-Type": IMAGE_TYPES[os.path.splitext(path)[1].lower()]})
+    with urllib.request.urlopen(r, timeout=120) as resp:
+        return json.loads(resp.read().decode())["markdown"]
 
 
 def report(agent, status, tokens=0, calls=0, until=None, room=None):
@@ -282,6 +313,7 @@ class Worker:
         argv, cwd, stdin = build_cmd(cfg, system, power, d or self.scratch,
                                      build_prompt(job, int(cfg.get("max_input_chars") or 12000)), deep)
         report(name, "busy", room=job["room"])
+        started_at = time.time() - 1
         try:
             p = subprocess.run(argv, input=stdin, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
             text, tokens, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
@@ -289,6 +321,17 @@ class Worker:
             text, tokens, error = "", 0, f"{cli} is not installed on {self.machine}"
         except subprocess.TimeoutExpired:
             text, tokens, error = "", 0, f"timed out after {TIMEOUT}s"
+        pics = []
+        if not LIMIT_RE.search(error or ""):
+            for path in find_images(d or self.scratch, started_at):
+                try:
+                    pics.append(upload(name, job["room"], path))
+                    os.remove(path) if not d else None  # scratch copies are not kept; real project files stay
+                except (urllib.error.URLError, OSError) as e:
+                    print(f"  could not upload {path}: {e}", file=sys.stderr)
+        if pics:
+            text = (text + "\n\n" + "\n".join(pics)).strip()
+            error = None  # an image with no words is still an answer
         if error and LIMIT_RE.search(error):
             self.cool_until[cli] = until = reset_time(error)
             for other, c in self.agents.items():  # same login: every agent on this CLI is out

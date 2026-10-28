@@ -855,3 +855,56 @@ def test_worker_install_writes_a_private_env_and_a_user_service(tmp_path, monkey
     unit = (tmp_path / ".config/systemd/user/bw.service").read_text()
     assert f"EnvironmentFile={env}" in unit and "worker.py" in unit and "WantedBy=default.target" in unit
     assert calls == [["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", "bw"]]
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+def test_files_upload_serve_and_purge(env):
+    c, k, app, _ = env
+    key = _machine(c)
+    _on(c, "alice")
+    c.post("/api/admin/rooms/pics/messages", json={"room": "pics", "text": "hi"}, headers=adm())
+    up = lambda name="a.png", ct="image/png", data=PNG, room="pics": c.post(
+        f"/api/v1/machine/file?agent=alice&room={room}&name={name}", content=data, headers={**h(key), "Content-Type": ct})
+    r = up()
+    assert r.status_code == 200 and r.json()["markdown"] == f"![a.png](file:{r.json()['id']})"
+    fid = r.json()["id"]
+    assert up(room="nope").status_code == 404 and up(data=b"").status_code == 413
+    assert c.post("/api/v1/machine/file?agent=bob&room=pics", content=PNG, headers=h(key)).status_code == 403
+    got = c.get(f"/api/admin/files/{fid}", headers=adm())
+    assert got.content == PNG and got.headers["content-type"] == "image/png"
+    assert c.get(f"/api/admin/files/{fid}").status_code == 401
+    svg = up("x.svg", "image/svg+xml", b"<svg onload=alert(1)/>").json()["id"]  # never rendered inline
+    r = c.get(f"/api/admin/files/{svg}", headers=adm())
+    assert r.headers["content-type"] == "application/octet-stream" and "attachment" in r.headers["content-disposition"]
+    assert c.get("/api/admin/files", headers=h(k["alice"])).status_code in (401, 403)
+    listing = c.get("/api/admin/files", headers=adm()).json()
+    assert listing["rooms"][0]["n"] == 2 and len(listing["files"]) == 2
+    assert c.post("/api/admin/files/purge", json={}, headers=adm()).status_code == 400
+    assert c.post("/api/admin/files/purge", json={"ids": [svg]}, headers=adm()).json()["deleted"] == 1
+    assert c.put("/api/admin/files/retention", json={"days": 7}, headers=adm()).json()["retention_days"] == 7
+    assert c.get(f"/api/admin/files/{fid}", headers=adm()).status_code == 200  # younger than 7 days
+    assert c.post("/api/admin/files/purge", json={"older_than_days": 0}, headers=adm()).json()["deleted"] == 1
+    assert c.get(f"/api/admin/files/{fid}", headers=adm()).status_code == 404
+    fid = up().json()["id"]
+    c.delete("/api/admin/rooms/pics", headers=adm())  # deleting a room takes its files along
+    assert c.get(f"/api/admin/files/{fid}", headers=adm()).status_code == 404
+
+
+def test_auto_agent_stays_quiet_when_model_returns_nothing_to_an_agent(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, _ = env
+    hub = app.state.hub
+
+    async def empty(*a, **kw):
+        return "(empty answer)"
+    hub.ask = empty
+    app.state.hub.store.x("UPDATE agents SET model='m' WHERE name='bob'")
+    tool(c, k["alice"], "post", room="r", text="@bob hello", to="bob")
+    asyncio.run(autoreply_once(hub))
+    asyncio.run(autoreply_once(hub))
+    assert not hub.store.q("SELECT 1 FROM messages WHERE sender='bob'")
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@bob you there?"}, headers=adm())
+    asyncio.run(autoreply_once(hub))
+    assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
