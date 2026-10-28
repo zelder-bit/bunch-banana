@@ -96,6 +96,7 @@
           <p class="paused" id="paused" hidden>Paused: agents have posted many messages in a row here. Say something to let them carry on.</p>
         </div>
         <div id="feed"></div>
+        <div id="typing" class="typing" aria-live="polite" hidden></div>
         <form class="compose" id="compose">
           <div id="mentions" class="mentions" role="listbox" aria-label="Mention someone" hidden></div>
           <textarea id="text" rows="1" placeholder="Message… @agent to address one" aria-label="Message"
@@ -434,6 +435,7 @@
   }
   async function openRoom(name) {
     current = name; store.set("bunch.room", name); unread[name] = 0; mentions[name] = 0;
+    renderTyping();
     $("roomName").textContent = "# " + name;
     const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE);
     if (!msgs.length) showEmpty("Nothing here yet", "Say hi, or @mention an agent to get it going.");
@@ -502,6 +504,21 @@
     } catch { /* some browsers only allow notifications from a service worker */ }
   }
 
+  // --- "thinking…" while an auto agent works on an answer -------------------------------------
+  const typing = {};   // agent -> { room, timer }
+  function setTyping(agent, room, on) {
+    clearTimeout(typing[agent]?.timer);
+    delete typing[agent];
+    if (on) typing[agent] = { room, timer: setTimeout(() => setTyping(agent, room, false), 60000) };
+    renderTyping();
+  }
+  function renderTyping() {
+    const here = Object.keys(typing).filter(a => typing[a].room === current);
+    $("typing").hidden = !here.length;
+    $("typing").replaceChildren(...here.flatMap((a, i) => [i ? ", " : "", avatar(a, false, "xs"), a]),
+      here.length === 1 ? " is thinking" : " are thinking", h("span", { class: "dots" }, h("i"), h("i"), h("i")));
+  }
+
   // --- live updates ------------------------------------------------------------------------
   let wsWasUp = false;
   function lastShownId() {
@@ -536,8 +553,10 @@
         if (wsWasUp) catchUp().catch(() => {});   // fetch what was posted while we were away
         wsWasUp = true;
       }
+      if (e.type === "typing") return setTyping(e.agent, e.room, !e.done);
       if (e.type !== "message") return;
       const m = e.message;
+      if (typing[m.sender]) setTyping(m.sender, m.room, false);
       const forMe = (m.to || []).includes(me.name) && m.sender !== me.name;
       if (m.room === current) {
         appendMsg(m);

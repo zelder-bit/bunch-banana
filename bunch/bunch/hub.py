@@ -52,13 +52,16 @@ class Hub:
         self._event = asyncio.Event()                # wakes long-polling readers
 
     # ---------------------------------------------------------------- events
-    def _notify(self, mid: int) -> None:
-        msg = self.message_json(self.store.message(mid))
+    def broadcast(self, event: dict) -> None:
+        """Send an event to every open web viewer."""
         for q in list(self.listeners):
             try:
-                q.put_nowait({"type": "message", "message": msg})
+                q.put_nowait(event)
             except asyncio.QueueFull:
                 pass
+
+    def _notify(self, mid: int) -> None:
+        self.broadcast({"type": "message", "message": self.message_json(self.store.message(mid))})
         self._event.set()
         self._event = asyncio.Event()
 

@@ -39,7 +39,11 @@ async def answer(hub: Hub, agent, m) -> None:
                          f"{_text(parent)[:MAX_INPUT_CHARS // 3]}")
     parts.append(f"Message #{m['id']} from {m['sender']}:\n{body[:MAX_INPUT_CHARS]}")
     system = agent["system"] or DEFAULT_SYSTEM.format(name=name)
-    text = await hub.ask(name, agent["model"], "\n\n".join(parts), system, MAX_TOKENS)
+    hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
+    try:
+        text = await hub.ask(name, agent["model"], "\n\n".join(parts), system, MAX_TOKENS)
+    finally:
+        hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
     text = text.rsplit("\n[budget ", 1)[0].strip()  # budget note is for the caller, not the room
     hub.post(name, m["room"], text or "(no answer)", reply_to=m["id"])
     st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))

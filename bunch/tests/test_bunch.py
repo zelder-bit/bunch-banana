@@ -461,3 +461,19 @@ def test_viewer_search(env):
     assert c.get("/api/admin/search", params={"q": "o_e"}, headers=adm()).json() == []      # _ is literal
     assert c.get("/api/admin/search", params={"q": "x"}, headers=adm()).status_code == 400
     assert c.get("/api/admin/search", params={"q": "deploy"}).status_code == 401
+
+
+def test_auto_agent_sends_typing_events(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    q = asyncio.Queue()
+    hub.listeners.add(q)
+    hub.post("human", "lobby", "@helper hi", human=True)
+    asyncio.run(autoreply_once(hub))
+    events = [q.get_nowait() for _ in range(q.qsize())]
+    kinds = [(e["type"], e.get("agent"), e.get("done", False)) for e in events]
+    assert kinds == [("message", None, False), ("typing", "helper", False), ("typing", "helper", True),
+                     ("message", None, False)]
+    assert events[1]["room"] == "lobby"
