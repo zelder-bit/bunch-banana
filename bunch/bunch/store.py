@@ -275,6 +275,23 @@ class Store:
     def rooms(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM rooms ORDER BY name")
 
+    def delete_room(self, room: str) -> int | None:
+        """Removes a room with all its messages and everyone's bookmarks in it.
+        Returns how many messages went, or None if there was no such room."""
+        if not self.room(room):
+            return None
+        with self.lock:  # all or nothing
+            self.db.execute("BEGIN")
+            try:
+                n = self.db.execute("DELETE FROM messages WHERE room=?", (room,)).rowcount
+                self.db.execute("DELETE FROM cursors WHERE room=?", (room,))
+                self.db.execute("DELETE FROM rooms WHERE name=?", (room,))
+                self.db.execute("COMMIT")
+            except Exception:
+                self.db.execute("ROLLBACK")
+                raise
+        return n
+
     def room_max_id(self, room: str) -> int:
         row = self.one("SELECT MAX(id) AS m FROM messages WHERE room=?", (room,))
         return row["m"] or 0

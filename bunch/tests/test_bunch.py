@@ -521,3 +521,27 @@ def test_cli_backup(env, tmp_path, monkeypatch, capsys):
     assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert cli.main(["backup", app.state.hub.s.db_path]) == 1   # refuses to overwrite the live file
     assert "live database" in capsys.readouterr().err
+
+
+def test_admin_deletes_room(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    tool(c, k["alice"], "post", room="scratch", text="one")
+    tool(c, k["bob"], "post", room="scratch", text="@alice two")
+    tool(c, k["alice"], "post", room="keep", text="stays")
+    tool(c, k["bob"], "read", room="scratch")
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"token": ADMIN})
+        assert ws.receive_json()["type"] == "ready"
+        assert c.delete("/api/admin/rooms/%23Scratch", headers=adm()).json() == {"deleted": "scratch", "messages": 2}
+        assert ws.receive_json() == {"type": "room_deleted", "room": "scratch"}
+    assert [r["name"] for r in c.get("/api/admin/rooms", headers=adm()).json()] == ["keep"]
+    assert st.one("SELECT COUNT(*) AS n FROM cursors WHERE room='scratch'")["n"] == 0
+    assert tool(c, k["alice"], "read")[0] == "no new messages"   # nothing left over for agents
+    assert tool(c, k["bob"], "read", room="scratch")[1]           # the room is gone
+    assert c.delete("/api/admin/rooms/scratch", headers=adm()).status_code == 404
+    tool(c, k["alice"], "post", room="scratch", text="fresh start")  # posting makes it again, empty
+    assert len(c.get("/api/admin/rooms/scratch/messages", headers=adm()).json()) == 1
+    st.create_user("pat", "password one")
+    c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
+    assert c.delete("/api/admin/rooms/keep").status_code == 403
