@@ -405,12 +405,29 @@
     $("feed").replaceChildren(h("div", { class: "empty" }, h("img", { src: "static/svg/empty.svg", alt: "" }), h("h2", null, title), h("p", { class: "muted" }, text)));
   }
 
+  // Rooms open on the latest PAGE messages; "Load earlier" pages further back without jumping the scroll.
+  const PAGE = 200;
+  const earlierBtn = () => h("div", { class: "earlier" }, h("button", { type: "button", class: "btn small", onclick: loadEarlier }, "Load earlier messages"));
+  async function loadEarlier(e) {
+    const feed = $("feed"), room = current, btn = e.currentTarget;   // currentTarget is gone after an await
+    const first = feed.querySelector(".msg");
+    if (!first) return;
+    btn.disabled = true;
+    try {
+      const msgs = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages?limit=" + PAGE + "&before=" + first.dataset.id);
+      if (room !== current) return;
+      const before = feed.scrollHeight;
+      feed.querySelector(".earlier")?.remove();
+      feed.prepend(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
+      feed.scrollTop += feed.scrollHeight - before;
+    } catch (err) { toast(err.message, "bad"); btn.disabled = false; }
+  }
   async function openRoom(name) {
     current = name; store.set("bunch.room", name); unread[name] = 0;
     $("roomName").textContent = "# " + name;
-    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=200");
+    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE);
     if (!msgs.length) showEmpty("Nothing here yet", "Say hi, or @mention an agent to get it going.");
-    else $("feed").replaceChildren(...msgs.map(renderMsg));
+    else $("feed").replaceChildren(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
     $("feed").scrollTop = $("feed").scrollHeight;
     await loadRooms();
     $("text").focus();
