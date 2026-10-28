@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +20,7 @@ from . import __version__
 from . import mcp as mcpmod
 from .autoreply import autoreply_loop
 from .config import Settings, load
-from .hub import MENTION_RE, Hub, HubError
+from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
 from .router import route
 from .store import Store
@@ -45,12 +46,25 @@ class AskIn(BaseModel):
     room: str | None = None
 
 
+class WorkerIn(BaseModel):
+    mode: str = "manual"
+    machine: str | None = None
+    cli: str | None = None
+    power: str | None = None
+    model: str | None = None
+    deep_model: str | None = None
+    dir: str | None = None
+    max_output: int | None = None
+    max_input_chars: int | None = None
+
+
 class AgentIn(BaseModel):
     name: str
     daily_tokens: int | None = None
     description: str = ""
     model: str | None = None
     system: str | None = None
+    worker: WorkerIn | None = None
 
 
 class AgentInfoIn(BaseModel):
@@ -82,23 +96,32 @@ class BudgetIn(BaseModel):
     daily_tokens: int | None = None
 
 
-class WorkerIn(BaseModel):
-    mode: str = "manual"
-    cli: str | None = None
-    power: str | None = None
-    model: str | None = None
-    deep_model: str | None = None
-    dir: str | None = None
-    max_output: int | None = None
-    max_input_chars: int | None = None
-
-
 class ReportIn(BaseModel):
+    agent: str
     status: str
     tokens: int = 0
     calls: int = 0
     until: float | None = None
     room: str | None = None
+
+
+class MachinePostIn(BaseModel):
+    agent: str
+    room: str
+    text: str
+    re: int | None = None
+
+
+class HelloIn(BaseModel):
+    hostname: str = ""
+    addresses: list[str] = []
+    clis: list[dict] = []
+    max_power: str = "answer"
+    dirs: list[str] = []
+
+
+class MachineIn(BaseModel):
+    name: str
 
 
 def _bearer(value: str | None) -> str:
@@ -108,8 +131,18 @@ def _bearer(value: str | None) -> str:
 
 
 def _worker_view(cfg: dict, admin: bool) -> dict:
-    """Everyone sees how an agent runs; only admins see its folder and limits."""
-    return cfg if admin else {k: cfg[k] for k in ("mode", "cli", "power", "model") if k in cfg}
+    """Everyone sees where and how an agent runs; only admins see its folder and limits."""
+    return cfg if admin else {k: cfg[k] for k in ("mode", "machine", "cli", "power", "model") if k in cfg}
+
+
+def _machine_json(hub: Hub, m, admin: bool) -> dict:
+    out = {"name": m["name"], "hostname": m["hostname"], "last_seen": m["last_seen"],
+           "online": hub.machine_online(m), "clis": json.loads(m["clis"] or "[]"),
+           "max_power": m["max_power"], "agents": [a["name"] for a in hub.machine_agents(m["name"])]}
+    if admin:
+        out["dirs"] = json.loads(m["dirs"] or "[]")
+        out["addresses"] = json.loads(m["addresses"] or "[]")
+    return out
 
 
 def _pw_mark(pw_hash: str) -> str:
@@ -154,6 +187,20 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         if not row:
             raise HTTPException(401, "invalid or missing agent key", headers={"WWW-Authenticate": "Bearer"})
         return row["name"]
+
+    def machine_of(authorization: str | None):
+        row = store.machine_by_key(_bearer(authorization))
+        if not row:
+            raise HTTPException(401, "invalid or missing machine key", headers={"WWW-Authenticate": "Bearer"})
+        return row
+
+    def machine_agent(m, agent: str):
+        """The agent, if it's assigned to machine m; a machine can only speak for its own agents."""
+        a = store.agent(agent)
+        if not a or a["kind"] != "agent" or a["model"] or hub.worker_config(a).get("machine") != m["name"]:
+            raise HTTPException(403, f"{agent} isn't on {m['name']}")
+        store.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), agent))
+        return a
 
     def is_admin(token: str) -> bool:
         return bool(token) and hmac.compare_digest(token.encode(), s.admin_token.encode())
@@ -288,14 +335,57 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def api_whoami(authorization: str | None = Header(None)):
         return PlainTextResponse(agent_of(authorization))
 
-    @app.get("/api/v1/worker")
-    async def api_worker(authorization: str | None = Header(None)):
-        return hub.worker_config(store.agent(agent_of(authorization)))
+    # ------------------------------------------------ machines (clients/worker.py)
+    @app.post("/api/v1/machine/hello")
+    async def machine_hello(body: HelloIn, authorization: str | None = Header(None)):
+        m = machine_of(authorization)
+        power = body.max_power if body.max_power in WORKER_POWERS else "answer"
+        clis = [{"cli": str(c.get("cli", ""))[:16], "version": str(c.get("version", ""))[:64],
+                 "models": [str(x)[:64] for x in (c.get("models") or [])][:50]}
+                for c in body.clis[:10] if c.get("cli") in WORKER_CLIS]
+        store.set_machine_report(m["name"], body.hostname[:64], [a[:64] for a in body.addresses[:20]], clis,
+                                 power, [d[:512] for d in body.dirs[:20]])
+        hub.broadcast({"type": "agents"})
+        return {"machine": m["name"],
+                "agents": [{"name": a["name"], **hub.worker_config(a)} for a in hub.machine_agents(m["name"])]}
 
-    @app.post("/api/v1/worker/report")
-    async def api_worker_report(body: ReportIn, authorization: str | None = Header(None)):
-        return PlainTextResponse(hub.worker_report(agent_of(authorization), body.status, body.tokens,
-                                                   body.calls, body.until, body.room))
+    @app.get("/api/v1/machine/read")
+    async def machine_read(request: Request, wait: float = 0, authorization: str | None = Header(None)):
+        """New messages for this machine's agents, each with what answering it needs."""
+        m = machine_of(authorization)
+        deadline = time.monotonic() + max(0.0, min(wait, 60.0))
+        while True:
+            if await request.is_disconnected():
+                return Response(status_code=499)  # worker restarted/crashed: leave the messages for its next read
+            jobs = []
+            for a in hub.machine_agents(m["name"]):
+                name = a["name"]
+                _h, rows, _more = hub.read_rows(name)
+                for r in rows:
+                    if f",{name}," not in (r["recipients"] or ""):
+                        continue  # room chatter: workers only answer what's addressed to them
+                    if store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (r["id"], name)):
+                        continue  # already answered, e.g. the hub said the machine was offline
+                    parent = store.message(r["reply_to"]) if r["reply_to"] else None
+                    jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
+                                 "human": bool(r["human"]), "created": r["created"],
+                                 "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
+                                 "parent": {"id": parent["id"], "sender": parent["sender"],
+                                            "text": parent["body"] or parent["summary"]} if parent else None})
+            if jobs or time.monotonic() >= deadline:
+                return {"jobs": jobs}
+            await hub.wait_for_new(max(0.05, deadline - time.monotonic()))
+
+    @app.post("/api/v1/machine/post")
+    async def machine_post(body: MachinePostIn, authorization: str | None = Header(None)):
+        a = machine_agent(machine_of(authorization), body.agent)
+        return PlainTextResponse(hub.post(a["name"], body.room, body.text, reply_to=body.re))
+
+    @app.post("/api/v1/machine/report")
+    async def machine_report(body: ReportIn, authorization: str | None = Header(None)):
+        a = machine_agent(machine_of(authorization), body.agent)
+        return PlainTextResponse(hub.worker_report(a["name"], body.status, body.tokens, body.calls,
+                                                   body.until, body.room))
 
     @app.get("/api/v1/rooms")
     async def api_rooms(authorization: str | None = Header(None)):
@@ -365,6 +455,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @app.get("/api/admin/agents")
     async def admin_agents(request: Request, authorization: str | None = Header(None)):
         _, admin = viewer(request, authorization)
+        await hub.refresh_model_hosts()
         out = []
         for a in store.agents():
             u = store.usage_today(a["name"])
@@ -375,7 +466,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"],
                         "sub_tokens_today": u["sub"], "sub_calls_today": u["calls"],
                         "state": hub.worker_state(a), "status_until": a["status_until"],
-                        "worker": _worker_view(hub.worker_config(a), admin)})
+                        "worker": _worker_view(hub.worker_config(a), admin),
+                        "runs_on": hub.model_host(a["model"]) if a["model"] else None})
         for system in ("_summarizer", "_router"):
             u = store.usage_today(system)
             if system == "_summarizer" or u["ask"]:
@@ -398,11 +490,17 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def admin_add_agent(request: Request, body: AgentIn, authorization: str | None = Header(None)):
         require_admin(request, authorization)
         name = body.name.strip().lower()
+        cfg = hub.clean_worker(body.worker.model_dump()) if body.worker else None  # validate before creating
+        model = None if cfg else (body.model or "").strip() or None
         try:
             key = store.create_agent(name, body.daily_tokens, body.description.strip(),
-                                     (body.model or "").strip() or None, (body.system or "").strip() or None)
+                                     model, (body.system or "").strip() or None)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if cfg:
+            store.set_worker(name, cfg)
+            hub.broadcast({"type": "agents"})
+            return {"name": name, "machine": cfg["machine"]}  # its machine speaks for it: no key to hand out
         return {"name": name, "key": key, "note": "shown once; store it on the agent's machine"}
 
     @app.put("/api/admin/agents/{name}/info")
@@ -432,6 +530,40 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_agent_info(name, model=None)  # one answerer per agent: the worker, not the hub
         hub.broadcast({"type": "agents"})
         return hub.worker_config(store.agent(name))
+
+    @app.get("/api/admin/machines")
+    async def admin_machines(request: Request, authorization: str | None = Header(None)):
+        _, admin = viewer(request, authorization)
+        return [_machine_json(hub, m, admin) for m in store.machines()]
+
+    @app.post("/api/admin/machines")
+    async def admin_add_machine(request: Request, body: MachineIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        name = body.name.strip().lower()
+        try:
+            key = store.create_machine(name)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        hub.broadcast({"type": "agents"})
+        return {"name": name, "key": key, "note": "shown once; run the install command on that machine"}
+
+    @app.post("/api/admin/machines/{name}/rotate")
+    async def admin_rotate_machine(request: Request, name: str, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        if not store.machine(name):
+            raise HTTPException(404, "no such machine")
+        return {"name": name, "key": store.rotate_machine_key(name)}
+
+    @app.delete("/api/admin/machines/{name}")
+    async def admin_delete_machine(request: Request, name: str, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        agents = [a["name"] for a in hub.machine_agents(name)]
+        if not store.delete_machine(name):
+            raise HTTPException(404, "no such machine")
+        for a in agents:  # they stay, but nothing runs them until they're moved
+            store.set_worker(a, None)
+        hub.broadcast({"type": "agents"})
+        return {"deleted": name, "agents_unassigned": agents}
 
     # ---------------------------------------------------------------- users
     @app.get("/api/admin/users")

@@ -191,6 +191,14 @@ Because every answer starts fresh from that small prompt, it costs the same on d
 BUNCH_KEY=bunch_xxx RESPONDER_MODEL=local/coder python3 responder.py
 ```
 
+### Paid CLIs on another computer: machines
+
+Say your desktop, `beep-boop`, is logged in to Claude Code, Codex and Antigravity, and the hub runs on a home server. Pair the desktop once ("+ add machine" in the viewer, then the install command it shows). From then on, a background service on the desktop waits for messages addressed to its agents. It runs the right CLI headless, with the same small prompt as the responder, and posts the answer.
+
+> *From the laptop:* `@codex why does this regex backtrack?` → beep-boop runs `codex exec`, and the answer appears in the room a few seconds later. If beep-boop is asleep, codex replies at once: "(beep-boop is offline, so codex can't answer; not answered)".
+
+The sidebar shows where every agent lives: under **On beep-boop**, **On the hub** (gateway models, with the machine a local model runs on), or **Connects itself** (a session you drive yourself).
+
 ---
 
 ## 9. The web page

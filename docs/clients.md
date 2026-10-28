@@ -23,11 +23,11 @@ Add `--scope user` to make it available in every project. Then, for example:
 
 To keep context small, tell the agent to rely on `read` and to use `get` only when a summary isn't enough. The tools already work that way; this just reinforces it.
 
-Claude Code (like Codex and other CLI agents) is a **manual** agent. It only sees the chat when it calls `read`, which happens when you prompt it. To have it keep listening while a session is open, use `read` with `wait` (it blocks up to 60 s until something arrives), for example:
+Claude Code connected this way **connects itself**: it only sees the chat when it calls `read`, which happens when you prompt it. To have it keep listening while a session is open, use `read` with `wait` (it blocks up to 60 s until something arrives), for example:
 
 > /loop Check bunch with read wait=60. Answer anything addressed to you, then loop.
 
-To have the machine answer on its own with its subscription, without you being there, make it a [subscription worker](#subscription-workers). If you want a model to answer on its own with no client running anywhere, make it an auto agent instead: `bunch.cli add-agent helper --model local/general`, or pick a model in the web viewer's "+ new agent" form.
+To have a computer answer with its Claude Code, Codex or Antigravity login while you're somewhere else, pair it as a [machine](#machines) instead. To have a gateway model answer with nothing running anywhere, put the agent on the hub: pick "On the hub" in the viewer's "+ new agent" form, or `bunch.cli add-agent helper --model local/general`.
 
 ## Other MCP clients (JSON config)
 
@@ -119,71 +119,63 @@ Put `BUNCH_URL`, `BUNCH_KEY`, `RESPONDER_MODEL` and so on in `/etc/bunch/coder.e
 systemctl enable --now bunch-responder@coder
 ```
 
-## Subscription workers
+## Machines
 
-`clients/worker.py` turns a machine's Claude Code, Codex or Gemini CLI login into an agent that answers @mentions on its own. Use it to ping the stronger subscription models from any machine, your phone included, through the viewer.
+A machine is a computer whose paid CLI logins answer for agents: Claude Code (`claude`), Codex (`codex`) and Antigravity (`agy`). One background service, `clients/worker.py`, runs on it and serves every agent you put there. From your laptop or phone, @mention one of those agents and that computer answers, if it's on.
 
-1. In the web viewer, open the agent and set **Runs as → Subscription worker**. Choose:
-   - **CLI**: Claude Code, Codex CLI or Gemini CLI.
-   - **Model**: blank uses the CLI's default. A cheaper model (e.g. `sonnet` or `haiku`) makes the plan last longer.
-   - **Deep model**: used only when a message contains `!deep` (e.g. `opus`).
-   - **Powers**:
-     - **Answer only**: no tools or files. This is the cheapest and safest.
-     - **Read files in a folder**: read-only tools in one folder.
-     - **Edit files and run commands in a folder**: anyone who can @mention the agent can make it change things there.
-   - **Max answer** in tokens.
-   - **Persona**: the system prompt.
-2. On the machine that's logged in to that CLI, as the same user:
+**Pair it once:**
+
+1. In the web viewer, type its name in **+ add machine**. Its hostname works well, e.g. `beep-boop`. The viewer shows an install command with the machine's key, once.
+2. On that computer, as the user logged in to the CLIs, run it from a copy of this repo:
 
 ```bash
-export BUNCH_URL=http://bunch.lan:8700 BUNCH_KEY=<that agent's key>
-export WORKER_MAX_POWER=answer          # the most this machine allows: answer | read | full
-export WORKER_DIRS=~/code/app           # folders read/full may use (colon-separated)
-python3 worker.py
+python3 clients/worker.py install --hub http://bunch.lan:8700 --key bunchm_xxx
+loginctl enable-linger $USER     # keep it running when nobody is logged in
 ```
 
-The machine has the last word: a viewer setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only. The worker reads its settings from the hub every minute, so changes in the viewer apply without a restart.
+This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your `PATH`, so the service finds `~/.local/bin`) and a systemd user service, `bunch-worker`, that starts at boot. Logs: `journalctl --user -u bunch-worker -f`. Remove it with `python3 clients/worker.py uninstall`.
+
+3. The machine turns **online** in the sidebar. Click its name to see the CLIs and versions it found, and what it allows.
+
+**Put agents on it:** in **+ new agent**, choose **Where does it run? → On beep-boop**, then:
+- **CLI**: only the ones that machine reported.
+- **Model**: suggestions come from the machine (Claude's aliases, Antigravity's `agy models`). Blank uses the CLI's default. Cheaper models stretch a plan further.
+- **Deep model**: used only when a message contains `!deep`.
+- **Powers**:
+  - **Answer only**: no tools or files; cheapest and safest.
+  - **Read files in a folder**.
+  - **Edit files and run commands in a folder**: anyone who can @mention it can change things there.
+- **Max answer** in tokens, and an optional **Persona**.
+
+Agents on a machine have no key of their own; the machine speaks for them. Move an agent between machines (or to the hub) from its panel at any time.
+
+**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only.
 
 | Variable | Default | |
 |---|---|---|
-| `WORKER_MAX_POWER` | `answer` | Highest power this host allows. |
-| `WORKER_DIRS` | (none) | Folders `read`/`full` may run in. |
-| `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is killed. |
+| `WORKER_MAX_POWER` | `answer` | Highest power this machine allows. |
+| `WORKER_DIRS` | (none) | Folders `read`/`full` may run in (colon-separated). |
+| `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is stopped. |
 | `WORKER_COOLDOWN` | 1800 | Pause after a limit error that doesn't say when it resets. |
+
+**When the machine is off** (or its service isn't running for 3 minutes), the hub replies to anything addressed to its agents right away: "(beep-boop is offline, so codex can't answer; not answered)". The message is dropped, so nothing gets answered hours later. The router doesn't send work there until it's back.
 
 **How it saves tokens:**
 - Each message is one fresh CLI run with no session history. It sees only the room summary, the message and the message it replies to.
-- In answer-only mode, Claude Code runs with no tools, no MCP servers, no settings and a one-line system prompt, which is about 1k tokens of overhead per answer.
-- Codex and Gemini CLI always send their own system prompt; Codex's is about 15k tokens (mostly cached). For quick questions, a Claude worker or an auto agent on a local model is cheaper.
-- One job at a time per machine. Backlog older than 5 minutes is ignored at startup. Other agents get an answer only when they write `@name`, the same loop guard as the responder.
-- On a plan-limit error, the worker reads the reset time from the CLI's message (or waits `WORKER_COOLDOWN`), reports **cooling** and says so once in the room. The router skips it until then.
-- Its tokens and calls count toward the agent's daily budget, shown in the viewer as `sub 12k · 9 calls`.
+- Overhead per answer in answer-only mode, measured:
 
-**One key, one reader.** While an agent is a worker, `worker.py` reads its messages, so an interactive Claude Code session using the same key won't see them. Give your interactive session its own agent if you want both. When the agent is set back to Manual, the worker stops reading and idles.
+  | CLI | Overhead | Why |
+  |---|---|---|
+  | Claude Code | about 1k tokens | runs with no tools, no MCP servers, no settings and a one-line system prompt |
+  | Antigravity | about 8k | no plan mode, which writes a plan file instead of answering |
+  | Codex | about 15k (mostly cached) | |
 
-**Subscriptions:** the worker uses the CLI login already on its machine. bunch never sees, stores or swaps provider credentials. Running several plans (one per provider, or each person's own) works well: the router spreads work and routes around whichever is cooling. Check each provider's terms for what their plans allow.
+  For quick questions, Claude or a hub agent on a local model is cheapest.
+- Jobs run one at a time per machine. Backlog older than 5 minutes is skipped when the service starts. Other agents get an answer only when they write `@name`.
+- On a plan-limit error, that CLI cools down until the reset time in its message (or `WORKER_COOLDOWN`). Every agent on that CLI shows **cooling · 14:05**, and the hub answers for them with a short note until then.
+- Tokens and calls count toward each agent's daily budget, shown in the sidebar.
 
-Run it as a service with a user unit (`~/.config/systemd/user/bunch-worker.service`), so it runs as the user who is logged in to the CLI:
-
-```ini
-[Unit]
-Description=bunch subscription worker
-
-[Service]
-EnvironmentFile=%h/.config/bunch/worker.env
-ExecStart=/usr/bin/python3 %h/bunch/clients/worker.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-```
-
-```bash
-chmod 600 ~/.config/bunch/worker.env
-systemctl --user enable --now bunch-worker
-loginctl enable-linger $USER     # keep it running when you're logged out
-```
+**Several subscriptions:** each machine uses the logins already on it. bunch never sees, stores or swaps provider credentials. Pair as many machines as you like; the router spreads work and avoids whichever is off or cooling. Check each provider's terms for what their plans allow.
 
 ## Using models directly (no chat)
 
@@ -208,8 +200,15 @@ curl $OPENAI_BASE_URL/models -H "Authorization: Bearer $OPENAI_API_KEY"
 | `GET /api/v1/get/{id}` | `offset` | full message (paged) |
 | `POST /api/v1/ask` | `{model, prompt, system?, max_tokens?, room?}` | answer |
 | `GET /api/v1/whoami` | | your agent name |
-| `GET /api/v1/worker` | | this agent's worker settings (JSON; `{"mode":"manual"}` when not a worker) |
-| `POST /api/v1/worker/report` | `{status: online\|busy\|cooling, tokens?, calls?, until?, room?}` | `ok used/budget` or `over budget used/budget` |
+
+Machine endpoints (machine key, JSON; `clients/worker.py` uses them):
+
+| Method & path | Body / query | Returns |
+|---|---|---|
+| `POST /api/v1/machine/hello` | `{hostname, addresses, clis, max_power, dirs}` | `{machine, agents: [config…]}` |
+| `GET /api/v1/machine/read` | `wait` (s, max 60) | `{jobs: [{agent, id, room, sender, human, text, parent, room_summary}]}` |
+| `POST /api/v1/machine/post` | `{agent, room, text, re?}` | `ok #id` (only for this machine's agents) |
+| `POST /api/v1/machine/report` | `{agent, status: online\|busy\|cooling, tokens?, calls?, until?, room?}` | `ok used/budget` or `over budget used/budget` |
 | `POST /mcp` | JSON-RPC | MCP (Streamable HTTP, JSON responses) |
 
 Errors come back as HTTP 400 with `error: ...` in the body, or 401 for a bad key.

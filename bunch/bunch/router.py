@@ -36,7 +36,8 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
         if state == "manual":
             label = "manual, answers only when its person checks" + (", active" if (a["last_seen"] or 0) > cutoff else "")
         else:
-            label = LABELS[state] + (f" {hub.worker_config(a).get('cli')}" if state != "auto" else "")
+            cfg = hub.worker_config(a)
+            label = LABELS[state] + ("" if state == "auto" else f" {cfg['cli']} on {cfg['machine']}")
         agents.append((a, label))
     if not agents:
         return []

@@ -12,10 +12,10 @@ from .config import Settings
 from .llm import LLM, LLMError
 from .store import Store, valid_name
 
-WORKER_CLIS = ("claude", "codex", "gemini")
+WORKER_CLIS = ("claude", "codex", "agy")
 WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edit + run in dir
 WORKER_STATUSES = ("online", "busy", "cooling")
-WORKER_OFFLINE_AFTER = 180  # a worker long-polls every ~50 s; silent this long = not running
+WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long = off or not running
 
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
 
@@ -56,6 +56,8 @@ class Hub:
         self.llm = llm
         self.listeners: set[asyncio.Queue] = set()  # web viewer sockets
         self._event = asyncio.Event()                # wakes long-polling readers
+        self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
+        self._hosts_at = 0.0
 
     # ---------------------------------------------------------------- events
     def broadcast(self, event: dict) -> None:
@@ -136,6 +138,8 @@ class Hub:
             self.store.set_cursor(sender, room, self.store.room_max_id(room))
         mid = self.store.add_message(room, sender, human, recips, summ, body, reply_to, auto)
         self._notify(mid)
+        if recips:
+            self._unavailable_notices(mid)
         return f"ok #{mid}"
 
     def _check_rate(self, sender: str) -> None:
@@ -327,41 +331,56 @@ class Hub:
         return u["ask"] + u["sub"]
 
     # ---------------------------------------------------------------- worker
+    # An agent can live in one of three places: on the hub (a gateway model: `model` set), on a
+    # machine (clients/worker.py runs a CLI there: `worker` set), or nowhere we manage (it connects
+    # itself with its own key, e.g. an interactive Claude Code session).
     @staticmethod
     def worker_config(row) -> dict:
-        """What clients/worker.py should do for this agent. {"mode": "manual"} = idle."""
+        """How the machine should run this agent. {"mode": "manual"} = not on a machine."""
         try:
             cfg = json.loads(row["worker"]) if row and row["worker"] else None
         except ValueError:
             cfg = None
-        if not cfg:
+        if not cfg or not cfg.get("machine"):
             return {"mode": "manual"}
-        return {**cfg, "system": row["system"] or ""}  # persona, shared with auto agents
+        return {**cfg, "system": row["system"] or ""}  # persona, shared with hub agents
+
+    def machine_agents(self, machine: str) -> list:
+        return [a for a in self.store.agents()
+                if a["kind"] == "agent" and not a["model"] and self.worker_config(a).get("machine") == machine]
 
     @staticmethod
-    def worker_state(row) -> str:
+    def machine_online(m) -> bool:
+        return bool(m) and (m["last_seen"] or 0) > time.time() - WORKER_OFFLINE_AFTER
+
+    def worker_state(self, row) -> str:
         """auto / manual / offline / online / busy / cooling, as the viewer and router see it."""
         if row["kind"] != "agent":
             return ""
         if row["model"]:
             return "auto"
-        if not row["worker"]:
+        cfg = self.worker_config(row)
+        if cfg["mode"] != "worker":
             return "manual"
-        now = time.time()
-        if (row["last_seen"] or 0) < now - WORKER_OFFLINE_AFTER:
+        if not self.machine_online(self.store.machine(cfg["machine"])):
             return "offline"
         if row["status"] == "cooling":
-            return "cooling" if (row["status_until"] or 0) > now else "online"
+            return "cooling" if (row["status_until"] or 0) > time.time() else "online"
         return row["status"] or "online"
 
-    @staticmethod
-    def clean_worker(cfg: dict | None) -> dict | None:
-        """Validates a worker config from the viewer; None = manual."""
+    def clean_worker(self, cfg: dict | None) -> dict | None:
+        """Validates a worker config from the viewer; None = not on a machine."""
         if not cfg or cfg.get("mode", "manual") == "manual":
             return None
-        cli = cfg.get("cli")
+        m = self.store.machine((cfg.get("machine") or "").strip())
+        if not m:
+            raise HubError("pick a machine (add one under Machines first)")
+        cli = {"gemini": "agy"}.get(cfg.get("cli"), cfg.get("cli"))
         if cli not in WORKER_CLIS:
             raise HubError(f"cli must be one of {', '.join(WORKER_CLIS)}")
+        found = [c["cli"] for c in json.loads(m["clis"] or "[]")]
+        if found and cli not in found:
+            raise HubError(f"{m['name']} doesn't have {cli} (it has {', '.join(found)})")
         power = cfg.get("power") or "answer"
         if power not in WORKER_POWERS:
             raise HubError(f"power must be one of {', '.join(WORKER_POWERS)}")
@@ -374,13 +393,56 @@ class Hub:
             except (TypeError, ValueError):
                 raise HubError(f"{key} must be a number") from None
         return {
-            "mode": "worker", "cli": cli, "power": power,
+            "mode": "worker", "machine": m["name"], "cli": cli, "power": power,
             "model": (cfg.get("model") or "").strip()[:64],
             "deep_model": (cfg.get("deep_model") or "").strip()[:64],
             "dir": (cfg.get("dir") or "").strip()[:512] if power != "answer" else "",
             "max_output": num("max_output", 800, 50, 8000),
             "max_input_chars": num("max_input_chars", 12000, 1000, 100_000),
         }
+
+    async def refresh_model_hosts(self) -> None:
+        if not self.llm.enabled or time.time() - self._hosts_at < 300:
+            return
+        self._hosts_at = time.time()
+        try:
+            self._hosts = await self.llm.model_hosts()
+        except Exception:  # older LiteLLM / key without access: just don't show hosts
+            self._hosts = {}
+
+    def model_host(self, model: str | None) -> str | None:
+        """Where a gateway model runs: a paired machine's name if it's one of ours, else the raw host."""
+        host = self._hosts.get(model or "")
+        if not host:
+            return None
+        h = host.lower()
+        for m in self.store.machines():
+            names = {m["name"], (m["hostname"] or "").lower(), *(a.lower() for a in json.loads(m["addresses"] or "[]"))}
+            if h in names or h.split(".")[0] in names:
+                return m["name"]
+        return host
+
+    def _unavailable_notices(self, mid: int) -> None:
+        """A message to an agent whose machine is off (or out of quota) gets an answer right away
+        saying so, instead of silence. That reply also marks it handled: the machine skips it later."""
+        m = self.store.message(mid)
+        for name in _recips(m):
+            row = self.store.agent(name)
+            if not row or row["kind"] != "agent":
+                continue
+            state = self.worker_state(row)
+            cfg = self.worker_config(row)
+            if state == "offline":
+                note = f"({cfg['machine']} is offline, so {cfg['cli']} can't answer; not answered)"
+            elif state == "cooling":
+                until = time.strftime("%H:%M", time.localtime(row["status_until"]))
+                note = f"(out of {cfg['cli']} quota on {cfg['machine']} until {until}; not answered)"
+            else:
+                continue
+            try:
+                self.post(name, m["room"], note, reply_to=mid)
+            except HubError:
+                pass  # rate limit / paused room: the notice is a courtesy
 
     def worker_report(self, agent: str, status: str, tokens: int = 0, calls: int = 0,
                       until: float | None = None, room: str | None = None) -> str:

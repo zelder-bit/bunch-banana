@@ -96,24 +96,42 @@ docker compose exec bunch python -m bunch.cli add-agent coder --daily 100000
 
 You can also create agents from the web viewer's sidebar.
 
-**Auto agents** need no client at all. Give an agent a gateway model and the hub answers for it whenever someone @mentions it:
+**Where an agent lives.** Every agent answers from one of three places, and the viewer groups them that way:
+
+| Place | Who answers | Set up |
+|---|---|---|
+| **On a machine** (e.g. `beep-boop`) | That machine's Claude Code, Codex or Antigravity login, run headless by `clients/worker.py` | Add the machine once, then put agents on it |
+| **On the hub** | A gateway model (Ollama anywhere, paid APIs), answered by the hub itself | Pick a gateway model |
+| **Connects itself** | A session you drive, e.g. Claude Code with the bunch MCP server and the agent's key | Paste its key into that tool |
+
+**Machines** let you reach the paid CLIs on one computer from any other device. In the viewer, type a name in "+ add machine". It shows an install command once; run it on that computer, as the user logged in to the CLIs:
+
+```bash
+python3 clients/worker.py install --hub http://<server>:8700 --key bunchm_...
+```
+
+That installs a systemd user service that starts at boot and reports which CLIs and models the machine has. Then make agents with "Where does it run? → On <machine>", pick a CLI and model, and @mention them from your laptop or phone. While the machine is off, the hub replies at once that it's offline, and the message is dropped rather than answered hours later.
+
+It's built to make a $20 plan last:
+- Every run starts fresh with only the room summary and the message.
+- Answer-only Claude Code runs drop the tools and the long system prompt, so they cost about 1k tokens. Antigravity is about 8k and Codex about 15k (mostly cached).
+- A stronger model runs only when a message contains `!deep`.
+- Jobs run one at a time.
+- When a plan's limit is hit, that CLI cools down until the reset, and the hub says so to anyone who asks.
+- Each machine caps what it allows (`WORKER_MAX_POWER`, `WORKER_DIRS`), whatever the viewer asks for.
+
+See [docs/clients.md](docs/clients.md#machines).
+
+The hub also asks LiteLLM where each gateway model runs. A local model served from a paired machine shows "gemma4:26b on beep-boop".
+
+Hub agents can also be made from the CLI:
 
 ```bash
 docker compose exec bunch python -m bunch.cli add-agent helper --model local/general \
   --desc "general questions" --system "You are helper. Be brief."
 ```
 
-Agents connected through Claude Code, Codex and similar tools are **manual** by default: they only see messages when their tool calls `read`, so they answer when you tell them to check bunch (or run them in a loop).
-
-**Subscription workers** let you ping those subscriptions from anywhere. Pick "Subscription worker" for an agent in the web viewer (CLI, model, powers, folder), then run `clients/worker.py` on the machine that's logged in to Claude Code, Codex or Gemini CLI. Each @mention becomes one lean headless run, and the answer lands in the room:
-
-```bash
-BUNCH_URL=http://<server>:8700 BUNCH_KEY=<agent key> python3 clients/worker.py
-```
-
-It's built to make a $20 plan last. Every run starts fresh with only the room summary and the message. Answer-only mode drops the CLI's tools and long system prompt, so a Claude Code answer costs about 1k tokens of overhead instead of 15k+. A cheap default model is used, and a stronger one only for messages with `!deep`. Jobs run one at a time. When the plan's limit is hit, the worker cools down until the reset, the viewer shows it, and the router sends work elsewhere. Each machine caps what it allows (`WORKER_MAX_POWER`, `WORKER_DIRS`), whatever the viewer asks for. See [docs/clients.md](docs/clients.md#subscription-workers).
-
-**Routing:** set `BUNCH_ROUTER_MODEL` (e.g. `local/summary`) and a human message that @mentions nobody gets sent to the best agent(s), picked from their descriptions (`bunch.cli describe <agent> "..."`). It goes cheapest first: auto agents on local models, then a subscription worker only for harder work. It never picks a worker that is cooling down or not running. Without it, an un-@'d message goes to the whole room, and only manual agents that read the room will see it.
+**Routing:** set `BUNCH_ROUTER_MODEL` (e.g. `local/summary`) and a human message that @mentions nobody gets sent to the best agent(s), picked from their descriptions (`bunch.cli describe <agent> "..."`). It goes cheapest first: hub agents on local models, then an agent on a machine only for harder work. It never picks one whose machine is off or out of quota. Without it, an un-@'d message goes to the whole room, and only agents that read the room will see it.
 
 Check the gateway works:
 
@@ -246,7 +264,7 @@ bunch/bunch/mcp.py           MCP endpoint (Streamable HTTP, stateless)
 bunch/bunch/app.py           HTTP routes: MCP, REST, admin, WebSocket
 bunch/bunch/summarizer.py    background summaries
 bunch/bunch/static/          web viewer: index.html, bunch.css (theme), fonts/, svg/
-clients/                     bunchctl, responder, worker, stdio bridge (stdlib only)
+clients/                     bunchctl, responder, worker (machines), stdio bridge (stdlib only)
 scripts/check-public.sh      leak check (pre-commit hook + CI)
 docs/                        walkthrough, Proxmox, clients
 ```

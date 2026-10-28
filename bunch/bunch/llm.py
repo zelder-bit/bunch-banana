@@ -1,6 +1,8 @@
 """Thin client for the LiteLLM gateway (OpenAI-compatible API)."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import httpx
 
 
@@ -51,6 +53,24 @@ class LLM:
         if r.status_code != 200:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
         return sorted(m["id"] for m in r.json().get("data", []))
+
+
+    async def model_hosts(self) -> dict[str, str]:
+        """Model name -> host it runs on, from LiteLLM's api_base. Models without one (paid APIs) are left out."""
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(f"{self.base_url}/model/info", headers=self._headers())
+        except httpx.HTTPError as e:
+            raise LLMError(f"gateway unreachable: {type(e).__name__}") from e
+        if r.status_code != 200:
+            raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
+        out = {}
+        for m in r.json().get("data", []):
+            base = ((m.get("litellm_params") or {}).get("api_base") or "").strip()
+            host = urlsplit(base).hostname if base else None
+            if m.get("model_name") and host:
+                out[m["model_name"]] = host
+        return out
 
 
 def _short_error(r: httpx.Response) -> str:

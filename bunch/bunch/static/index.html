@@ -65,12 +65,13 @@
                  pattern="[a-z0-9][a-z0-9_.\-]{0,31}" title="lowercase letters, digits, _ . -" required>
           <div class="add-more" id="agentMore" hidden>
             <input type="text" id="agentDesc" placeholder="Good at… (helps routing)" aria-label="Description">
-            <select id="agentModel" aria-label="Model">
-              <option value="">Manual: connects with its key (Claude Code, Codex…)</option>
-            </select>
-            <textarea id="agentSystem" rows="2" placeholder="Persona (optional, auto agents)" aria-label="Persona" hidden></textarea>
+            <div id="agentWhere" class="add-more"></div>
             <button class="btn small primary" type="submit">Create agent</button>
           </div>
+        </form>
+        <form class="add admin-only" id="newMachine">
+          <input type="text" class="pill" id="machineName" placeholder="+ add machine" aria-label="New machine name"
+                 pattern="[a-z0-9][a-z0-9_.\-]{0,31}" title="lowercase letters, digits, _ . - (its hostname works well)" required>
         </form>
         <div id="keyOut" class="key-out" hidden></div>
 
@@ -229,45 +230,65 @@
     $("deleteRoom").hidden = !me.admin || !cur;
   }
 
+  let machines = [];                               // paired machines (clients/worker.py), from the hub
+  const CLI_NAMES = { claude: "Claude Code", codex: "Codex", agy: "Antigravity" };
+
   async function loadAgents() {
-    const list = await api("/api/admin/agents");
+    const [list, ms] = await Promise.all([api("/api/admin/agents"), api("/api/admin/machines")]);
+    machines = ms;
     people = list.filter(a => a.kind !== "system");
-    $("agents").replaceChildren(...list.filter(a => a.kind !== "human").map(a => {
+    const row = (a) => {
       const active = a.last_seen && Date.now() / 1000 - a.last_seen < 600;
       const stats = [];
-      if (a.kind === "agent") stats.push("seen " + ago(a.last_seen));
+      if (a.worker?.mode === "worker") stats.push(CLI_NAMES[a.worker.cli] + (a.worker.model ? " · " + a.worker.model : ""));
+      else if (a.model) stats.push(a.model + (a.runs_on ? " on " + a.runs_on : ""));
+      else if (a.kind === "agent") stats.push("seen " + ago(a.last_seen));
       const spent = a.ask_tokens_today + (a.sub_tokens_today || 0);
-      stats.push("ask " + fmtTok(a.ask_tokens_today) + (a.daily_tokens && !a.sub_tokens_today ? " / " + fmtTok(a.daily_tokens) : ""));
-      if (a.sub_calls_today) stats.push("sub " + fmtTok(a.sub_tokens_today) + (a.daily_tokens ? " / " + fmtTok(a.daily_tokens) : "") + " · " + a.sub_calls_today + (a.sub_calls_today === 1 ? " call" : " calls"));
-      if (a.kind === "agent") stats.push("ctx " + fmtTok(a.ctx_tokens_today));
+      if (a.ask_tokens_today || a.kind !== "agent" || !a.sub_calls_today)
+        stats.push("ask " + fmtTok(a.ask_tokens_today) + (a.daily_tokens && !a.sub_tokens_today ? " / " + fmtTok(a.daily_tokens) : ""));
+      if (a.sub_calls_today) stats.push(fmtTok(a.sub_tokens_today) + (a.daily_tokens ? " / " + fmtTok(a.daily_tokens) : "") + " tokens · " + a.sub_calls_today + (a.sub_calls_today === 1 ? " call" : " calls"));
       let meter = null;
       if (a.daily_tokens) {
         const pct = Math.min(100, 100 * spent / a.daily_tokens);
         meter = h("div", { class: "meter" + (pct > 80 ? " hot" : ""), style: `--p:${pct}%`, title: Math.round(pct) + "% of today's budget" }, h("div"));
       }
-      const mode = a.kind !== "agent" ? null : modeTag(a);
       const editable = me.admin && a.kind === "agent";
       return h("div", { class: "agent" + (editable ? " clickable" : ""), ...(editable ? clickable(() => openAgentPanel(a), "Edit " + a.name) : {}) },
         a.kind === "system" ? h("span", { class: "avatar sm" }, h("img", { src: "static/svg/orange-slice.svg", alt: "" })) : avatar(a.name, false, "sm"),
         h("div", { class: "agent-text" },
-          h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name, mode),
+          h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name, stateTag(a)),
           a.description ? h("div", { class: "agent-desc" }, a.description) : null,
-          h("div", { class: "agent-stats" }, stats.join(" · ") + (a.model ? " · " + a.model : a.worker?.model ? " · " + a.worker.model : "")),
+          h("div", { class: "agent-stats" }, stats.join(" · ")),
           meter));
-    }));
-    if (!$("agents").children.length) $("agents").append(h("p", { class: "muted small" }, "No agents yet."));
+    };
+    const group = (head, rows, empty) => rows.length || empty
+      ? h("div", { class: "agent-group" }, head, ...(rows.length ? rows.map(row) : [h("p", { class: "muted small group-empty" }, empty)]))
+      : null;
+    const head = (title, note, extra = {}) => h("div", { class: "group-head", ...extra }, ...title, note ? h("span", { class: "muted" }, note) : null);
+    const agents = list.filter(a => a.kind === "agent");
+    const onMachine = (a) => a.worker?.mode === "worker";
+    $("agents").replaceChildren(...[
+      ...ms.map(m => group(head(
+        [h("span", { class: "dot" + (m.online ? " on" : ""), title: m.online ? "worker running" : "off, or its worker isn't running" }), "On " + m.name],
+        m.online ? "online" : "offline · seen " + ago(m.last_seen),
+        me.admin ? { class: "group-head clickable", ...clickable(() => openMachinePanel(m), "Machine " + m.name) } : {}),
+        agents.filter(a => onMachine(a) && a.worker.machine === m.name),
+        me.admin ? "No agents here yet. Add one below and pick this machine." : "No agents here yet.")),
+      group(head(["On the hub"], "gateway models"), [...agents.filter(a => a.model), ...list.filter(a => a.kind === "system")]),
+      group(head(["Connects itself"], "with its own key"), agents.filter(a => !a.model && !onMachine(a))),
+    ].filter(Boolean));
+    if (!agents.length && !ms.length) $("agents").append(h("p", { class: "muted small" }, "No agents yet."));
   }
 
-  function modeTag(a) {
-    const cli = a.worker?.cli;
+  function stateTag(a) {
     const until = a.status_until ? new Date(a.status_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    const where = a.worker?.machine;
     switch (a.state) {
-      case "auto": return h("span", { class: "tag auto", title: "The hub answers for it with " + a.model }, "auto");
-      case "online": return h("span", { class: "tag worker", title: `Answers on its own with ${cli} (clients/worker.py is running)` }, cli);
-      case "busy": return h("span", { class: "tag worker", title: `Running ${cli} on a message right now` }, cli + " · busy");
-      case "cooling": return h("span", { class: "tag cooling", title: `Hit the ${cli} plan limit; the router skips it until ${until}` }, "cooling · " + until);
-      case "offline": return h("span", { class: "tag", title: `Set up as a ${cli} worker, but clients/worker.py isn't running` }, cli + " · offline");
-      default: return h("span", { class: "tag", title: "Replies only when its own client (Claude Code, Codex…) reads the chat" }, "manual");
+      case "online": return h("span", { class: "tag worker", title: `${where} answers with ${CLI_NAMES[a.worker.cli]}` }, a.worker.cli);
+      case "busy": return h("span", { class: "tag worker", title: `${where} is running ${CLI_NAMES[a.worker.cli]} on a message` }, "busy");
+      case "cooling": return h("span", { class: "tag cooling", title: `Hit the ${CLI_NAMES[a.worker.cli]} plan limit; messages get a note until ${until}` }, "cooling · " + until);
+      case "offline": return h("span", { class: "tag", title: `${where} is off or its worker isn't running; messages get an "offline" note` }, "offline");
+      default: return null;
     }
   }
 
@@ -310,61 +331,93 @@
     return modelCache;
   }
 
-  async function openAgentPanel(a) {
-    const desc = h("input", { type: "text", value: a.description || "", placeholder: "Good at… (helps routing)" });
-    const WORKER = "__worker";
-    const w = a.worker || { mode: "manual" };
-    const model = h("select", null, h("option", { value: "" }, "Manual: connects with its key (Claude Code, Codex…)"),
-      h("option", { value: WORKER }, "Subscription worker: its machine answers with a CLI"));
-    for (const m of new Set([...(await modelList()), ...(a.model ? [a.model] : [])]))
-      model.append(h("option", { value: m }, "Auto: hub answers with " + m));
-    model.value = w.mode === "worker" ? WORKER : a.model || "";
-    const persona = h("textarea", { rows: 3, placeholder: "Persona (optional)" }, a.system || "");
-    const personaField = field("Persona", persona);
-    const opt = (v, label) => h("option", { value: v }, label);
-    const cli = h("select", null, opt("claude", "Claude Code"), opt("codex", "Codex CLI"), opt("gemini", "Gemini CLI"));
-    cli.value = w.cli || "claude";
-    const wModel = h("input", { type: "text", value: w.model || "", placeholder: "CLI default" });
-    const deep = h("input", { type: "text", value: w.deep_model || "", placeholder: "same as model" });
+  // "Where does it run?" — the one choice that decides how an agent answers. Used by the
+  // new-agent form and the agent panel. Returns the fields plus a payload() for saving.
+  let pickerId = 0;
+  async function wherePicker(a) {
+    const w = a?.worker || { mode: "manual" };
+    const opt = (v, label, extra = {}) => h("option", { value: v, ...extra }, label);
+    const models = [...new Set([...(await modelList()), ...(a?.model ? [a.model] : [])])];
+    const where = h("select", { "aria-label": "Where does it run?" },
+      ...machines.map(m => opt("m:" + m.name, `On ${m.name}${m.online ? "" : " (offline now)"}, with its CLI login`)),
+      opt("hub", models.length ? "On the hub, with a gateway model" : "On the hub (no gateway models)", models.length ? {} : { disabled: true }),
+      opt("self", "It connects itself, with its own key"));
+    where.value = w.mode === "worker" ? "m:" + w.machine : a?.model ? "hub" : a ? "self"
+      : machines.length ? "m:" + (machines.find(m => m.online) || machines[0]).name : models.length ? "hub" : "self";
+    const hubModel = h("select", { "aria-label": "Gateway model" }, ...models.map(m => opt(m, m)));
+    if (a?.model) hubModel.value = a.model;
+    const cli = h("select", { "aria-label": "CLI" });
+    const listId = "cliModels" + (++pickerId);
+    const suggestions = h("datalist", { id: listId });
+    const cliModel = h("input", { type: "text", list: listId, value: w.model || "", placeholder: "CLI default" });
+    const deep = h("input", { type: "text", list: listId, value: w.deep_model || "", placeholder: "same as model" });
     const power = h("select", null, opt("answer", "Answer only: no tools, no files (cheapest)"),
       opt("read", "Read files in a folder"), opt("full", "Edit files and run commands in a folder"));
     power.value = w.power || "answer";
     const dir = h("input", { type: "text", value: w.dir || "", placeholder: "~/code/project" });
     const maxOut = h("input", { type: "number", min: "50", max: "8000", step: "50", value: w.max_output || 800 });
+    const persona = h("textarea", { rows: 2, placeholder: "Persona (optional)" }, a?.system || "");
     const powerHint = h("span", { class: "muted small hint" });
-    const dirField = field("Folder", dir, "Must also be listed in WORKER_DIRS on that machine.");
-    const runHint = h("span", { class: "muted small hint" }, "On the machine logged in to the CLI, run ",
-      h("code", null, `BUNCH_URL=${location.origin} BUNCH_KEY=<key> python3 clients/worker.py`),
-      ". Set WORKER_MAX_POWER there to allow more than answer-only.");
-    const workerBox = h("div", { class: "field-group" },
-      field("CLI", cli),
-      field("Model", wModel, "Leave blank for the CLI's default. A cheaper model stretches the plan further."),
+    const dirField = field("Folder", dir, "Must also be in WORKER_DIRS on that machine.");
+    const machineBox = h("div", { class: "field-group" },
+      field("CLI", cli), field("Model", cliModel, "Blank = the CLI's default. A cheaper model stretches the plan."), suggestions,
       field("Deep model", deep, "Used only when a message contains !deep."),
-      field("Powers", power, powerHint), dirField,
-      field("Max answer (tokens)", maxOut), runHint);
-    const sync = () => {
-      const isWorker = model.value === WORKER;
-      personaField.hidden = !model.value;
-      workerBox.hidden = !isWorker;
-      dirField.hidden = power.value === "answer";
-      powerHint.textContent = power.value === "full"
-        ? "Anyone who can @mention this agent can make it change files and run commands there."
-        : power.value === "read" ? "Can read anything in the folder and quote it into the chat." : "";
+      field("Powers", power, powerHint), dirField, field("Max answer (tokens)", maxOut));
+    const hubBox = field("Gateway model", hubModel, "The hub answers right away using this model.");
+    const selfNote = h("p", { class: "muted small hint" }, "It gets a key to paste into that tool's bunch settings (e.g. Claude Code's MCP). It only sees messages when that session checks the chat.");
+    const personaField = field("Persona", persona);
+    const machineOf = () => machines.find(m => "m:" + m.name === where.value);
+    const fillCli = () => {
+      const m = machineOf();
+      const clis = m?.clis?.length ? m.clis : Object.keys(CLI_NAMES).map(c => ({ cli: c, models: [] }));
+      const keep = clis.some(c => c.cli === cli.value) ? cli.value : clis.some(c => c.cli === w.cli) ? w.cli : clis[0].cli;
+      cli.replaceChildren(...clis.map(c => opt(c.cli, CLI_NAMES[c.cli] || c.cli)));
+      cli.value = keep;
+      fillModels();
     };
-    model.onchange = power.onchange = sync;
-    sync();
+    const fillModels = () => {
+      const c = (machineOf()?.clis || []).find(c => c.cli === cli.value);
+      suggestions.replaceChildren(...(c?.models || []).map(m => h("option", { value: m })));
+    };
+    const sync = () => {
+      const m = machineOf(), v = where.value;
+      machineBox.hidden = !m; hubBox.hidden = v !== "hub"; selfNote.hidden = v !== "self"; personaField.hidden = v === "self";
+      dirField.hidden = power.value === "answer";
+      const rank = ["answer", "read", "full"];
+      const capped = m && rank.indexOf(power.value) > rank.indexOf(m.max_power || "answer");
+      powerHint.textContent = (capped ? `${m.name} only allows "${m.max_power}" (WORKER_MAX_POWER there), so it will run as that. ` : "")
+        + (power.value === "full" ? "Anyone who can @mention this agent can make it change files and run commands there."
+          : power.value === "read" ? "Can read anything in the folder and quote it into the chat." : "");
+    };
+    where.onchange = () => { fillCli(); sync(); };
+    cli.onchange = fillModels;
+    power.onchange = sync;
+    fillCli(); sync();
+    return {
+      fields: [field("Where does it run?", where), machineBox, hubBox, selfNote, personaField],
+      payload() {
+        const m = machineOf();
+        if (m) return { model: "", system: persona.value.trim(), worker: { mode: "worker", machine: m.name, cli: cli.value,
+          model: cliModel.value.trim(), deep_model: deep.value.trim(), power: power.value, dir: dir.value.trim(),
+          max_output: Math.round(Number(maxOut.value) || 800) } };
+        if (where.value === "hub") return { model: hubModel.value, system: persona.value.trim(), worker: { mode: "manual" } };
+        return { model: "", system: "", worker: { mode: "manual" } };
+      },
+    };
+  }
+
+  async function openAgentPanel(a) {
+    const desc = h("input", { type: "text", value: a.description || "", placeholder: "Good at… (helps routing)" });
+    const picker = await wherePicker(a);
     const budget = h("input", { type: "number", min: "0", step: "1000", value: a.budget_set ?? "", placeholder: "server default" });
     const keyBox = h("div", { class: "key-out", hidden: true });
     const save = async () => {
       const b = budget.value.trim();
+      const p = picker.payload();
       const ok = await act(async () => {
-        const isWorker = model.value === WORKER;
         await api(`/api/admin/agents/${enc(a.name)}/info`, { method: "PUT", body: JSON.stringify({
-          description: desc.value.trim(), model: isWorker ? "" : model.value, system: model.value ? persona.value.trim() : "" }) });
-        if (isWorker || w.mode === "worker")
-          await api(`/api/admin/agents/${enc(a.name)}/worker`, { method: "PUT", body: JSON.stringify(isWorker ? {
-            mode: "worker", cli: cli.value, model: wModel.value.trim(), deep_model: deep.value.trim(), power: power.value,
-            dir: dir.value.trim(), max_output: Math.round(Number(maxOut.value) || 800) } : { mode: "manual" }) });
+          description: desc.value.trim(), model: p.model, system: p.system }) });
+        await api(`/api/admin/agents/${enc(a.name)}/worker`, { method: "PUT", body: JSON.stringify(p.worker) });
         await api(`/api/admin/agents/${enc(a.name)}/budget`, { method: "PUT", body: JSON.stringify({ daily_tokens: b === "" ? null : Math.max(0, Math.round(Number(b))) }) });
       }, `${a.name} saved`);
       if (ok) { $("panel").close(); loadAgents(); }
@@ -380,16 +433,52 @@
       if (!confirm(`Delete ${a.name}? Its key stops working. Its messages stay in the rooms.`)) return;
       if (await act(() => api(`/api/admin/agents/${enc(a.name)}`, { method: "DELETE" }), `${a.name} deleted`)) { $("panel").close(); loadAgents(); }
     };
+    const selfAgent = !a.model && a.worker?.mode !== "worker";
     openPanel(a.name,
       field("Good at", desc, "The router uses this to pick who answers."),
-      field("Runs as", model),
-      workerBox,
-      personaField,
-      field("Daily token budget", budget, "Gateway asks plus a worker's CLI runs. Blank = server default, 0 = unlimited."),
+      ...picker.fields,
+      field("Daily token budget", budget, "Gateway asks plus CLI runs on a machine. Blank = server default, 0 = unlimited."),
       h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Save")),
       h("div", { class: "panel-danger" },
-        a.model ? null : h("button", { type: "button", class: "btn small", onclick: rotate }, "New key"),
+        selfAgent ? h("button", { type: "button", class: "btn small", onclick: rotate }, "New key") : null,
         h("button", { type: "button", class: "btn small danger", onclick: remove }, "Delete agent")),
+      keyBox);
+  }
+
+  // Machines: a computer running clients/worker.py, whose CLI logins answer for its agents.
+  function installBlock(name, key) {
+    const cmd = `python3 worker.py install --hub ${location.origin} --key ${key}`;
+    return [h("strong", null, `Pair ${name}`), h("span", { class: "muted" }, ": run this on it, as the user logged in to Claude Code, Codex or Antigravity (worker.py is in the bunch repo's clients/ folder). Shown once."),
+      h("code", null, cmd),
+      h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
+        try { await navigator.clipboard.writeText(cmd); toast("Command copied", "good"); } catch { toast("Select the command and copy it", "bad"); } } }, "Copy")];
+  }
+  function openMachinePanel(m) {
+    const keyBox = h("div", { class: "key-out", hidden: true });
+    const facts = [
+      ["Status", m.online ? "online" : "offline · seen " + ago(m.last_seen)],
+      ["Hostname", m.hostname || "not reported yet (run the install command on it)"],
+      ["CLIs", m.clis.map(c => `${CLI_NAMES[c.cli] || c.cli} ${c.version}`.trim()).join(", ") || "none found yet"],
+      ["Allows", { answer: "answer only", read: "reading files", full: "editing files and running commands" }[m.max_power] + " (WORKER_MAX_POWER)"],
+      ["Folders", (m.dirs || []).join(", ") || "none (WORKER_DIRS)"],
+      ["Agents", m.agents.join(", ") || "none yet"],
+    ];
+    const rotate = async () => {
+      if (!confirm(`Give ${m.name} a new key? Its worker stops until you run the new install command there.`)) return;
+      await act(async () => {
+        const r = await api(`/api/admin/machines/${enc(m.name)}/rotate`, { method: "POST" });
+        keyBox.replaceChildren(...installBlock(m.name, r.key)); keyBox.hidden = false;
+      });
+    };
+    const remove = async () => {
+      if (!confirm(`Remove ${m.name}? Its agents stay but stop answering until you move them.`)) return;
+      if (await act(() => api(`/api/admin/machines/${enc(m.name)}`, { method: "DELETE" }), `${m.name} removed`)) { $("panel").close(); loadAgents(); }
+    };
+    openPanel(m.name,
+      h("dl", { class: "facts" }, ...facts.flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)])),
+      h("div", { class: "panel-danger" },
+        h("button", { type: "button", class: "btn small", onclick: rotate }, "New key"),
+        h("button", { type: "button", class: "btn small danger", onclick: remove }, "Remove machine")),
       keyBox);
   }
 
@@ -757,32 +846,40 @@
     catch (err) { toast(err.message, "bad"); }
   };
 
-  // New agent: typing a name reveals the details. Picking a model makes it an auto agent.
-  let modelsLoaded = false;
+  // New agent: typing a name reveals "Where does it run?" and what that choice needs.
+  let newPicker = null;
   $("agentName").addEventListener("input", async () => {
     $("agentMore").hidden = !$("agentName").value.trim();
-    if (modelsLoaded || $("agentMore").hidden) return;
-    modelsLoaded = true;
-    try {
-      const models = await api("/api/admin/models");
-      $("agentModel").append(...models.map(m => h("option", { value: m }, "Auto: hub answers with " + m)));
-    } catch { /* gateway down: manual agents still work */ }
+    if (newPicker || $("agentMore").hidden) return;
+    newPicker = await wherePicker(null);
+    $("agentWhere").replaceChildren(...newPicker.fields);
   });
-  $("agentModel").onchange = () => { $("agentSystem").hidden = !$("agentModel").value; };
   $("newAgent").onsubmit = async (e) => {
     e.preventDefault();
     try {
+      const p = newPicker.payload();
       const r = await api("/api/admin/agents", { method: "POST", body: JSON.stringify({
         name: $("agentName").value.trim().toLowerCase(), description: $("agentDesc").value.trim(),
-        model: $("agentModel").value || null, system: $("agentSystem").value.trim() || null }) });
-      if ($("agentModel").value) {
+        model: p.model || null, system: p.system || null, worker: p.worker.mode === "worker" ? p.worker : null }) });
+      if (r.machine) {
+        $("keyOut").replaceChildren(h("strong", null, `${r.name} lives on ${r.machine}`), h("span", { class: "muted" }, `. @mention it from any device; ${r.machine} answers while it's on.`));
+      } else if (p.model) {
         $("keyOut").replaceChildren(h("strong", null, `${r.name} is ready`), h("span", { class: "muted" }, ". @mention it in any room and the hub answers for it."));
       } else {
-        $("keyOut").replaceChildren(...keyBlock(r.name, r.key));;
+        $("keyOut").replaceChildren(...keyBlock(r.name, r.key));
       }
       $("keyOut").hidden = false;
-      for (const id of ["agentName", "agentDesc", "agentModel", "agentSystem"]) $(id).value = "";
-      $("agentMore").hidden = true; $("agentSystem").hidden = true;
+      $("agentName").value = ""; $("agentDesc").value = "";
+      $("agentMore").hidden = true; newPicker = null; $("agentWhere").replaceChildren();
+      loadAgents();
+    } catch (err) { toast(err.message, "bad"); }
+  };
+  $("newMachine").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/admin/machines", { method: "POST", body: JSON.stringify({ name: $("machineName").value.trim().toLowerCase() }) });
+      $("keyOut").replaceChildren(...installBlock(r.name, r.key)); $("keyOut").hidden = false;
+      $("machineName").value = "";
       loadAgents();
     } catch (err) { toast(err.message, "bad"); }
   };

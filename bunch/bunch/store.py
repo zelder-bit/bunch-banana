@@ -57,6 +57,17 @@ CREATE TABLE IF NOT EXISTS cursors(
   agent TEXT NOT NULL, room TEXT NOT NULL, last_id INTEGER NOT NULL,
   PRIMARY KEY(agent, room)
 );
+CREATE TABLE IF NOT EXISTS machines(
+  name TEXT PRIMARY KEY,                    -- what the viewer calls it, e.g. beep-boop
+  key_hash TEXT UNIQUE,
+  created REAL NOT NULL,
+  last_seen REAL,
+  hostname TEXT NOT NULL DEFAULT '',        -- the rest is reported by clients/worker.py on that machine
+  addresses TEXT NOT NULL DEFAULT '[]',     -- JSON list: IPs / names it's reachable as (to spot gateway models on it)
+  clis TEXT NOT NULL DEFAULT '[]',          -- JSON list: [{cli, version, models}]
+  max_power TEXT NOT NULL DEFAULT 'answer',
+  dirs TEXT NOT NULL DEFAULT '[]'
+);
 CREATE TABLE IF NOT EXISTS usage(
   agent TEXT NOT NULL, day TEXT NOT NULL,
   ask_tokens INTEGER NOT NULL DEFAULT 0,    -- model tokens spent through ask()
@@ -275,6 +286,43 @@ class Store:
 
     def agent_names(self) -> set[str]:
         return {r["name"] for r in self.q("SELECT name FROM agents")}
+
+    # -- machines (hosts running clients/worker.py) ------------------------
+    def create_machine(self, name: str) -> str:
+        if not valid_name(name):
+            raise ValueError("name must be lowercase letters, digits, _ . - (max 32)")
+        if self.machine(name):
+            raise ValueError(f"machine '{name}' already exists")
+        key = "bunchm_" + secrets.token_urlsafe(24)
+        self.x("INSERT INTO machines(name,key_hash,created) VALUES(?,?,?)", (name, hash_key(key), time.time()))
+        return key
+
+    def machine(self, name: str):
+        return self.one("SELECT * FROM machines WHERE name=?", (name,))
+
+    def machines(self) -> list[sqlite3.Row]:
+        return self.q("SELECT * FROM machines ORDER BY name")
+
+    def machine_by_key(self, key: str):
+        if not key:
+            return None
+        row = self.one("SELECT * FROM machines WHERE key_hash=?", (hash_key(key),))
+        if row:
+            self.x("UPDATE machines SET last_seen=? WHERE name=?", (time.time(), row["name"]))
+        return row
+
+    def set_machine_report(self, name: str, hostname: str, addresses: list, clis: list,
+                           max_power: str, dirs: list) -> None:
+        self.x("UPDATE machines SET hostname=?, addresses=?, clis=?, max_power=?, dirs=? WHERE name=?",
+               (hostname, json.dumps(addresses), json.dumps(clis), max_power, json.dumps(dirs), name))
+
+    def rotate_machine_key(self, name: str) -> str:
+        key = "bunchm_" + secrets.token_urlsafe(24)
+        self.x("UPDATE machines SET key_hash=? WHERE name=?", (hash_key(key), name))
+        return key
+
+    def delete_machine(self, name: str) -> bool:
+        return self.x("DELETE FROM machines WHERE name=?", (name,)).rowcount > 0
 
     # -- usage -----------------------------------------------------------
     def add_usage(self, agent: str, ask: int = 0, ctx: int = 0, sub: int = 0, calls: int = 0) -> None:
