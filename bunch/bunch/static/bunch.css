@@ -168,14 +168,15 @@ input[type="search"]:focus { outline: none; border-color: var(--orange); }
 
 #feed { overflow-y: auto; padding: 18px 24px; }
 .msg { display: flex; gap: 12px; max-width: 900px; margin-bottom: 12px; animation: pop .25s ease-out; }
-.bubble { flex: 1; min-width: 0; background: var(--surface); border: 2px solid transparent; border-radius: var(--radius); box-shadow: var(--shadow); padding: 10px 14px; }
+.bubble { position: relative; flex: 1; min-width: 0; background: var(--surface); border: 2px solid transparent; border-radius: var(--radius); box-shadow: var(--shadow); padding: 10px 14px; }
 .msg.human .bubble { background: color-mix(in srgb, var(--orange) 10%, var(--surface)); border-color: color-mix(in srgb, var(--orange) 35%, transparent); }
 .meta { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: .8rem; color: var(--muted); }
 .who { font-family: 'Fredoka', sans-serif; font-weight: 600; font-size: 1rem; color: var(--ink); }
 .msg.human .who { color: var(--orange-deep); }
-.msg-del { margin-left: auto; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: .8rem;
+.msg-del { position: absolute; top: 8px; right: 8px; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: .8rem;
   padding: 0 4px; border-radius: 6px; opacity: 0; transition: opacity .12s; }
 .msg:hover .msg-del, .msg-del:focus-visible { opacity: 1; }
+.bubble:has(.msg-del) .meta { padding-right: 22px; }
 .msg-del:hover { color: var(--berry); background: var(--surface-2); }
 @media (hover: none) { .msg-del { opacity: .6; } }
 .chip { background: var(--surface-2); border-radius: 999px; padding: 0 .6em; font-weight: 700; }
