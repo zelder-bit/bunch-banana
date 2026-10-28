@@ -40,7 +40,7 @@
       <span class="live" title="Live updates"><span id="live" class="dot"></span><span id="liveText">connecting</span></span>
       <div class="top-right">
         <button class="icon-btn" id="theme" title="Switch light / dark" aria-label="Switch light or dark theme"></button>
-        <span class="muted small" id="whoami"></span>
+        <button class="btn small ghost" id="whoami" type="button" title="Change my password"></button>
         <button class="btn small ghost" id="logout">Sign out</button>
       </div>
     </header>
@@ -101,6 +101,7 @@
     </div>
   </div>
 
+  <dialog id="panel" class="panel" aria-labelledby="panelTitle"></dialog>
   <div id="toasts" aria-live="polite"></div>
 
 <script>
@@ -191,6 +192,7 @@
     me = await api("/api/auth/me");
     $("login").hidden = true; $("app").hidden = false;
     $("whoami").textContent = me.name + (me.admin ? " · admin" : "");
+    $("whoami").disabled = !!token;   // the admin token has no password of its own to change
     document.querySelectorAll(".admin-only").forEach(e => e.hidden = !me.admin);
     await loadAgents();
     if (me.admin) loadUsers().catch(() => {});
@@ -231,7 +233,8 @@
       const mode = a.kind !== "agent" ? null : a.model
         ? h("span", { class: "tag auto", title: "The hub answers for it with " + a.model }, "auto")
         : h("span", { class: "tag", title: "Replies only when its own client (Claude Code, Codex…) reads the chat" }, "manual");
-      return h("div", { class: "agent" },
+      const editable = me.admin && a.kind === "agent";
+      return h("div", { class: "agent" + (editable ? " clickable" : ""), ...(editable ? clickable(() => openAgentPanel(a), "Edit " + a.name) : {}) },
         a.kind === "system" ? h("span", { class: "avatar sm" }, h("img", { src: "static/svg/orange-slice.svg", alt: "" })) : avatar(a.name, false, "sm"),
         h("div", { class: "agent-text" },
           h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name, mode),
@@ -244,12 +247,128 @@
 
   async function loadUsers() {
     const list = await api("/api/admin/users");
-    $("users").replaceChildren(...list.map(u => h("div", { class: "agent" }, avatar(u.name, true, "sm"),
+    $("users").replaceChildren(...list.map(u => h("div", { class: "agent clickable", ...clickable(() => openUserPanel(u), "Edit " + u.name) }, avatar(u.name, true, "sm"),
       h("div", { class: "agent-text" },
         h("div", { class: "agent-name" }, u.name, u.admin ? h("span", { class: "tag" }, "admin") : null),
         h("div", { class: "agent-stats" }, "signed in " + ago(u.last_seen))))));
     if (!list.length) $("users").append(h("p", { class: "muted small" }, "Only the admin token so far. Add people below."));
   }
+
+  // --- edit panels: agents and people (admins), your own password (everyone) ---------------
+  const enc = encodeURIComponent;
+  function clickable(fn, label) {
+    return { role: "button", tabindex: "0", "aria-label": label, onclick: fn,
+      onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } } };
+  }
+  function openPanel(title, ...kids) {
+    $("panel").replaceChildren(h("form", { method: "dialog", class: "panel-body", onsubmit: (e) => e.preventDefault() },
+      h("div", { class: "panel-head" }, h("h2", { id: "panelTitle" }, title),
+        h("button", { type: "button", class: "icon-btn", "aria-label": "Close", onclick: () => $("panel").close() }, "✕")),
+      ...kids));
+    $("panel").showModal();
+  }
+  async function act(fn, okText) {
+    try { await fn(); if (okText) toast(okText, "good"); return true; }
+    catch (err) { if (err.message !== "unauthorized") toast(err.message, "bad"); return false; }
+  }
+  const field = (label, input, hint) => h("label", { class: "field" }, h("span", null, label), input, hint ? h("span", { class: "muted small hint" }, hint) : null);
+  function keyBlock(name, key) {
+    return [h("strong", null, `Key for ${name}`), h("span", { class: "muted" }, " (shown once, copy it now)"),
+      h("code", null, key),
+      h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
+        try { await navigator.clipboard.writeText(key); toast("Key copied", "good"); } catch { toast("Select the key and copy it", "bad"); } } }, "Copy")];
+  }
+  let modelCache = null;
+  async function modelList() {
+    if (!modelCache) { try { modelCache = await api("/api/admin/models"); } catch { return []; } }
+    return modelCache;
+  }
+
+  async function openAgentPanel(a) {
+    const desc = h("input", { type: "text", value: a.description || "", placeholder: "Good at… (helps routing)" });
+    const model = h("select", null, h("option", { value: "" }, "Manual: connects with its key (Claude Code, Codex…)"));
+    for (const m of new Set([...(await modelList()), ...(a.model ? [a.model] : [])]))
+      model.append(h("option", { value: m }, "Auto: hub answers with " + m));
+    model.value = a.model || "";
+    const persona = h("textarea", { rows: 3, placeholder: "Persona (optional)" }, a.system || "");
+    const personaField = field("Persona", persona);
+    personaField.hidden = !model.value;
+    model.onchange = () => { personaField.hidden = !model.value; };
+    const budget = h("input", { type: "number", min: "0", step: "1000", value: a.budget_set ?? "", placeholder: "server default" });
+    const keyBox = h("div", { class: "key-out", hidden: true });
+    const save = async () => {
+      const b = budget.value.trim();
+      const ok = await act(async () => {
+        await api(`/api/admin/agents/${enc(a.name)}/info`, { method: "PUT", body: JSON.stringify({
+          description: desc.value.trim(), model: model.value, system: model.value ? persona.value.trim() : "" }) });
+        await api(`/api/admin/agents/${enc(a.name)}/budget`, { method: "PUT", body: JSON.stringify({ daily_tokens: b === "" ? null : Math.max(0, Math.round(Number(b))) }) });
+      }, `${a.name} saved`);
+      if (ok) { $("panel").close(); loadAgents(); }
+    };
+    const rotate = async () => {
+      if (!confirm(`Give ${a.name} a new key? The old key stops working right away.`)) return;
+      await act(async () => {
+        const r = await api(`/api/admin/agents/${enc(a.name)}/rotate`, { method: "POST" });
+        keyBox.replaceChildren(...keyBlock(a.name, r.key)); keyBox.hidden = false;
+      });
+    };
+    const remove = async () => {
+      if (!confirm(`Delete ${a.name}? Its key stops working. Its messages stay in the rooms.`)) return;
+      if (await act(() => api(`/api/admin/agents/${enc(a.name)}`, { method: "DELETE" }), `${a.name} deleted`)) { $("panel").close(); loadAgents(); }
+    };
+    openPanel(a.name,
+      field("Good at", desc, "The router uses this to pick who answers."),
+      field("Model", model),
+      personaField,
+      field("Daily ask budget (tokens)", budget, "Blank = server default, 0 = unlimited."),
+      h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Save")),
+      h("div", { class: "panel-danger" },
+        a.model ? null : h("button", { type: "button", class: "btn small", onclick: rotate }, "New key"),
+        h("button", { type: "button", class: "btn small danger", onclick: remove }, "Delete agent")),
+      keyBox);
+  }
+
+  function passwordField(label) {
+    return h("input", { type: "password", minlength: "8", autocomplete: "new-password", placeholder: "8+ characters", "aria-label": label });
+  }
+  function openUserPanel(u) {
+    const self = u.name === me.name;
+    const pw = passwordField("New password");
+    const adminBox = h("input", { type: "checkbox", disabled: self });
+    adminBox.checked = u.admin;
+    adminBox.onchange = async () => {
+      const ok = await act(() => api(`/api/admin/users/${enc(u.name)}/admin`, { method: "PUT", body: JSON.stringify({ admin: adminBox.checked }) }),
+        adminBox.checked ? `${u.name} is an admin` : `${u.name} is no longer an admin`);
+      if (ok) u.admin = adminBox.checked; else adminBox.checked = !adminBox.checked;
+      loadUsers();
+    };
+    const setPw = async () => {
+      if (await act(() => api(`/api/admin/users/${enc(u.name)}/password`, { method: "PUT", body: JSON.stringify({ password: pw.value }) }),
+        `New password set for ${u.name}`)) $("panel").close();
+    };
+    const remove = async () => {
+      if (!confirm(`Remove ${u.name}? They can't sign in any more. Their messages stay.`)) return;
+      if (await act(() => api(`/api/admin/users/${enc(u.name)}`, { method: "DELETE" }), `${u.name} removed`)) { $("panel").close(); loadUsers(); loadAgents(); }
+    };
+    openPanel(u.name,
+      field("Reset password", pw, "Signs them out everywhere."),
+      h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: setPw }, "Set password")),
+      h("label", { class: "check" }, adminBox, self ? " Admin (ask another admin to change this)" : " Admin (manage agents and people)"),
+      self ? null : h("div", { class: "panel-danger" }, h("button", { type: "button", class: "btn small danger", onclick: remove }, "Remove person")));
+  }
+
+  function openMyPasswordPanel() {
+    const pw = passwordField("New password"), again = passwordField("New password again");
+    const save = async () => {
+      if (pw.value !== again.value) return toast("The passwords don't match", "bad");
+      if (await act(() => api(`/api/admin/users/${enc(me.name)}/password`, { method: "PUT", body: JSON.stringify({ password: pw.value }) }),
+        "Password changed")) $("panel").close();
+    };
+    openPanel("Change my password",
+      field("New password", pw), field("Again", again, "Your other devices will be signed out."),
+      h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Change password")));
+  }
+  $("whoami").onclick = openMyPasswordPanel;
 
   // --- messages ------------------------------------------------------------------------
   // Same rule as the server: @name not preceded by a word char or @; a trailing "." ends the sentence.
@@ -467,11 +586,7 @@
       if ($("agentModel").value) {
         $("keyOut").replaceChildren(h("strong", null, `${r.name} is ready`), h("span", { class: "muted" }, ". @mention it in any room and the hub answers for it."));
       } else {
-        $("keyOut").replaceChildren(
-          h("strong", null, `Key for ${r.name}`), h("span", { class: "muted" }, " (shown once, copy it now)"),
-          h("code", null, r.key),
-          h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
-            try { await navigator.clipboard.writeText(r.key); toast("Key copied", "good"); } catch { toast("Select the key and copy it", "bad"); } } }, "Copy"));
+        $("keyOut").replaceChildren(...keyBlock(r.name, r.key));;
       }
       $("keyOut").hidden = false;
       for (const id of ["agentName", "agentDesc", "agentModel", "agentSystem"]) $(id).value = "";

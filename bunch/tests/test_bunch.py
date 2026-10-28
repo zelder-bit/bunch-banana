@@ -401,3 +401,40 @@ def test_secure_cookie_setting(tmp_path):
     with TestClient(app, base_url="https://testserver") as c:
         r = c.post("/api/auth/login", json={"name": "pat", "password": "first password"})
         assert "secure" in r.headers["set-cookie"].lower()
+
+
+def test_admin_flag_and_last_admin_guard(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    st.create_user("ann", "password one", admin=True)
+    st.create_user("ben", "password two")
+    assert c.put("/api/admin/users/ben/admin", json={"admin": True}, headers=adm()).json()["admin"] is True
+    assert c.put("/api/admin/users/ann/admin", json={"admin": False}, headers=adm()).status_code == 200
+    assert c.put("/api/admin/users/alice/admin", json={"admin": True}, headers=adm()).status_code == 404
+    # ben is now the only admin: signed in, he can't demote or delete himself
+    c.post("/api/auth/login", json={"name": "ben", "password": "password two"})
+    r = c.put("/api/admin/users/ben/admin", json={"admin": False})
+    assert r.status_code == 400 and "last admin" in r.text
+    assert c.delete("/api/admin/users/ben").status_code == 400
+    assert c.delete("/api/admin/users/ann").status_code == 200
+    # ...but the admin token is never locked out
+    assert c.put("/api/admin/users/ben/admin", json={"admin": False}, headers=adm()).status_code == 200
+    # members can't flip the flag
+    st.create_user("cat", "password three")
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"name": "cat", "password": "password three"})
+    assert c.put("/api/admin/users/cat/admin", json={"admin": True}).status_code == 403
+
+
+def test_agent_list_shows_persona_to_admins_only(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    c.put("/api/admin/agents/alice/info", json={"model": "local/small", "system": "be terse"}, headers=adm())
+    c.put("/api/admin/agents/bob/budget", json={"daily_tokens": 0}, headers=adm())
+    rows = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
+    assert rows["alice"]["system"] == "be terse" and rows["alice"]["budget_set"] is None
+    assert rows["bob"]["budget_set"] == 0
+    st.create_user("pat", "password one")
+    c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
+    rows = {a["name"]: a for a in c.get("/api/admin/agents").json()}
+    assert rows["alice"]["system"] is None

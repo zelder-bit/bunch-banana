@@ -74,6 +74,10 @@ class PasswordIn(BaseModel):
     password: str
 
 
+class AdminFlagIn(BaseModel):
+    admin: bool
+
+
 class BudgetIn(BaseModel):
     daily_tokens: int | None = None
 
@@ -302,13 +306,14 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     @app.get("/api/admin/agents")
     async def admin_agents(request: Request, authorization: str | None = Header(None)):
-        viewer(request, authorization)
+        _, admin = viewer(request, authorization)
         out = []
         for a in store.agents():
             u = store.usage_today(a["name"])
             out.append({"name": a["name"], "kind": a["kind"], "last_seen": a["last_seen"],
                         "description": a["description"], "model": a["model"],
                         "daily_tokens": hub.budget(a["name"]) if a["kind"] == "agent" else None,
+                        "budget_set": a["daily_tokens"], "system": a["system"] if admin else None,
                         "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"]})
         for system in ("_summarizer", "_router"):
             u = store.usage_today(system)
@@ -380,10 +385,27 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             request.session["pw"] = _pw_mark(store.agent(name)["pw_hash"])
         return {"name": name}
 
+    @app.put("/api/admin/users/{name}/admin")
+    async def admin_user_flag(request: Request, name: str, body: AdminFlagIn,
+                              authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        try:
+            # signed-in admins can't demote the last admin; the admin token can never be locked out
+            store.set_admin(name, body.admin, keep_one=not is_admin(_bearer(authorization)))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"name": name, "admin": body.admin}
+
     @app.delete("/api/admin/users/{name}")
     async def admin_delete_user(request: Request, name: str, authorization: str | None = Header(None)):
         require_admin(request, authorization)
-        if not store.delete_user(name):
+        try:
+            deleted = store.delete_user(name, keep_one=not is_admin(_bearer(authorization)))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not deleted:
             raise HTTPException(404, "no such user")
         return {"deleted": name}
 

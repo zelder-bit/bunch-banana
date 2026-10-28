@@ -78,7 +78,7 @@ img { max-width: 100%; }
 :focus-visible { outline: 3px solid var(--banana); outline-offset: 2px; }
 
 .field { display: grid; gap: .3em; text-align: left; font-weight: 600; font-size: .9rem; }
-input[type="text"], input[type="password"], textarea {
+input[type="text"], input[type="password"], input[type="number"], textarea {
   font: inherit; color: var(--ink); background: var(--surface);
   border: 2px solid var(--line); border-radius: 12px; padding: .55em .8em; width: 100%;
 }
@@ -210,11 +210,31 @@ pre { background: var(--surface-2); padding: 12px; border-radius: 12px; white-sp
 /* --- sidebar forms ----------------------------------------------------------------------- */
 
 .add-more { display: grid; gap: 6px; margin-top: 6px; }
-.add-more select { font: inherit; padding: .5em .7em; border: 2px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); width: 100%; }
+.add-more select, .panel select { font: inherit; padding: .5em .7em; border: 2px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); width: 100%; }
 .add-more textarea { resize: vertical; }
 .check { display: flex; gap: 6px; align-items: center; font-size: .85rem; }
 .linkish { background: none; border: 0; padding: 0; color: var(--orange-deep); font: inherit; font-weight: 700; cursor: pointer; text-decoration: underline; }
 #userFields { display: grid; gap: 12px; }
+
+/* --- edit panels ------------------------------------------------------------------------ */
+
+.agent.clickable { cursor: pointer; }
+.agent.clickable:hover { background: var(--surface-2); }
+dialog.panel {
+  border: 0; padding: 0; border-radius: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow);
+  width: min(440px, calc(100vw - 2 * var(--gutter))); max-height: calc(100dvh - 2 * var(--gutter)); animation: pop .2s ease-out;
+}
+dialog.panel::backdrop { background: rgb(59 42 26 / 35%); backdrop-filter: blur(2px); }
+.panel-body { display: grid; gap: 14px; padding: 18px 22px 22px; }
+.panel-head { display: flex; align-items: center; gap: 10px; }
+.panel-head h2 { flex: 1; margin: 0; font-size: 1.35rem; overflow-wrap: anywhere; }
+.panel .hint { font-weight: 400; }
+.panel textarea { resize: vertical; }
+.panel-actions, .panel-danger { display: flex; gap: 8px; flex-wrap: wrap; }
+.panel-danger { border-top: 2px solid var(--line); padding-top: 14px; }
+.btn.danger { color: var(--berry); }
+.btn.danger:hover { border-color: var(--berry); }
+.btn:disabled { opacity: .6; cursor: default; }
 
 /* --- toasts ------------------------------------------------------------------------- */
 

@@ -180,8 +180,26 @@ class Store:
     def users(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM agents WHERE kind='human' AND pw_hash IS NOT NULL ORDER BY name")
 
-    def delete_user(self, name: str) -> bool:
+    def _check_not_last_admin(self, name: str) -> None:
+        row = self.agent(name)
+        if row and row["is_admin"]:
+            n = self.one("SELECT COUNT(*) AS n FROM agents WHERE kind='human' AND pw_hash IS NOT NULL AND is_admin=1")["n"]
+            if n <= 1:
+                raise ValueError("can't remove the last admin")
+
+    def set_admin(self, name: str, admin: bool, keep_one: bool = True) -> None:
+        row = self.agent(name)
+        if not row or row["kind"] != "human" or not row["pw_hash"]:
+            raise LookupError("no such user")
+        if not admin and keep_one:
+            self._check_not_last_admin(name)
+        self.x("UPDATE agents SET is_admin=? WHERE name=?", (int(admin), name))
+
+    def delete_user(self, name: str, keep_one: bool = False) -> bool:
+        if keep_one:
+            self._check_not_last_admin(name)
         cur = self.x("DELETE FROM agents WHERE name=? AND kind='human' AND pw_hash IS NOT NULL", (name,))
+        self.x("DELETE FROM cursors WHERE agent=?", (name,))
         return cur.rowcount > 0
 
     def ensure_human(self, name: str) -> None:
