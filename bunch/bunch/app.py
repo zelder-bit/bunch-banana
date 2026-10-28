@@ -310,6 +310,16 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         viewer(request, authorization)
         return hub.search(q, room, limit)
 
+    @app.delete("/api/admin/rooms/{room}")
+    async def admin_delete_room(request: Request, room: str, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        room = room.strip().lower().lstrip("#")
+        n = store.delete_room(room)
+        if n is None:
+            raise HTTPException(404, "no such room")
+        hub.broadcast({"type": "room_deleted", "room": room})
+        return {"deleted": room, "messages": n}
+
     @app.delete("/api/admin/messages/{mid}")
     async def admin_delete_message(request: Request, mid: int, authorization: str | None = Header(None)):
         require_admin(request, authorization)

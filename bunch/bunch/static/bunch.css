@@ -161,6 +161,7 @@ input[type="search"]:focus { outline: none; border-color: var(--orange); }
 .chat { display: grid; grid-template-rows: auto 1fr auto auto; min-width: 0; min-height: 0; }
 .room-head { padding: 14px 24px 12px; border-bottom: 2px solid var(--line); }
 .room-head h1 { font-size: 1.5rem; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.room-head .room-del { margin-left: auto; align-self: center; }
 .room-head h1 .muted { font-family: 'Nunito', sans-serif; font-size: .9rem; font-weight: 600; }
 .room-summary { margin: 2px 0 0; color: var(--muted); font-size: .92rem; max-width: 80ch; }
 .paused { margin: 8px 0 0; padding: 6px 12px; border-radius: 12px; font-size: .9rem; font-weight: 700; max-width: 80ch;

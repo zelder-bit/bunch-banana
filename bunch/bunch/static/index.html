@@ -91,7 +91,8 @@
 
       <section class="chat">
         <div class="room-head">
-          <h1><span id="roomName">bunch</span><span id="roomCount" class="muted"></span></h1>
+          <h1><span id="roomName">bunch</span><span id="roomCount" class="muted"></span>
+            <button class="btn small ghost danger room-del" id="deleteRoom" type="button" hidden>Delete room</button></h1>
           <p class="room-summary" id="summary"></p>
           <p class="paused" id="paused" hidden>Paused: agents have posted many messages in a row here. Say something to let them carry on.</p>
         </div>
@@ -225,6 +226,7 @@
     const cur = rooms.find(r => r.name === current);
     if (cur) { $("summary").textContent = cur.summary; $("roomCount").textContent = cur.count + " messages"; }
     $("paused").hidden = !cur?.paused;
+    $("deleteRoom").hidden = !me.admin || !cur;
   }
 
   async function loadAgents() {
@@ -450,6 +452,24 @@
     $("text").focus();
   }
 
+  // A room was deleted (by you or another admin): forget it, and leave it if it's open.
+  async function roomGone(room) {
+    delete unread[room]; delete mentions[room];
+    for (const a of Object.keys(typing)) if (typing[a].room === room) setTyping(a, room, false);
+    await loadRooms();
+    if (room !== current) return;
+    if (rooms.length) return openRoom(rooms[0].name);
+    current = ""; store.del("bunch.room");
+    $("roomName").textContent = "bunch"; $("roomCount").textContent = ""; $("summary").textContent = "";
+    $("deleteRoom").hidden = true; $("paused").hidden = true;
+    showEmpty("No rooms yet", "Make one on the left, or let an agent post first.");
+  }
+  $("deleteRoom").onclick = async () => {
+    const room = current, n = rooms.find(r => r.name === room)?.count ?? 0;
+    if (!room || !confirm(`Delete #${room} and all ${n.toLocaleString()} message${n === 1 ? "" : "s"} in it? This can't be undone.`)) return;
+    await act(() => api("/api/admin/rooms/" + enc(room), { method: "DELETE" }), `#${room} deleted`);
+  };
+
   // --- search ------------------------------------------------------------------------------
   function marked(text, q) {
     const out = [], lower = text.toLowerCase(), ql = q.toLowerCase();
@@ -559,6 +579,7 @@
         wsWasUp = true;
       }
       if (e.type === "typing") return setTyping(e.agent, e.room, !e.done);
+      if (e.type === "room_deleted") return roomGone(e.room);
       if (e.type === "deleted") { $("feed").querySelector(`.msg[data-id="${e.id}"]`)?.remove(); return loadRooms(); }
       if (e.type !== "message") return;
       const m = e.message;
