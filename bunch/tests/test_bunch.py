@@ -545,3 +545,142 @@ def test_admin_deletes_room(env):
     st.create_user("pat", "password one")
     c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
     assert c.delete("/api/admin/rooms/keep").status_code == 403
+
+
+# --------------------------------------------------- subscription workers
+def _load_worker():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[2] / "clients" / "worker.py"
+    spec = importlib.util.spec_from_file_location("bunch_worker", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_old_usage_table_is_migrated(tmp_path):
+    import sqlite3
+    from bunch.store import Store
+    path = str(tmp_path / "old.db")
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE usage(agent TEXT NOT NULL, day TEXT NOT NULL, ask_tokens INTEGER NOT NULL DEFAULT 0, "
+               "ctx_tokens INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(agent, day))")
+    db.commit(); db.close()
+    st = Store(path)
+    st.add_usage("x", ask=5, sub=40, calls=2)
+    assert st.usage_today("x") == {"ask": 5, "ctx": 0, "sub": 40, "calls": 2}
+    assert st.agent("x") is None or st.agent("x")["worker"] is None
+
+
+def test_worker_config_is_admin_set_and_agent_read(env):
+    c, k, app, _ = env
+    assert c.get("/api/v1/worker", headers=h(k["alice"])).json() == {"mode": "manual"}
+    cfg = {"mode": "worker", "cli": "claude", "model": "sonnet", "power": "read", "dir": "/srv/app"}
+    assert c.put("/api/admin/agents/alice/worker", json=cfg, headers=h(k["alice"])).status_code == 401
+    assert c.put("/api/admin/agents/alice/worker", json={**cfg, "cli": "nope"}, headers=adm()).status_code == 400
+    assert c.put("/api/admin/agents/alice/worker", json={**cfg, "dir": ""}, headers=adm()).status_code == 400
+    r = c.put("/api/admin/agents/alice/worker", json=cfg, headers=adm())
+    assert r.status_code == 200 and r.json()["power"] == "read" and r.json()["max_output"] == 800
+    got = c.get("/api/v1/worker", headers=h(k["alice"])).json()
+    assert got["cli"] == "claude" and got["dir"] == "/srv/app"
+    assert c.get("/api/v1/worker", headers=h(k["bob"])).json() == {"mode": "manual"}
+    agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
+    assert agents["alice"]["state"] == "online" and agents["bob"]["state"] == "manual"
+    # Becoming an auto agent drops the worker config: one answerer per agent.
+    c.put("/api/admin/agents/alice/info", json={"model": "local/small"}, headers=adm())
+    assert c.get("/api/v1/worker", headers=h(k["alice"])).json() == {"mode": "manual"}
+
+
+def test_worker_report_tracks_usage_budget_and_cooling(env):
+    import time
+    c, k, app, _ = env
+    c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "cli": "codex"}, headers=adm())
+    r = c.post("/api/v1/worker/report", json={"status": "online", "tokens": 100, "calls": 1}, headers=h(k["alice"]))
+    assert r.text == "ok 100/250"
+    assert c.post("/api/v1/worker/report", json={"status": "sleepy"}, headers=h(k["alice"])).status_code == 400
+    # The daily budget covers gateway asks and CLI runs together.
+    tool(c, k["alice"], "ask", model="local/small", prompt="hi")  # FakeLLM: 100 tokens
+    r = c.post("/api/v1/worker/report", json={"status": "online", "tokens": 60, "calls": 1}, headers=h(k["alice"]))
+    assert r.text == "over budget 260/250"
+    assert "budget used" in tool(c, k["alice"], "ask", model="local/small", prompt="hi")[0]
+    c.post("/api/v1/worker/report", json={"status": "cooling", "until": time.time() + 600}, headers=h(k["alice"]))
+    a = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}["alice"]
+    assert a["state"] == "cooling" and a["sub_tokens_today"] == 160 and a["sub_calls_today"] == 2
+    # Non-admins see how it runs, not its folder.
+    from bunch.app import _worker_view
+    cfg = {"mode": "worker", "cli": "claude", "power": "read", "model": "", "dir": "/srv/x", "max_output": 800}
+    assert "dir" not in _worker_view(cfg, False) and _worker_view(cfg, True) == cfg
+
+
+def test_router_prefers_cheap_and_skips_cooling_workers(env):
+    import time
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "local/small"})
+    for n in ("alice", "bob"):
+        c.put(f"/api/admin/agents/{n}/worker", json={"mode": "worker", "cli": "claude"}, headers=adm())
+        c.get("/api/v1/worker", headers=h(k[n]))  # a running worker polls; without that it's offline
+    hub.store.set_status("bob", "cooling", time.time() + 600)
+    seen = {}
+
+    async def pick(model, messages, max_tokens, user=None):
+        seen["roster"] = messages[1]["content"]
+        return "bob, alice", 10
+    llm.chat = pick
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "hard question"}, headers=adm())
+    assert "alice: no description (subscription claude)" in seen["roster"]
+    assert "bob" not in seen["roster"].split("Room #")[0] and "Cheapest first" in hub_prompt()
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == ["alice"]
+
+
+def hub_prompt():
+    from bunch.router import PROMPT
+    return PROMPT
+
+
+def test_worker_power_is_clamped_by_host():
+    w = _load_worker()
+    cfg = {"cli": "claude", "power": "full", "dir": "/srv/app/sub"}
+    assert w.effective_power(cfg, "answer", ["/srv/app"]) == ("answer", "")
+    assert w.effective_power(cfg, "read", ["/srv/app"]) == ("read", "/srv/app/sub")
+    assert w.effective_power(cfg, "full", ["/srv/app"]) == ("full", "/srv/app/sub")
+    assert w.effective_power(cfg, "full", ["/srv/other"]) == ("answer", "")
+    assert w.effective_power({**cfg, "dir": "/srv/application"}, "full", ["/srv/app"]) == ("answer", "")
+
+
+def test_worker_builds_lean_cli_commands():
+    w = _load_worker()
+    argv, cwd = w.build_cmd({"cli": "claude", "model": "sonnet", "deep_model": "opus"}, "be brief", "answer", "/tmp/x")
+    assert argv[:2] == ["claude", "-p"] and cwd == "/tmp/x"
+    assert argv[argv.index("--tools") + 1] == "" and argv[argv.index("--system-prompt") + 1] == "be brief"
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    argv, _ = w.build_cmd({"cli": "claude", "model": "sonnet", "deep_model": "opus"}, "s", "full", "/d", deep=True)
+    assert argv[argv.index("--model") + 1] == "opus" and "acceptEdits" in argv and "--system-prompt" not in argv
+    argv, _ = w.build_cmd({"cli": "codex", "model": ""}, "s", "read", "/d")
+    assert argv[argv.index("-s") + 1] == "read-only" and "-m" not in argv and argv[-1] == "-"
+    argv, _ = w.build_cmd({"cli": "codex"}, "s", "full", "/d")
+    assert argv[argv.index("-s") + 1] == "workspace-write"
+    argv, _ = w.build_cmd({"cli": "gemini", "model": "flash"}, "s", "answer", "/d")
+    assert argv[argv.index("--approval-mode") + 1] == "default" and argv[argv.index("-m") + 1] == "flash"
+    assert w.stdin_for({"cli": "codex"}, "sys", "p") == "sys\n\np" and w.stdin_for({"cli": "claude"}, "sys", "p") == "p"
+
+
+def test_worker_parses_cli_output_and_limits():
+    import json
+    w = _load_worker()
+    out = json.dumps({"result": "pong", "is_error": False, "usage": {"input_tokens": 2, "cache_creation_input_tokens": 910,
+                                                                    "cache_read_input_tokens": 0, "output_tokens": 4}})
+    assert w.parse_output("claude", out, "", 0) == ("pong", 916, None)
+    out = "\n".join(json.dumps(e) for e in [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "pong"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 14833, "cached_input_tokens": 12160, "output_tokens": 5}}])
+    assert w.parse_output("codex", out, "", 0) == ("pong", 14838, None)
+    out = json.dumps({"response": "hi", "stats": {"models": {"flash": {"tokens": {"total": 50}}}}})
+    assert w.parse_output("gemini", out, "", 0) == ("hi", 50, None)
+    text, _, err = w.parse_output("claude", json.dumps({"is_error": True, "result": "Claude AI usage limit reached|1767225600"}), "", 1)
+    assert w.LIMIT_RE.search(err) and w.reset_time(err) == 1767225600.0
+    assert w.parse_output("codex", "", "boom", 2)[2] == "boom"
+    now = 1_000_000.0
+    assert w.reset_time("You've hit your usage limit. Try again in 2 hours 5 minutes.", now) == now + 7500
+    assert w.reset_time("quota exceeded", now) == now + w.COOLDOWN
+    assert w.reset_time("limit reached, resets 3pm", now) > now

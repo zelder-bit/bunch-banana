@@ -4,12 +4,18 @@ MCP and the REST API are just two doors into these same functions."""
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 
 from .config import Settings
 from .llm import LLM, LLMError
 from .store import Store, valid_name
+
+WORKER_CLIS = ("claude", "codex", "gemini")
+WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edit + run in dir
+WORKER_STATUSES = ("online", "busy", "cooling")
+WORKER_OFFLINE_AFTER = 180  # a worker long-polls every ~50 s; silent this long = not running
 
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
 
@@ -315,6 +321,84 @@ class Hub:
             return int(row["daily_tokens"])
         return self.s.daily_tokens
 
+    def spent(self, agent: str) -> int:
+        """Tokens counted against the daily budget: gateway asks plus a worker's own CLI runs."""
+        u = self.store.usage_today(agent)
+        return u["ask"] + u["sub"]
+
+    # ---------------------------------------------------------------- worker
+    @staticmethod
+    def worker_config(row) -> dict:
+        """What clients/worker.py should do for this agent. {"mode": "manual"} = idle."""
+        try:
+            cfg = json.loads(row["worker"]) if row and row["worker"] else None
+        except ValueError:
+            cfg = None
+        if not cfg:
+            return {"mode": "manual"}
+        return {**cfg, "system": row["system"] or ""}  # persona, shared with auto agents
+
+    @staticmethod
+    def worker_state(row) -> str:
+        """auto / manual / offline / online / busy / cooling, as the viewer and router see it."""
+        if row["kind"] != "agent":
+            return ""
+        if row["model"]:
+            return "auto"
+        if not row["worker"]:
+            return "manual"
+        now = time.time()
+        if (row["last_seen"] or 0) < now - WORKER_OFFLINE_AFTER:
+            return "offline"
+        if row["status"] == "cooling":
+            return "cooling" if (row["status_until"] or 0) > now else "online"
+        return row["status"] or "online"
+
+    @staticmethod
+    def clean_worker(cfg: dict | None) -> dict | None:
+        """Validates a worker config from the viewer; None = manual."""
+        if not cfg or cfg.get("mode", "manual") == "manual":
+            return None
+        cli = cfg.get("cli")
+        if cli not in WORKER_CLIS:
+            raise HubError(f"cli must be one of {', '.join(WORKER_CLIS)}")
+        power = cfg.get("power") or "answer"
+        if power not in WORKER_POWERS:
+            raise HubError(f"power must be one of {', '.join(WORKER_POWERS)}")
+        if power != "answer" and not (cfg.get("dir") or "").strip():
+            raise HubError(f"power '{power}' needs a folder")
+
+        def num(key, default, lo, hi):
+            try:
+                return max(lo, min(hi, int(cfg.get(key) or default)))
+            except (TypeError, ValueError):
+                raise HubError(f"{key} must be a number") from None
+        return {
+            "mode": "worker", "cli": cli, "power": power,
+            "model": (cfg.get("model") or "").strip()[:64],
+            "deep_model": (cfg.get("deep_model") or "").strip()[:64],
+            "dir": (cfg.get("dir") or "").strip()[:512] if power != "answer" else "",
+            "max_output": num("max_output", 800, 50, 8000),
+            "max_input_chars": num("max_input_chars", 12000, 1000, 100_000),
+        }
+
+    def worker_report(self, agent: str, status: str, tokens: int = 0, calls: int = 0,
+                      until: float | None = None, room: str | None = None) -> str:
+        """A worker says what it's doing and what its CLI spent. Returns the budget state in one line."""
+        if status not in WORKER_STATUSES:
+            raise HubError(f"status must be one of {', '.join(WORKER_STATUSES)}")
+        st = self.store
+        if tokens or calls:
+            st.add_usage(agent, sub=max(0, int(tokens)), calls=max(0, int(calls)))
+        st.set_status(agent, status, until if status == "cooling" else None)
+        if room:  # viewer shows "thinking…" while the CLI runs
+            self.broadcast({"type": "typing", "agent": agent, "room": room, **({} if status == "busy" else {"done": True})})
+        self.broadcast({"type": "agents"})
+        budget, used = self.budget(agent), self.spent(agent)
+        if budget and used >= budget:
+            return f"over budget {used}/{budget}"
+        return f"ok {used}/{budget or 'unlimited'}"
+
     async def ask(self, agent: str, model: str, prompt: str | None = None, system: str | None = None,
                   max_tokens: int | None = None, room: str | None = None) -> str:
         if not self.llm.enabled:
@@ -326,7 +410,7 @@ class Hub:
             if not prompt:
                 raise HubError("prompt required")
             budget = self.budget(agent)
-            used = self.store.usage_today(agent)["ask"]
+            used = self.spent(agent)
             if budget and used >= budget:
                 raise HubError(f"daily token budget used ({used}/{budget}); resets 00:00 UTC")
             mt = max(1, min(int(max_tokens or self.s.ask_max_tokens), self.s.ask_max_tokens))

@@ -236,26 +236,39 @@
       const active = a.last_seen && Date.now() / 1000 - a.last_seen < 600;
       const stats = [];
       if (a.kind === "agent") stats.push("seen " + ago(a.last_seen));
-      stats.push("ask " + fmtTok(a.ask_tokens_today) + (a.daily_tokens ? " / " + fmtTok(a.daily_tokens) : ""));
+      const spent = a.ask_tokens_today + (a.sub_tokens_today || 0);
+      stats.push("ask " + fmtTok(a.ask_tokens_today) + (a.daily_tokens && !a.sub_tokens_today ? " / " + fmtTok(a.daily_tokens) : ""));
+      if (a.sub_calls_today) stats.push("sub " + fmtTok(a.sub_tokens_today) + (a.daily_tokens ? " / " + fmtTok(a.daily_tokens) : "") + " · " + a.sub_calls_today + (a.sub_calls_today === 1 ? " call" : " calls"));
       if (a.kind === "agent") stats.push("ctx " + fmtTok(a.ctx_tokens_today));
       let meter = null;
       if (a.daily_tokens) {
-        const pct = Math.min(100, 100 * a.ask_tokens_today / a.daily_tokens);
+        const pct = Math.min(100, 100 * spent / a.daily_tokens);
         meter = h("div", { class: "meter" + (pct > 80 ? " hot" : ""), style: `--p:${pct}%`, title: Math.round(pct) + "% of today's budget" }, h("div"));
       }
-      const mode = a.kind !== "agent" ? null : a.model
-        ? h("span", { class: "tag auto", title: "The hub answers for it with " + a.model }, "auto")
-        : h("span", { class: "tag", title: "Replies only when its own client (Claude Code, Codex…) reads the chat" }, "manual");
+      const mode = a.kind !== "agent" ? null : modeTag(a);
       const editable = me.admin && a.kind === "agent";
       return h("div", { class: "agent" + (editable ? " clickable" : ""), ...(editable ? clickable(() => openAgentPanel(a), "Edit " + a.name) : {}) },
         a.kind === "system" ? h("span", { class: "avatar sm" }, h("img", { src: "static/svg/orange-slice.svg", alt: "" })) : avatar(a.name, false, "sm"),
         h("div", { class: "agent-text" },
           h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name, mode),
           a.description ? h("div", { class: "agent-desc" }, a.description) : null,
-          h("div", { class: "agent-stats" }, stats.join(" · ") + (a.model ? " · " + a.model : "")),
+          h("div", { class: "agent-stats" }, stats.join(" · ") + (a.model ? " · " + a.model : a.worker?.model ? " · " + a.worker.model : "")),
           meter));
     }));
     if (!$("agents").children.length) $("agents").append(h("p", { class: "muted small" }, "No agents yet."));
+  }
+
+  function modeTag(a) {
+    const cli = a.worker?.cli;
+    const until = a.status_until ? new Date(a.status_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    switch (a.state) {
+      case "auto": return h("span", { class: "tag auto", title: "The hub answers for it with " + a.model }, "auto");
+      case "online": return h("span", { class: "tag worker", title: `Answers on its own with ${cli} (clients/worker.py is running)` }, cli);
+      case "busy": return h("span", { class: "tag worker", title: `Running ${cli} on a message right now` }, cli + " · busy");
+      case "cooling": return h("span", { class: "tag cooling", title: `Hit the ${cli} plan limit; the router skips it until ${until}` }, "cooling · " + until);
+      case "offline": return h("span", { class: "tag", title: `Set up as a ${cli} worker, but clients/worker.py isn't running` }, cli + " · offline");
+      default: return h("span", { class: "tag", title: "Replies only when its own client (Claude Code, Codex…) reads the chat" }, "manual");
+    }
   }
 
   async function loadUsers() {
@@ -299,21 +312,59 @@
 
   async function openAgentPanel(a) {
     const desc = h("input", { type: "text", value: a.description || "", placeholder: "Good at… (helps routing)" });
-    const model = h("select", null, h("option", { value: "" }, "Manual: connects with its key (Claude Code, Codex…)"));
+    const WORKER = "__worker";
+    const w = a.worker || { mode: "manual" };
+    const model = h("select", null, h("option", { value: "" }, "Manual: connects with its key (Claude Code, Codex…)"),
+      h("option", { value: WORKER }, "Subscription worker: its machine answers with a CLI"));
     for (const m of new Set([...(await modelList()), ...(a.model ? [a.model] : [])]))
       model.append(h("option", { value: m }, "Auto: hub answers with " + m));
-    model.value = a.model || "";
+    model.value = w.mode === "worker" ? WORKER : a.model || "";
     const persona = h("textarea", { rows: 3, placeholder: "Persona (optional)" }, a.system || "");
     const personaField = field("Persona", persona);
-    personaField.hidden = !model.value;
-    model.onchange = () => { personaField.hidden = !model.value; };
+    const opt = (v, label) => h("option", { value: v }, label);
+    const cli = h("select", null, opt("claude", "Claude Code"), opt("codex", "Codex CLI"), opt("gemini", "Gemini CLI"));
+    cli.value = w.cli || "claude";
+    const wModel = h("input", { type: "text", value: w.model || "", placeholder: "CLI default" });
+    const deep = h("input", { type: "text", value: w.deep_model || "", placeholder: "same as model" });
+    const power = h("select", null, opt("answer", "Answer only: no tools, no files (cheapest)"),
+      opt("read", "Read files in a folder"), opt("full", "Edit files and run commands in a folder"));
+    power.value = w.power || "answer";
+    const dir = h("input", { type: "text", value: w.dir || "", placeholder: "~/code/project" });
+    const maxOut = h("input", { type: "number", min: "50", max: "8000", step: "50", value: w.max_output || 800 });
+    const powerHint = h("span", { class: "muted small hint" });
+    const dirField = field("Folder", dir, "Must also be listed in WORKER_DIRS on that machine.");
+    const runHint = h("span", { class: "muted small hint" }, "On the machine logged in to the CLI, run ",
+      h("code", null, `BUNCH_URL=${location.origin} BUNCH_KEY=<key> python3 clients/worker.py`),
+      ". Set WORKER_MAX_POWER there to allow more than answer-only.");
+    const workerBox = h("div", { class: "field-group" },
+      field("CLI", cli),
+      field("Model", wModel, "Leave blank for the CLI's default. A cheaper model stretches the plan further."),
+      field("Deep model", deep, "Used only when a message contains !deep."),
+      field("Powers", power, powerHint), dirField,
+      field("Max answer (tokens)", maxOut), runHint);
+    const sync = () => {
+      const isWorker = model.value === WORKER;
+      personaField.hidden = !model.value;
+      workerBox.hidden = !isWorker;
+      dirField.hidden = power.value === "answer";
+      powerHint.textContent = power.value === "full"
+        ? "Anyone who can @mention this agent can make it change files and run commands there."
+        : power.value === "read" ? "Can read anything in the folder and quote it into the chat." : "";
+    };
+    model.onchange = power.onchange = sync;
+    sync();
     const budget = h("input", { type: "number", min: "0", step: "1000", value: a.budget_set ?? "", placeholder: "server default" });
     const keyBox = h("div", { class: "key-out", hidden: true });
     const save = async () => {
       const b = budget.value.trim();
       const ok = await act(async () => {
+        const isWorker = model.value === WORKER;
         await api(`/api/admin/agents/${enc(a.name)}/info`, { method: "PUT", body: JSON.stringify({
-          description: desc.value.trim(), model: model.value, system: model.value ? persona.value.trim() : "" }) });
+          description: desc.value.trim(), model: isWorker ? "" : model.value, system: model.value ? persona.value.trim() : "" }) });
+        if (isWorker || w.mode === "worker")
+          await api(`/api/admin/agents/${enc(a.name)}/worker`, { method: "PUT", body: JSON.stringify(isWorker ? {
+            mode: "worker", cli: cli.value, model: wModel.value.trim(), deep_model: deep.value.trim(), power: power.value,
+            dir: dir.value.trim(), max_output: Math.round(Number(maxOut.value) || 800) } : { mode: "manual" }) });
         await api(`/api/admin/agents/${enc(a.name)}/budget`, { method: "PUT", body: JSON.stringify({ daily_tokens: b === "" ? null : Math.max(0, Math.round(Number(b))) }) });
       }, `${a.name} saved`);
       if (ok) { $("panel").close(); loadAgents(); }
@@ -331,9 +382,10 @@
     };
     openPanel(a.name,
       field("Good at", desc, "The router uses this to pick who answers."),
-      field("Model", model),
+      field("Runs as", model),
+      workerBox,
       personaField,
-      field("Daily ask budget (tokens)", budget, "Blank = server default, 0 = unlimited."),
+      field("Daily token budget", budget, "Gateway asks plus a worker's CLI runs. Blank = server default, 0 = unlimited."),
       h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Save")),
       h("div", { class: "panel-danger" },
         a.model ? null : h("button", { type: "button", class: "btn small", onclick: rotate }, "New key"),
@@ -580,6 +632,7 @@
       }
       if (e.type === "typing") return setTyping(e.agent, e.room, !e.done);
       if (e.type === "room_deleted") return roomGone(e.room);
+      if (e.type === "agents") return loadAgents();
       if (e.type === "deleted") { $("feed").querySelector(`.msg[data-id="${e.id}"]`)?.remove(); return loadRooms(); }
       if (e.type !== "message") return;
       const m = e.message;

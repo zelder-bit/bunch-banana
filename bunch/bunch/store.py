@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -27,7 +28,10 @@ CREATE TABLE IF NOT EXISTS agents(
   model TEXT,                               -- set = the hub answers for this agent (auto agent)
   system TEXT,                              -- persona prompt for auto agents
   pw_hash TEXT,                             -- humans: argon2 password hash
-  is_admin INTEGER NOT NULL DEFAULT 0       -- humans: may manage agents and users
+  is_admin INTEGER NOT NULL DEFAULT 0,      -- humans: may manage agents and users
+  worker TEXT,                              -- JSON: how clients/worker.py runs this agent (NULL = manual)
+  status TEXT,                              -- worker-reported: online / busy / cooling
+  status_until REAL                         -- cooling: when the worker expects to answer again
 );
 CREATE TABLE IF NOT EXISTS rooms(
   name TEXT PRIMARY KEY,
@@ -57,6 +61,8 @@ CREATE TABLE IF NOT EXISTS usage(
   agent TEXT NOT NULL, day TEXT NOT NULL,
   ask_tokens INTEGER NOT NULL DEFAULT 0,    -- model tokens spent through ask()
   ctx_tokens INTEGER NOT NULL DEFAULT 0,    -- estimated tokens the hub put into the agent's context
+  sub_tokens INTEGER NOT NULL DEFAULT 0,    -- tokens a worker spent on its own subscription CLI
+  sub_calls INTEGER NOT NULL DEFAULT 0,     -- CLI runs by that worker
   PRIMARY KEY(agent, day)
 );
 """
@@ -68,6 +74,13 @@ AGENT_COLUMNS = {
     "system": "TEXT",
     "pw_hash": "TEXT",
     "is_admin": "INTEGER NOT NULL DEFAULT 0",
+    "worker": "TEXT",
+    "status": "TEXT",
+    "status_until": "REAL",
+}
+USAGE_COLUMNS = {
+    "sub_tokens": "INTEGER NOT NULL DEFAULT 0",
+    "sub_calls": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _ph = PasswordHasher()
@@ -101,6 +114,10 @@ class Store:
             for col, decl in AGENT_COLUMNS.items():
                 if col not in have:
                     self.db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
+            have = {r["name"] for r in self.db.execute("PRAGMA table_info(usage)")}
+            for col, decl in USAGE_COLUMNS.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE usage ADD COLUMN {col} {decl}")
 
     def backup(self, path: str) -> None:
         """Copies the database to path using SQLite's online backup, so it's safe while the hub runs."""
@@ -153,6 +170,13 @@ class Store:
                 if col != "description":
                     val = val or None
                 self.x(f"UPDATE agents SET {col}=? WHERE name=?", (val, name))
+
+    def set_worker(self, name: str, config: dict | None) -> None:
+        """config None = manual again (clients/worker.py idles)."""
+        self.x("UPDATE agents SET worker=? WHERE name=?", (json.dumps(config) if config else None, name))
+
+    def set_status(self, name: str, status: str | None, until: float | None = None) -> None:
+        self.x("UPDATE agents SET status=?, status_until=? WHERE name=?", (status, until, name))
 
     def auto_agents(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM agents WHERE kind='agent' AND model IS NOT NULL AND model!='' ORDER BY name")
@@ -253,17 +277,21 @@ class Store:
         return {r["name"] for r in self.q("SELECT name FROM agents")}
 
     # -- usage -----------------------------------------------------------
-    def add_usage(self, agent: str, ask: int = 0, ctx: int = 0) -> None:
+    def add_usage(self, agent: str, ask: int = 0, ctx: int = 0, sub: int = 0, calls: int = 0) -> None:
         self.x(
-            "INSERT INTO usage(agent,day,ask_tokens,ctx_tokens) VALUES(?,?,?,?) "
+            "INSERT INTO usage(agent,day,ask_tokens,ctx_tokens,sub_tokens,sub_calls) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(agent,day) DO UPDATE SET ask_tokens=ask_tokens+excluded.ask_tokens, "
-            "ctx_tokens=ctx_tokens+excluded.ctx_tokens",
-            (agent, today(), ask, ctx),
+            "ctx_tokens=ctx_tokens+excluded.ctx_tokens, sub_tokens=sub_tokens+excluded.sub_tokens, "
+            "sub_calls=sub_calls+excluded.sub_calls",
+            (agent, today(), ask, ctx, sub, calls),
         )
 
     def usage_today(self, agent: str) -> dict:
-        row = self.one("SELECT ask_tokens, ctx_tokens FROM usage WHERE agent=? AND day=?", (agent, today()))
-        return {"ask": row["ask_tokens"] if row else 0, "ctx": row["ctx_tokens"] if row else 0}
+        row = self.one("SELECT ask_tokens, ctx_tokens, sub_tokens, sub_calls FROM usage WHERE agent=? AND day=?",
+                       (agent, today()))
+        if not row:
+            return {"ask": 0, "ctx": 0, "sub": 0, "calls": 0}
+        return {"ask": row["ask_tokens"], "ctx": row["ctx_tokens"], "sub": row["sub_tokens"], "calls": row["sub_calls"]}
 
     # -- rooms & messages ------------------------------------------------
     def ensure_room(self, room: str) -> None:

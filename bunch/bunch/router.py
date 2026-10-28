@@ -13,8 +13,11 @@ log = logging.getLogger("bunch.router")
 
 ROUTER = "_router"
 PROMPT = ("You route chat messages from a human to AI agents. Pick the agent(s) best suited to answer. "
-          "Prefer agents marked auto (they answer right away). Reply with only agent names, "
-          "comma-separated, at most 2, or the word none if no agent should answer.")
+          "Cheapest first: prefer agents marked auto (local models, answer right away). Pick a subscription "
+          "agent only when the message needs a stronger model (hard reasoning, real code work) or no auto agent "
+          "fits. Reply with only agent names, comma-separated, at most 2, or the word none if no agent should "
+          "answer.")
+LABELS = {"auto": "auto, cheap", "online": "subscription", "busy": "subscription, busy"}
 
 
 async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[str]:
@@ -23,13 +26,21 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
     if not s.router_model or not hub.llm.enabled:
         return []
     cutoff = time.time() - 600
-    agents = [a for a in st.agents() if a["kind"] == "agent"]
+    agents = []
+    for a in st.agents():
+        if a["kind"] != "agent":
+            continue
+        state = hub.worker_state(a)
+        if state in ("cooling", "offline"):
+            continue  # out of quota or not running: picking it would strand the message
+        if state == "manual":
+            label = "manual, answers only when its person checks" + (", active" if (a["last_seen"] or 0) > cutoff else "")
+        else:
+            label = LABELS[state] + (f" {hub.worker_config(a).get('cli')}" if state != "auto" else "")
+        agents.append((a, label))
     if not agents:
         return []
-    roster = "\n".join(
-        f"- {a['name']}: {a['description'] or 'no description'}"
-        f" ({'auto' if a['model'] else 'manual'}{', active' if (a['last_seen'] or 0) > cutoff else ''})"
-        for a in agents)
+    roster = "\n".join(f"- {a['name']}: {a['description'] or 'no description'} ({label})" for a, label in agents)
     user = (f"Agents:\n{roster}\n\nRoom #{room} summary: {one_line(hub.room_summary(room), 400)}\n\n"
             f"Message:\n{text[:2000]}")
     try:
@@ -39,7 +50,7 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
         log.warning("routing failed: %s", e)
         return []
     st.add_usage(ROUTER, ask=tokens)
-    names = {a["name"] for a in agents}
+    names = {a["name"] for a, _ in agents}
     picked: list[str] = []
     for word in re.findall(r"[a-z0-9][a-z0-9_.-]*", (answer or "").lower()):
         if word in names and word not in picked:

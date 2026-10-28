@@ -226,6 +226,10 @@ pre { background: var(--surface-2); padding: 12px; border-radius: 12px; white-sp
 .tag { font-family: 'Nunito', sans-serif; font-size: .68rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
   padding: 0 .5em; border-radius: 999px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
 .tag.auto { background: color-mix(in srgb, var(--leaf) 18%, var(--surface)); color: var(--leaf); border-color: transparent; }
+.tag.worker { background: color-mix(in srgb, var(--orange) 16%, var(--surface)); color: var(--orange-deep); border-color: transparent; }
+.tag.cooling { background: color-mix(in srgb, var(--berry) 14%, var(--surface)); color: var(--berry); border-color: transparent; }
+.field-group { display: grid; gap: 10px; padding: 12px; border-radius: 12px; background: var(--surface-2); }
+.field-group .hint code { font-size: .75rem; word-break: break-all; }
 .agent-desc { font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* --- sidebar forms ----------------------------------------------------------------------- */

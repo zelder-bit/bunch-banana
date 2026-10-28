@@ -82,10 +82,34 @@ class BudgetIn(BaseModel):
     daily_tokens: int | None = None
 
 
+class WorkerIn(BaseModel):
+    mode: str = "manual"
+    cli: str | None = None
+    power: str | None = None
+    model: str | None = None
+    deep_model: str | None = None
+    dir: str | None = None
+    max_output: int | None = None
+    max_input_chars: int | None = None
+
+
+class ReportIn(BaseModel):
+    status: str
+    tokens: int = 0
+    calls: int = 0
+    until: float | None = None
+    room: str | None = None
+
+
 def _bearer(value: str | None) -> str:
     if value and value.lower().startswith("bearer "):
         return value[7:].strip()
     return ""
+
+
+def _worker_view(cfg: dict, admin: bool) -> dict:
+    """Everyone sees how an agent runs; only admins see its folder and limits."""
+    return cfg if admin else {k: cfg[k] for k in ("mode", "cli", "power", "model") if k in cfg}
 
 
 def _pw_mark(pw_hash: str) -> str:
@@ -264,6 +288,15 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def api_whoami(authorization: str | None = Header(None)):
         return PlainTextResponse(agent_of(authorization))
 
+    @app.get("/api/v1/worker")
+    async def api_worker(authorization: str | None = Header(None)):
+        return hub.worker_config(store.agent(agent_of(authorization)))
+
+    @app.post("/api/v1/worker/report")
+    async def api_worker_report(body: ReportIn, authorization: str | None = Header(None)):
+        return PlainTextResponse(hub.worker_report(agent_of(authorization), body.status, body.tokens,
+                                                   body.calls, body.until, body.room))
+
     @app.get("/api/v1/rooms")
     async def api_rooms(authorization: str | None = Header(None)):
         return PlainTextResponse(hub.rooms(agent_of(authorization)))
@@ -339,7 +372,10 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "description": a["description"], "model": a["model"],
                         "daily_tokens": hub.budget(a["name"]) if a["kind"] == "agent" else None,
                         "budget_set": a["daily_tokens"], "system": a["system"] if admin else None,
-                        "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"]})
+                        "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"],
+                        "sub_tokens_today": u["sub"], "sub_calls_today": u["calls"],
+                        "state": hub.worker_state(a), "status_until": a["status_until"],
+                        "worker": _worker_view(hub.worker_config(a), admin)})
         for system in ("_summarizer", "_router"):
             u = store.usage_today(system)
             if system == "_summarizer" or u["ask"]:
@@ -376,9 +412,26 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         row = store.agent(name)
         if not row or row["kind"] != "agent":
             raise HTTPException(404, "no such agent")
-        store.set_agent_info(name, **body.model_dump(exclude_none=True))
+        fields = body.model_dump(exclude_none=True)
+        store.set_agent_info(name, **fields)
+        if (fields.get("model") or "").strip():
+            store.set_worker(name, None)  # an auto agent is answered by the hub, not a worker
         row = store.agent(name)
         return {"name": name, "description": row["description"], "model": row["model"], "system": row["system"]}
+
+    @app.put("/api/admin/agents/{name}/worker")
+    async def admin_agent_worker(request: Request, name: str, body: WorkerIn,
+                                 authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        row = store.agent(name)
+        if not row or row["kind"] != "agent":
+            raise HTTPException(404, "no such agent")
+        cfg = hub.clean_worker(body.model_dump())
+        store.set_worker(name, cfg)
+        if cfg:
+            store.set_agent_info(name, model=None)  # one answerer per agent: the worker, not the hub
+        hub.broadcast({"type": "agents"})
+        return hub.worker_config(store.agent(name))
 
     # ---------------------------------------------------------------- users
     @app.get("/api/admin/users")
