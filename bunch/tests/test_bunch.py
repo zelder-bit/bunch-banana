@@ -258,7 +258,7 @@ def test_user_login_session_and_roles(env):
     assert c.post("/api/auth/login", json={"name": "nobody", "password": "whatever1"}).status_code == 401
     r = c.post("/api/auth/login", json={"name": "Pat", "password": "correct horse"})
     assert r.status_code == 200 and r.json() == {"name": "pat", "admin": False}
-    assert c.get("/api/auth/me").json() == {"name": "pat", "admin": False}
+    assert {k: v for k, v in c.get("/api/auth/me").json().items() if k in ("name", "admin")} == {"name": "pat", "admin": False}
     # Members chat as themselves, but can't manage agents or people.
     assert c.post("/api/admin/rooms/general/messages", json={"room": "general", "text": "hi @alice."}).status_code == 200
     msg = c.get("/api/admin/rooms/general/messages").json()[-1]
@@ -282,7 +282,7 @@ def test_user_login_session_and_roles(env):
 
 def test_admin_manages_users_and_token_still_works(env):
     c, *_ = env
-    assert c.get("/api/auth/me", headers=adm()).json() == {"name": "human", "admin": True}
+    assert {k: v for k, v in c.get("/api/auth/me", headers=adm()).json().items() if k in ("name", "admin")} == {"name": "human", "admin": True}
     assert c.post("/api/admin/users", json={"name": "sam", "password": "short"}, headers=adm()).status_code == 400
     assert c.post("/api/admin/users", json={"name": "sam", "password": "long enough", "admin": True},
                   headers=adm()).status_code == 200
@@ -1571,3 +1571,32 @@ def test_cached_tokens_count_a_tenth_toward_the_budget(env):
     a = {x["name"]: x for x in c.get("/api/admin/agents", headers=adm()).json()}["alice"]
     assert (a["sub_tokens_today"], a["sub_cached_today"], a["sub_calls_today"], a["spent_today"]) == (15, 1000, 2, 115)
     assert rep(tokens=0, calls=1, cached=1400).text == "over budget 255/250"
+
+
+def test_people_pick_their_own_picture(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    st.create_user("pat", "pat-password")
+    assert c.post("/api/auth/login", json={"name": "pat", "password": "pat-password"}).status_code == 200
+    me = c.get("/api/auth/me").json()
+    assert me["avatar"] == "orange" and "carrot" in me["avatars"]["vegetables"] and "pear" in me["avatars"]["fruits"]
+    for group in me["avatars"].values():  # every choice has its artwork
+        for n in group:
+            assert c.get(f"/static/svg/{n}.svg").status_code == 200, n
+
+    r = c.put("/api/auth/me/avatar", json={"avatar": "carrot"})
+    assert r.status_code == 200 and r.json() == {"name": "pat", "avatar": "carrot"}
+    assert c.get("/api/auth/me").json()["avatar"] == "carrot"
+    people = {a["name"]: a for a in c.get("/api/admin/agents").json()}
+    assert people["pat"]["avatar"] == "carrot" and people["alice"]["avatar"] is None  # agents keep theirs
+    assert c.put("/api/auth/me/avatar", json={"avatar": "../../etc/passwd"}).status_code == 400
+    assert c.put("/api/auth/me/avatar", json={"avatar": "dragonfruit"}).status_code == 400
+    assert c.get("/api/auth/me").json()["avatar"] == "carrot"
+    assert c.put("/api/auth/me/avatar", json={"avatar": None}).json()["avatar"] == "orange"  # back to the default
+
+    # Agents can't use it, and the admin token sets the picture of the name it posts as.
+    c.post("/api/auth/logout")
+    assert c.put("/api/auth/me/avatar", json={"avatar": "tomato"}, headers=h(k["alice"])).status_code == 401
+    r = c.put("/api/auth/me/avatar", json={"avatar": "tomato"}, headers=adm())
+    assert r.status_code == 200 and r.json()["name"] == "human"
+    assert st.agent("pat")["avatar"] is None
