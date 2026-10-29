@@ -676,11 +676,12 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "runs_on": hub.model_host(a["model"]) if a["model"] else None,
                         "machine": hub.agent_machine(a), "first_responder": a["name"] == first,
                         "avatar": (a["avatar"] or DEFAULT_HUMAN_AVATAR) if a["kind"] == "human" else None})
-        # The hub's own helpers are listed only while they're configured or have used tokens today.
+        # The hub's own helpers are listed only while they can run (a model set and the gateway on, as in
+        # lifespan() and router.route()) or have used tokens today.
         for system, model, does in (("_summarizer", hub.s.summary_model, "writes the room summaries"),
                                     ("_router", hub.s.router_model, "picks who answers")):
             u = store.usage_today(system)
-            if model or u["ask"]:
+            if (model and hub.llm.enabled) or u["ask"]:
                 out.append({"name": system, "kind": "system", "last_seen": None, "description": does,
                             "model": model or None, "daily_tokens": None,
                             "runs_on": hub.model_host(model) if model else None, "machine": hub.model_machine(model),
@@ -718,7 +719,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     def model_users(name: str) -> list[str]:
         """Who answers with a gateway model: agents, and the hub's own summarizer and router."""
         out = [a["name"] for a in store.agents() if a["model"] == name]
-        return out + [sys for sys, m in (("_summarizer", s.summary_model), ("_router", s.router_model)) if m == name]
+        return out + [sys for sys, m in (("_summarizer", hub.s.summary_model), ("_router", hub.s.router_model)) if m == name]
 
     async def check_model(name: str) -> None:
         try:

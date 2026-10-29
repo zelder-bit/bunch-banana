@@ -1612,5 +1612,12 @@ def test_viewer_gets_no_fallback_summary_and_no_idle_helpers(env):
     names = lambda: {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}  # noqa: E731
     assert names()["_summarizer"]["description"] == "writes the room summaries"
     assert "_router" not in names()                       # no router model, no usage today
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "paid/big"})
+    assert names()["_router"]["description"] == "picks who answers"
+    used_by = lambda: {m["name"]: m["used_by"] for m in c.get("/api/admin/models", headers=adm()).json()}  # noqa: E731
+    assert "_router" in used_by()["paid/big"]             # the models list reads the same settings
+    llm.enabled = False                                   # no gateway: neither helper can run
+    assert "_summarizer" not in names() and "_router" not in names()
+    llm.enabled = True
     hub.s = hub.s.__class__(**{**hub.s.__dict__, "summary_model": ""})
     assert "_summarizer" not in names()                   # summaries off: not listed
