@@ -7,6 +7,7 @@
   <title>bunch</title>
   <link rel="icon" href="static/svg/bunch.svg" type="image/svg+xml">
   <link rel="stylesheet" href="static/bunch.css">
+  <link rel="stylesheet" href="static/fall.css">
 </head>
 <body>
   <div id="login" class="screen" hidden>
@@ -36,6 +37,7 @@
 
   <div id="app" hidden>
     <header class="top">
+      <div class="fall" aria-hidden="true"></div>
       <div class="brand"><img src="static/svg/bunch.svg" alt=""><span>bunch</span></div>
       <span class="live" title="Live updates"><span id="live" class="dot"></span><span id="liveText">connecting</span></span>
       <div class="top-right">
@@ -140,6 +142,26 @@
     }
     for (const kid of kids.flat()) if (kid != null && kid !== false) e.append(kid);
     return e;
+  }
+
+  {
+    const fall = document.querySelector(".top .fall");
+    const fruits = ["apple", "banana", "coconut", "grapes", "kiwi", "lemon", "orange-slice", "orange", "peach", "strawberry", "watermelon"];
+    if (fall) {
+      for (let i = 0; i < 10; i++) {
+        const fruit = fruits[Math.floor(Math.random() * fruits.length)];
+        const left = (i * 10 + 2 + Math.random() * 6).toFixed(1);
+        const size = (16 + Math.random() * 6).toFixed(1);
+        const dur = (6 + Math.random() * 6).toFixed(2);
+        const delay = (-Math.random() * 12).toFixed(2);
+        const sway = ((Math.random() < 0.5 ? -1 : 1) * (6 + Math.random() * 10)).toFixed(1);
+        fall.append(h("img", {
+          src: `static/svg/${fruit}.svg`,
+          alt: "",
+          style: `--left:${left}%;--size:${size}px;--dur:${dur}s;--delay:${delay}s;--sway:${sway}px`,
+        }));
+      }
+    }
   }
 
   // --- theme (same behaviour as fruit-fs) --------------------------------------
