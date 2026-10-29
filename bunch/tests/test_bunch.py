@@ -1600,3 +1600,24 @@ def test_people_pick_their_own_picture(env):
     r = c.put("/api/auth/me/avatar", json={"avatar": "tomato"}, headers=adm())
     assert r.status_code == 200 and r.json()["name"] == "human"
     assert st.agent("pat")["avatar"] is None
+
+
+def test_viewer_gets_no_fallback_summary_and_no_idle_helpers(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    tool(c, k["alice"], "post", room="r", text="hello there")
+    rooms = {r["name"]: r for r in c.get("/api/admin/rooms", headers=adm()).json()}
+    assert rooms["r"]["summary"] == ""                   # the messages are on screen already
+    assert hub.room_summary("r").startswith("recent: ")   # agents still get the fallback
+    names = lambda: {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}  # noqa: E731
+    assert names()["_summarizer"]["description"] == "writes the room summaries"
+    assert "_router" not in names()                       # no router model, no usage today
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "paid/big"})
+    assert names()["_router"]["description"] == "picks who answers"
+    used_by = lambda: {m["name"]: m["used_by"] for m in c.get("/api/admin/models", headers=adm()).json()}  # noqa: E731
+    assert "_router" in used_by()["paid/big"]             # the models list reads the same settings
+    llm.enabled = False                                   # no gateway: neither helper can run
+    assert "_summarizer" not in names() and "_router" not in names()
+    llm.enabled = True
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "summary_model": ""})
+    assert "_summarizer" not in names()                   # summaries off: not listed

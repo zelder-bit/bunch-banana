@@ -135,6 +135,9 @@ input.pill { border-radius: 999px; }
 .side h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 22px 4px 8px; }
 .side h2:first-child { margin-top: 0; }
 .search { margin-bottom: 18px; }
+.side-top { display: flex; gap: 8px; align-items: center; margin-bottom: 18px; }
+.side-top .search { flex: 1; margin-bottom: 0; }
+.side-close { display: none; }
 input[type="search"] { font: inherit; color: var(--ink); background: var(--surface); border: 2px solid var(--line); padding: .45em .9em; width: 100%; }
 input[type="search"]:focus { outline: none; border-color: var(--orange); }
 
@@ -172,10 +175,22 @@ input[type="search"]:focus { outline: none; border-color: var(--orange); }
 .chat { display: grid; grid-template-rows: auto 1fr auto auto; min-width: 0; min-height: 0; }
 .room-head { padding: 14px 24px 12px; border-bottom: 2px solid var(--line); }
 .room-head h1 { font-size: 1.5rem; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.room-head .room-del, .room-head .room-bot { margin-left: auto; align-self: center; }
-.room-head .room-bot:not([hidden]) + .room-del { margin-left: 8px; }
+.room-head .room-more, .room-head .room-bot { margin-left: auto; align-self: center; }
+.room-head .room-bot:not([hidden]) + .room-more { margin-left: 0; }
+.room-more { font-size: 1.3rem; line-height: 1; }
+.room-more:hover, .room-more:focus-visible { background: var(--surface-2); }
+/* Small popover menus (the room's ⋯). The script places it under its button. */
+.menu { position: fixed; inset: auto; margin: 0; padding: 6px; min-width: 180px; border: 2px solid var(--line); border-radius: 16px;
+  background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.menu-item { display: block; width: 100%; text-align: left; border: 0; background: none; color: inherit; font: inherit; font-weight: 700;
+  padding: .5em .8em; border-radius: 10px; cursor: pointer; }
+.menu-item:hover, .menu-item:focus-visible { background: var(--surface-2); }
+.menu-item.danger { color: var(--berry); }
 .room-head h1 .muted { font-family: 'Nunito', sans-serif; font-size: .9rem; font-weight: 600; }
-.room-summary { margin: 2px 0 0; color: var(--muted); font-size: .92rem; max-width: 80ch; }
+.room-summary { margin: 2px 0 0; color: var(--muted); font-size: .92rem; max-width: 80ch; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.room-summary.open { display: block; max-height: 30vh; overflow-y: auto; }
+.summary-more { font-size: .85rem; }
 .paused { margin: 8px 0 0; padding: 6px 12px; border-radius: 12px; font-size: .9rem; font-weight: 700; max-width: 80ch;
   background: color-mix(in srgb, var(--berry) 14%, var(--surface)); color: var(--berry); }
 .bot-on { margin: 8px 0 0; padding: 6px 12px; border-radius: 12px; font-size: .9rem; font-weight: 700; max-width: 80ch;
@@ -191,10 +206,16 @@ input[type="search"]:focus { outline: none; border-color: var(--orange); }
 .msg.human .who { color: var(--orange-deep); }
 .msg-del { position: absolute; top: 8px; right: 8px; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: .8rem;
   padding: 0 4px; border-radius: 6px; opacity: 0; transition: opacity .12s; }
-.msg:hover .msg-del, .msg-del:focus-visible { opacity: 1; }
+.msg:hover .msg-del, .msg.picked .msg-del, .msg-del:focus-visible { opacity: 1; }
 .bubble:has(.msg-del) .meta { padding-right: 22px; }
 .msg-del:hover { color: var(--berry); background: var(--surface-2); }
-@media (hover: none) { .msg-del { opacity: .6; } }
+/* Touch: invisible and untappable until the message is tapped (the script toggles .picked), then a finger-sized
+   target. It stays in the tab order and for screen readers, and shows whenever it or its message has focus. */
+@media (hover: none) {
+  .msg-del { pointer-events: none; font-size: 1rem; padding: 4px 10px; top: 4px; right: 4px; }
+  .msg.picked .msg-del, .msg:focus-within .msg-del, .msg-del:focus-visible { opacity: 1; pointer-events: auto; }
+  .msg.picked .bubble { border-color: var(--line); }
+}
 .chip { background: var(--surface-2); border-radius: 999px; padding: 0 .6em; font-weight: 700; }
 .text { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
 details { margin-top: 8px; }
@@ -296,7 +317,11 @@ mark { background: color-mix(in srgb, var(--banana) 70%, transparent); color: in
 
 /* --- toasts ------------------------------------------------------------------------- */
 
-#toasts { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); z-index: 60; display: grid; gap: 8px; width: max-content; max-width: calc(100vw - 2 * var(--gutter)); }
+/* A popover, so it can be shown above an open dialog (both are in the top layer). Undo the popover defaults. */
+#toasts { position: fixed; inset: auto auto 90px 50%; transform: translateX(-50%); z-index: 60; display: grid; gap: 8px;
+  width: max-content; max-width: calc(100vw - 2 * var(--gutter)); margin: 0; padding: 0; border: 0; background: none; overflow: visible;
+  pointer-events: none; }
+#toasts[popover]:not(:popover-open) { display: none; }
 .toast {
   background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 999px; box-shadow: var(--shadow);
   font-weight: 600; animation: pop .25s ease-out; transition: opacity .4s, transform .4s;
@@ -363,21 +388,34 @@ dialog.panel::after, .login-card::after {  /* left and right */
 
 /* --- phones ------------------------------------------------------------------------------- */
 
+.side-btn { display: none; position: relative; }
+.side-badge { position: absolute; top: 2px; right: 0; font: 800 .65rem/1.5 'Nunito', sans-serif; background: var(--orange); color: #fff;
+  border-radius: 999px; padding: 0 .45em; min-width: 1.5em; text-align: center; }
+.side-badge.at { background: var(--berry); }
+.scrim { display: none; }
+
 @media (max-width: 760px) {
-  #app { height: auto; min-height: 100dvh; }
-  .top { position: sticky; top: 0; }
-  .brand span { display: none; }
-  .body { display: flex; flex-direction: column; }
-  .side { border-right: 0; border-bottom: 2px solid var(--line); max-height: 40dvh; }
-  .side::after {
-    top: auto; left: 0; width: auto; height: var(--motif-size);
-    background-size: var(--motif-repeat) var(--motif-size);
-    background-position: 0 0, 24px 0, 48px 0, 72px 0, 96px 0;
-    background-repeat: repeat-x;
+  .top { gap: 8px; padding-left: 8px; }
+  .side-btn, .side-close { display: inline-grid; }
+  .brand img { width: 34px; height: 34px; }
+  .brand span, #liveText { display: none; }
+  .top-right { gap: 2px; }
+  .body { display: block; position: relative; }
+  .chat { height: 100%; }
+  /* The sidebar slides in over the room; the room keeps the whole screen otherwise. */
+  .side {
+    position: fixed; z-index: 40; top: 0; bottom: 0; left: 0; width: min(320px, 86vw);
+    padding-top: calc(16px + env(safe-area-inset-top)); padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    background: var(--bg); box-shadow: var(--shadow);
+    transform: translateX(-105%); visibility: hidden; transition: transform .22s ease, visibility 0s linear .22s;
   }
-  .chat { min-height: 70dvh; }
+  body.side-open .side { transform: none; visibility: visible; transition: transform .22s ease; }
+  .scrim { display: block; position: fixed; inset: 0; z-index: 35; background: rgb(59 42 26 / 35%); }
+  .scrim[hidden] { display: none; }
+  .room-head { padding-top: 10px; padding-bottom: 10px; }
+  .room-head h1 { font-size: 1.25rem; gap: 6px 8px; }
   .room-head, #feed, .compose, .typing { padding-left: var(--gutter); padding-right: var(--gutter); }
-  .compose { position: sticky; bottom: 0; background: var(--bg); }
+  .compose { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
   .avatar { width: 34px; height: 34px; }
   .avatar img { width: 26px; }
 }
