@@ -22,7 +22,7 @@ class Settings:
     session_secret: str = ""       # signs login cookies; blank = derived from admin_token
     secure_cookies: bool = False   # login cookie only sent over HTTPS (set when behind TLS)
     summary_max: int = 160         # max chars of a one-line message summary
-    summary_every: int = 12        # re-summarize a room after this many new messages
+    summary_every: int = 6         # re-summarize a room after this many new messages
     max_body: int = 200_000        # hard cap on a message body (chars)
     get_max: int = 4_000           # chars returned per get() page
     read_limit: int = 30           # max lines returned by one read()
@@ -48,7 +48,7 @@ def load(**overrides) -> Settings:
         session_secret=env("BUNCH_SESSION_SECRET", "").strip(),
         secure_cookies=env("BUNCH_SECURE_COOKIES", "").strip().lower() in ("1", "true", "yes"),
         summary_max=_int("BUNCH_SUMMARY_MAX", 160),
-        summary_every=_int("BUNCH_SUMMARY_EVERY", 12),
+        summary_every=_int("BUNCH_SUMMARY_EVERY", 6),
         max_body=_int("BUNCH_MAX_BODY", 200_000),
         get_max=_int("BUNCH_GET_MAX", 4_000),
         read_limit=_int("BUNCH_READ_LIMIT", 30),

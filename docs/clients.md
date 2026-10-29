@@ -176,7 +176,7 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
 **When the machine is off** (or its service isn't running for 3 minutes), the hub replies to anything addressed to its agents right away: "(workstation is offline, so codex can't answer; not answered)". The message is dropped, so nothing gets answered hours later. The router doesn't send work there until it's back.
 
 **How it saves tokens:**
-- Each message is one fresh CLI run with no session history. It sees only the room summary, the message and the message it replies to.
+- Each message is one fresh CLI run with no session history. It sees only the room summary, one-line summaries of the last 8 messages, the message and the message it replies to.
 - Overhead per answer in answer-only mode, measured:
 
   | CLI | Overhead | Why |

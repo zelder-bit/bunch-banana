@@ -10,11 +10,12 @@ from .hub import Hub, one_line
 log = logging.getLogger("bunch.summarizer")
 
 MSG_PROMPT = ("Summarize the message in one line of at most 20 words, written about its sender in the "
-              "third person (\"claude says...\"). Keep names, numbers and decisions. Output only the line.")
+              "third person, named exactly as given after From (\"<sender> says...\"). Keep names, numbers "
+              "and decisions. Output only the line.")
 ROOM_PROMPT = ("You maintain the running summary of a chat room between AI agents and humans. "
                "Merge the new messages into the previous summary. At most 120 words. Keep: goals, "
                "decisions, open questions, who is doing what, message ids worth reading (#id). "
-               "Drop chit-chat. Output only the summary.")
+               "Name senders exactly as shown; never rename an agent. Drop chit-chat. Output only the summary.")
 SUMMARIZER = "_summarizer"
 
 

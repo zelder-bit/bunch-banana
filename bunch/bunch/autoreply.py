@@ -1,9 +1,10 @@
 """Background job: answers for "auto" agents (agents with a model set), so a model can
 take part in the chat without running clients/responder.py anywhere.
 
-Same rules as responder.py: each answer sees only the room summary, the message and
-the message it replies to; humans are always answered, other agents only when they
-write @<name> explicitly (loop guard)."""
+Same rules as responder.py: each answer sees the room summary, one-line summaries of the
+latest messages, the message and the message it replies to; humans are always answered
+(but not twice for a double send), other agents only when they write @<name> explicitly
+and the chain below the human is still short (loop guard)."""
 from __future__ import annotations
 
 import asyncio
@@ -11,13 +12,15 @@ import logging
 import re
 import time
 
-from .hub import Hub, HubError, mentions
+from .hub import MAX_AGENT_HOPS, Hub, HubError, mentions
 
 log = logging.getLogger("bunch.autoreply")
 
 DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other agents and humans. "
                   "Answer the message addressed to you. Be brief and concrete. "
-                  "If you need another agent, @mention them.")
+                  "Recent messages are listed: build on what was already said instead of repeating it. "
+                  "Only @mention another agent when you need it to act now; to point a human at an agent, "
+                  "write its name without @.")
 MAX_INPUT_CHARS = 12_000
 MAX_TOKENS = 800
 _gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
@@ -33,9 +36,12 @@ def _text(m) -> str:
 async def answer(hub: Hub, agent, m) -> None:
     name, st = agent["name"], hub.store
     body = _text(m)
-    if not m["human"] and not mentions(body, name):
+    if not m["human"] and (not mentions(body, name) or hub.agent_hops(m) >= MAX_AGENT_HOPS):
         return
     parts = [f"Room #{m['room']} summary: {hub.room_summary(m['room'])}"]
+    recent = hub.recent_lines(m["room"], m["id"])
+    if recent:
+        parts.append(f"Recent messages:\n{recent}")
     if m["reply_to"]:
         parent = st.message(m["reply_to"])
         if parent:
@@ -70,6 +76,8 @@ async def serve_agent(hub: Hub, agent) -> None:
             continue
         if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
             continue  # already answered, e.g. with an "offline" note
+        if hub.duplicate_of(m):
+            continue  # a double send: the first copy is answered
         try:
             await answer(hub, agent, m)
         except HubError as e:  # gateway down, budget used: say so once, don't retry forever

@@ -117,7 +117,7 @@ python3 clients/worker.py install --hub http://<server>:8700 --key bunchm_...
 That installs a systemd user service that starts at boot and reports which CLIs and models the machine has. Then make agents with "Who answers? → <machine>: Claude Code" (or Codex, Antigravity), pick a model, and @mention them from your laptop or phone. While the machine is off, the hub replies at once that it's offline, and the message is dropped rather than answered hours later.
 
 It's built to make a $20 plan last:
-- Every run starts fresh with only the room summary and the message.
+- Every run starts fresh with only the room summary, one-line summaries of the latest messages, and the message.
 - Answer-only Claude Code runs drop the tools and the long system prompt, so they cost about 1k tokens. Antigravity is about 8k and Codex about 15k (mostly cached), more if it decides to run commands.
 - A stronger model runs only when a message contains `!deep`.
 - Jobs run one at a time.

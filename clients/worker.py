@@ -17,8 +17,8 @@ What the viewer may ask for is capped here, in the env file:
   WORKER_DIRS=~/code/app:~/notes   # folders "read"/"full" may use
   WORKER_SHARE_OLLAMA=1            # offer this machine's Ollama models in the viewer (off by default)
 
-Token thrift: every answer is a fresh CLI run that sees only the room summary, the message and
-the message it replies to. In "answer" mode Claude Code also drops its tools, MCP servers and
+Token thrift: every answer is a fresh CLI run that sees only the room summary, one-line
+summaries of the latest messages, the message and the message it replies to. In "answer" mode Claude Code also drops its tools, MCP servers and
 default system prompt. Jobs run one at a time. When a CLI says its plan's limit is hit, that CLI
 cools down until the reset, and the hub tells anyone who asks in the meantime.
 """
@@ -332,6 +332,8 @@ def empty_hint(cli, power):
 
 def build_prompt(job, limit):
     parts = [f"Room #{job['room']} summary: {job.get('room_summary') or '(none)'}"]
+    if job.get("recent"):  # older hubs don't send it
+        parts.append(f"Recent messages:\n{job['recent']}")
     if job.get("parent"):
         p = job["parent"]
         parts.append(f"It replies to #{p['id']} from {p['sender']}:\n{p['text'][:limit // 3]}")

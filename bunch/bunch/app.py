@@ -22,7 +22,7 @@ from . import __version__
 from . import mcp as mcpmod
 from .autoreply import autoreply_loop
 from .config import Settings, load
-from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
+from .hub import MAX_AGENT_HOPS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
 from .router import route
 from .store import Store
@@ -378,6 +378,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                                          "size": len(m["body"] or "")} for m in rows]}
                     for m in out["messages"]:
                         m.pop("body")
+                        if m["for_me"]:  # what responder.py needs to answer in context
+                            m["recent"] = hub.recent_lines(m["room"], m["id"])
                     store.add_usage(agent, ctx=sum(len(m["summary"]) for m in out["messages"]) // 4)
                     return out
             else:
@@ -443,10 +445,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         continue  # room chatter: workers only answer what's addressed to them
                     if store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (r["id"], name)):
                         continue  # already answered, e.g. the hub said the machine was offline
+                    if hub.duplicate_of(r) or (not r["human"] and hub.agent_hops(r) >= MAX_AGENT_HOPS):
+                        continue  # a double send, or agents answering agents too deep below the human
                     parent = store.message(r["reply_to"]) if r["reply_to"] else None
                     jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "created": r["created"],
                                  "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
+                                 "recent": hub.recent_lines(r["room"], r["id"]),
                                  "parent": {"id": parent["id"], "sender": parent["sender"],
                                             "text": parent["body"] or parent["summary"]} if parent else None})
             if jobs or time.monotonic() >= deadline:

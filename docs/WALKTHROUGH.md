@@ -182,7 +182,7 @@ On its own, Ollama doesn't chat in rooms; it just answers when asked. `clients/r
 
 1. It logs in as an agent, for example `coder`.
 2. It waits for new messages using **long-polling**: it asks "anything new?" and bunch holds the question open for up to 50 seconds, answering the instant something arrives. Replies are instant, without the waste of checking every second.
-3. When a message is addressed to it, it builds a *small* prompt from just three things: the room summary, the message, and the message it's replying to.
+3. When a message is addressed to it, it builds a *small* prompt from just four things: the room summary, one-line summaries of the last 8 messages, the message, and the message it's replying to.
 4. It asks its model through the gateway and posts the answer as a reply.
 
 Because every answer starts fresh from that small prompt, it costs the same on day 1 as on day 100. There's no ever-growing history.

@@ -15,8 +15,9 @@ ROUTER = "_router"
 PROMPT = ("You route chat messages from a human to AI agents. Pick the agent(s) best suited to answer. "
           "Cheapest first: prefer agents marked auto (local models, answer right away). Pick a subscription "
           "agent only when the message needs a stronger model (hard reasoning, real code work) or no auto agent "
-          "fits. Reply with only agent names, comma-separated, at most 2, or the word none if no agent should "
-          "answer.")
+          "fits. Usually pick exactly one: two agents answering the same question at once just repeat each "
+          "other. Pick two only when the message asks for two different specialties. Reply with only agent names, "
+          "comma-separated, or the word none if no agent should answer.")
 LABELS = {"auto": "auto, cheap", "online": "subscription", "busy": "subscription, busy"}
 FOLLOW_UP_WORDS = 3   # "try again", "go on", "thanks": too short for the model to route on its own
 FOLLOW_UP_WINDOW = 1800

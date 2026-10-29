@@ -18,6 +18,9 @@ CACHE_WEIGHT = 0.1  # a cached input token costs about a tenth of a fresh one (A
 WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edit + run in dir
 WORKER_STATUSES = ("online", "busy", "cooling")
 WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long = off or not running
+RECENT_LINES = 8  # one-line summaries of the latest messages shown with every answer prompt
+DUPLICATE_WINDOW = 600  # the same text from the same human this soon after is a double send
+MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a human message
 
 FILE_REF = re.compile(r"!\[([^\]]*)\]\(file:(\d+)\)")  # an attached file, see /api/v1/machine/file
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
@@ -260,6 +263,40 @@ class Hub:
         if not rows:
             return "(empty)"
         return "recent: " + " | ".join(f"{x['sender']}: {one_line(x['summary'], 70)}" for x in rows[::-1])
+
+    def recent_lines(self, room: str, before_id: int, n: int = RECENT_LINES) -> str:
+        """The last n messages before #before_id as one-line summaries, oldest first: what an answering
+        model needs to not treat every message as the first (the room summary lags by up to summary_every)."""
+        rows = self.store.q("SELECT * FROM messages WHERE room=? AND id<? ORDER BY id DESC LIMIT ?",
+                            (room, before_id, n))
+        out = []
+        for m in rows[::-1]:
+            rec = _recips(m)
+            out.append(f"#{m['id']} {m['sender']}" + (">" + ",".join(rec) if rec else "")
+                       + (f" re#{m['reply_to']}" if m["reply_to"] else "") + f": {one_line(m['summary'], 200)}")
+        return "\n".join(out)
+
+    def duplicate_of(self, m) -> int | None:
+        """Id of an earlier, already answered message with the same text from the same human in the same
+        room (a double send), so it isn't answered from scratch a second time."""
+        if not m["human"]:
+            return None
+        text = " ".join((m["body"] or m["summary"] or "").split())
+        for p in self.store.q("SELECT * FROM messages WHERE room=? AND sender=? AND id<? AND created>? "
+                              "ORDER BY id DESC LIMIT 5", (m["room"], m["sender"], m["id"], m["created"] - DUPLICATE_WINDOW)):
+            if " ".join((p["body"] or p["summary"] or "").split()) == text and \
+                    self.store.one("SELECT 1 FROM messages WHERE reply_to=?", (p["id"],)):
+                return p["id"]
+        return None
+
+    def agent_hops(self, m) -> int:
+        """Agent messages in m's reply chain since the last human message (m included)."""
+        hops, seen = 0, 0
+        while m and not m["human"] and seen < 20:
+            hops += 1
+            seen += 1
+            m = self.store.message(m["reply_to"]) if m["reply_to"] else None
+        return hops
 
     # ---------------------------------------------------------------- search
     def search(self, q: str, room: str | None = None, limit: int = 50) -> list[dict]:

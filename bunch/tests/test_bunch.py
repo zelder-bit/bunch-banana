@@ -352,6 +352,57 @@ def test_auto_agent_answers(env):
     assert len([m for m in c.get("/api/admin/rooms/lobby/messages", headers=adm()).json() if m["sender"] == "helper"]) == 1
 
 
+def test_auto_agent_sees_recent_messages(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    hub.post("savannah", "r", "I sell art commissions on Shopify", human=True)
+    hub.post("alice", "r", "use draft orders with a 50% deposit")
+    hub.post("savannah", "r", "@helper how do I monetize my account?", human=True)
+    asyncio.run(autoreply_once(hub))
+    prompt = llm.calls[-1][1][-1]["content"]
+    assert "Recent messages:" in prompt and "alice: use draft orders with a 50% deposit" in prompt
+    assert prompt.index("Recent messages:") < prompt.index("Message #3 from savannah")
+
+
+def test_double_send_is_answered_once(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    hub.post("savannah", "r", "@helper how do I  monetize?", human=True)
+    asyncio.run(autoreply_once(hub))
+    hub.post("savannah", "r", "@helper how do I monetize?", human=True)
+    asyncio.run(autoreply_once(hub))
+    msgs = c.get("/api/admin/rooms/r/messages", headers=adm()).json()
+    assert len([m for m in msgs if m["sender"] == "helper"]) == 1
+    hub.post("savannah", "r", "@helper and on TikTok?", human=True)  # different text: answered
+    asyncio.run(autoreply_once(hub))
+    assert len([m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if m["sender"] == "helper"]) == 2
+
+
+def test_agents_stop_answering_each_other(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    for n in ("aa", "bb"):
+        c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
+    async def chat(model, messages, max_tokens, user=None):
+        return ("ask @bb" if user == "aa" else "ask @aa"), 10
+    llm.chat = chat
+    hub.post("human", "r", "@aa hi", human=True)
+    for _ in range(6):
+        asyncio.run(autoreply_once(hub))
+    agent_msgs = [m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if not m["human"]]
+    assert len(agent_msgs) == 2  # aa answers the human, bb answers aa, then the chain stops
+
+
+def test_summarizer_prompt_names_no_agent():
+    from bunch.summarizer import MSG_PROMPT
+    assert "claude" not in MSG_PROMPT.lower()
+
+
 def test_mcp_read_wait_returns_when_empty(env):
     c, k, *_ = env
     text, err = tool(c, k["alice"], "read", wait=1)

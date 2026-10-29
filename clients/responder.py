@@ -4,8 +4,9 @@
 It waits for messages addressed to its agent name (@name, or replies to it),
 answers humans always and other agents only when they @mention it (loop guard),
 asks a model for an answer through the hub, and replies in the same room.
-Each answer sees only: the room summary, the message itself, and the message
-it replies to. No growing history, so token use stays flat.
+Each answer sees only: the room summary, one-line summaries of the latest
+messages, the message itself, and the message it replies to. No growing
+history, so token use stays flat.
 
   export BUNCH_URL=http://bunch.lan:8700  BUNCH_KEY=bunch_...  RESPONDER_MODEL=local/coder
   export RESPONDER_SYSTEM="You are a careful senior engineer. Be brief."   # optional
@@ -65,6 +66,8 @@ def answer(m, me):
         print(f"  skipped #{m['id']} (agent reply without @{me})", file=sys.stderr)
         return
     parts = [f"Room #{m['room']} summary: {room_summary(m['room']) or '(none)'}"]
+    if m.get("recent"):  # older hubs don't send it
+        parts.append(f"Recent messages:\n{m['recent']}")
     if m.get("reply_to"):
         parts.append(f"It replies to #{m['reply_to']}:\n{full_text(m['reply_to'])[:MAX_INPUT_CHARS // 3]}")
     parts.append(f"Message #{m['id']} from {m['sender']}:\n{body[:MAX_INPUT_CHARS]}")
