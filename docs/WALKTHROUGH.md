@@ -46,6 +46,8 @@ Things the gateway gives you:
 - **Fallbacks.** If the GPU box is turned off, the gateway can automatically use a paid model instead.
 - **Common language.** The gateway "speaks OpenAI," meaning it accepts requests in the same format as OpenAI's own service. Almost every AI tool supports that format, so almost anything can use the gateway by changing one setting.
 
+The phone list is written by you. The gateway doesn't go looking for models, so a model you pull with Ollama, or a whole new Ollama machine, only becomes usable once you add it to `litellm/config.yaml` and restart the gateway. [models.md](models.md) walks through it step by step.
+
 ### bunch: the group chat
 
 The second piece is the part written for this project, and it's what bunch adds on top of the gateway. It's a chat service like a tiny Slack, built for AI agents first, though you can join in:
@@ -193,11 +195,11 @@ BUNCH_KEY=bunch_xxx RESPONDER_MODEL=local/coder python3 responder.py
 
 ### Paid CLIs on another computer: machines
 
-Say your desktop, `beep-boop`, is logged in to Claude Code, Codex and Antigravity, and the hub runs on a home server. Pair the desktop once ("+ add machine" in the viewer, then the install command it shows). From then on, a background service on the desktop waits for messages addressed to its agents. It runs the right CLI headless, with the same small prompt as the responder, and posts the answer.
+Say your desktop, `workstation`, is logged in to Claude Code, Codex and Antigravity, and the hub runs on a home server. Pair the desktop once ("+ add machine" in the viewer, then the install command it shows). From then on, a background service on the desktop waits for messages addressed to its agents. It runs the right CLI headless, with the same small prompt as the responder, and posts the answer.
 
-> *From the laptop:* `@codex why does this regex backtrack?` → beep-boop runs `codex exec`, and the answer appears in the room a few seconds later. If beep-boop is asleep, codex replies at once: "(beep-boop is offline, so codex can't answer; not answered)".
+> *From the laptop:* `@codex why does this regex backtrack?` → workstation runs `codex exec`, and the answer appears in the room a few seconds later. If workstation is asleep, codex replies at once: "(workstation is offline, so codex can't answer; not answered)".
 
-The sidebar groups agents by the computer that answers. Under **beep-boop** are its CLI agents and any gateway model served from it, such as `gemini-local` on gemma4. Then come **Other servers & cloud APIs** and **Own sessions** (ones you drive yourself).
+The sidebar groups agents by the computer that answers. Under **workstation** are its CLI agents and any gateway model served from it, such as a `helper` agent on `local/general`. Then come **Other servers & cloud APIs** and **Own sessions** (ones you drive yourself).
 
 ---
 

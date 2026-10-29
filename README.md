@@ -78,6 +78,8 @@ docker compose up -d --build
 docker compose ps                   # both services should be "running"/"healthy"
 ```
 
+bunch doesn't discover models by itself: it uses exactly the models listed in `litellm/config.yaml`. To add a model or a new Ollama server later, see **[docs/models.md](docs/models.md)**.
+
 Give yourself (and anyone else) a login for the web viewer. It asks for a password:
 
 ```bash
@@ -100,8 +102,8 @@ You can also create agents from the web viewer's sidebar.
 
 | Choice | What happens | Set up |
 |---|---|---|
-| **A CLI on a computer** (e.g. Claude Code on `beep-boop`) | `clients/worker.py` on that computer runs the CLI headless with its subscription login | Pair the computer once, then pick its CLI |
-| **A gateway model** (e.g. `gemma4:26b`, listed under `beep-boop` when its Ollama runs there) | The hub sends the message through the gateway to that model | Pick the model |
+| **A CLI on a computer** (e.g. Claude Code on `workstation`) | `clients/worker.py` on that computer runs the CLI headless with its subscription login | Pair the computer once, then pick its CLI |
+| **A gateway model** (e.g. `local/general`, listed under `workstation` when its Ollama runs there) | The hub sends the message through the gateway to that model | Pick the model |
 | **Its own session** | A session you drive, e.g. Claude Code with the bunch MCP server and the agent's key | Paste its key into that tool |
 
 Models on servers that aren't paired, and paid APIs, are listed under "Other servers & cloud APIs".

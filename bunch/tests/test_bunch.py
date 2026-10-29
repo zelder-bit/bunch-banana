@@ -561,7 +561,7 @@ def _load_worker():
 CLIS = [{"cli": "claude", "version": "2.1", "models": ["haiku", "sonnet"]}, {"cli": "codex", "version": "0.1", "models": []}]
 
 
-def _machine(c, name="beep-boop", clis=CLIS, addresses=("beep-boop", "192.0.2.7")):
+def _machine(c, name="workstation", clis=CLIS, addresses=("workstation", "192.0.2.7")):
     r = c.post("/api/admin/machines", json={"name": name}, headers=adm())
     assert r.status_code == 200, r.text
     key = r.json()["key"]
@@ -571,7 +571,7 @@ def _machine(c, name="beep-boop", clis=CLIS, addresses=("beep-boop", "192.0.2.7"
     return key
 
 
-def _on(c, agent, machine="beep-boop", **cfg):
+def _on(c, agent, machine="workstation", **cfg):
     r = c.put(f"/api/admin/agents/{agent}/worker",
               json={"mode": "worker", "machine": machine, "cli": "claude", **cfg}, headers=adm())
     assert r.status_code == 200, r.text
@@ -596,33 +596,33 @@ def test_machine_pairing_and_hello(env):
     c, k, app, _ = env
     assert c.post("/api/admin/machines", json={"name": "pc"}, headers=h(k["alice"])).status_code == 401
     key = _machine(c)
-    assert c.post("/api/admin/machines", json={"name": "beep-boop"}, headers=adm()).status_code == 400
+    assert c.post("/api/admin/machines", json={"name": "workstation"}, headers=adm()).status_code == 400
     # A machine key is not an agent key, and the other way round.
     assert c.get("/api/v1/rooms", headers=h(key)).status_code == 401
     assert c.get("/api/v1/machine/read", headers=h(k["alice"])).status_code == 401
     m = c.get("/api/admin/machines", headers=adm()).json()[0]
-    assert m["name"] == "beep-boop" and m["online"] and [x["cli"] for x in m["clis"]] == ["claude", "codex"]
+    assert m["name"] == "workstation" and m["online"] and [x["cli"] for x in m["clis"]] == ["claude", "codex"]
     assert m["max_power"] == "read" and m["dirs"] == ["/srv/app"]
     # Agents can only go on a machine that exists, with a CLI it has.
     assert c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "nope", "cli": "claude"},
                  headers=adm()).status_code == 400
-    r = c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "beep-boop", "cli": "agy"},
+    r = c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "workstation", "cli": "agy"},
               headers=adm())
     assert r.status_code == 400 and "doesn't have agy" in r.text
-    assert c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "beep-boop", "cli": "claude",
+    assert c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "workstation", "cli": "claude",
                                                          "power": "read"}, headers=adm()).status_code == 400
     _on(c, "alice", model="sonnet")
     got = c.post("/api/v1/machine/hello", json={"clis": CLIS}, headers=h(key)).json()
-    assert got["machine"] == "beep-boop" and [a["name"] for a in got["agents"]] == ["alice"]
+    assert got["machine"] == "workstation" and [a["name"] for a in got["agents"]] == ["alice"]
     agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
-    assert agents["alice"]["state"] == "online" and agents["alice"]["worker"]["machine"] == "beep-boop"
+    assert agents["alice"]["state"] == "online" and agents["alice"]["worker"]["machine"] == "workstation"
     assert agents["bob"]["state"] == "manual"
     # Creating an agent straight onto a machine hands out no key: the machine speaks for it.
-    r = c.post("/api/admin/agents", json={"name": "coder", "worker": {"mode": "worker", "machine": "beep-boop",
+    r = c.post("/api/admin/agents", json={"name": "coder", "worker": {"mode": "worker", "machine": "workstation",
                                                                       "cli": "codex"}}, headers=adm())
-    assert r.status_code == 200 and "key" not in r.json() and r.json()["machine"] == "beep-boop"
+    assert r.status_code == 200 and "key" not in r.json() and r.json()["machine"] == "workstation"
     # Deleting the machine leaves its agents, unassigned.
-    r = c.delete("/api/admin/machines/beep-boop", headers=adm())
+    r = c.delete("/api/admin/machines/workstation", headers=adm())
     assert sorted(r.json()["agents_unassigned"]) == ["alice", "coder"]
     assert c.post("/api/v1/machine/hello", json={}, headers=h(key)).status_code == 401
 
@@ -655,17 +655,17 @@ def test_offline_machine_says_so_and_drops_the_message(env):
     hub = app.state.hub
     key = _machine(c)
     _on(c, "alice")
-    hub.store.x("UPDATE machines SET last_seen=? WHERE name='beep-boop'", (time.time() - 600,))
+    hub.store.x("UPDATE machines SET last_seen=? WHERE name='workstation'", (time.time() - 600,))
     c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@alice are you there?"}, headers=adm())
     msgs = c.get("/api/admin/rooms/r/messages", headers=adm()).json()
-    assert msgs[-1]["sender"] == "alice" and "beep-boop is offline" in msgs[-1]["summary"]
+    assert msgs[-1]["sender"] == "alice" and "workstation is offline" in msgs[-1]["summary"]
     assert msgs[-1]["reply_to"] == msgs[-2]["id"] and msgs[-1]["to"] == ["human"]
     # The machine comes back: the dropped message isn't answered late.
     assert c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"] == []
     # Out of quota is the same: an immediate note instead of silence.
     hub.store.set_status("alice", "cooling", time.time() + 600)
     c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@alice again?"}, headers=adm())
-    assert "out of claude quota on beep-boop" in c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["summary"]
+    assert "out of claude quota on workstation" in c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["summary"]
     assert c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"] == []
 
 
@@ -710,7 +710,7 @@ def test_router_prefers_cheap_and_skips_cooling_and_offline(env):
     llm.chat = pick
     c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "hard question"}, headers=adm())
     roster = seen["roster"].split("Room #")[0]
-    assert "alice: no description (subscription claude on beep-boop)" in roster
+    assert "alice: no description (subscription claude on workstation)" in roster
     assert "bob" not in roster and "carol" not in roster
     assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == ["alice"]
 
@@ -729,12 +729,12 @@ def test_gateway_models_show_which_machine_they_run_on(env):
     c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
     c.post("/api/admin/agents", json={"name": "big", "model": "paid/big"}, headers=adm())
     agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
-    assert agents["helper"]["runs_on"] == "beep-boop" and agents["big"]["runs_on"] == "api.example.com"
+    assert agents["helper"]["runs_on"] == "workstation" and agents["big"]["runs_on"] == "api.example.com"
     assert agents["alice"]["runs_on"] is None
-    # Grouped by the computer that answers: the local model lives on beep-boop, the API on no machine.
-    assert agents["helper"]["machine"] == "beep-boop" and agents["big"]["machine"] is None
+    # Grouped by the computer that answers: the local model lives on workstation, the API on no machine.
+    assert agents["helper"]["machine"] == "workstation" and agents["big"]["machine"] is None
     models = {m["name"]: m for m in c.get("/api/admin/models", headers=adm()).json()}
-    assert models["local/small"] == {"name": "local/small", "runs_on": "beep-boop", "machine": "beep-boop"}
+    assert models["local/small"] == {"name": "local/small", "runs_on": "workstation", "machine": "workstation"}
     assert models["paid/big"]["machine"] is None and models["paid/big"]["runs_on"] == "api.example.com"
 
 
@@ -743,16 +743,16 @@ def test_gateway_agent_goes_offline_with_its_machine(env):
     from bunch.autoreply import autoreply_once
     c, k, app, llm = env
     hub = app.state.hub
-    _hosts(app, llm, {"local/small": "beep-boop.example.ts.net"})
+    _hosts(app, llm, {"local/small": "workstation.example.ts.net"})
     _machine(c)
     c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
     asyncio.run(hub.refresh_model_hosts())
-    hub.store.x("UPDATE machines SET last_seen=? WHERE name='beep-boop'", (time.time() - 600,))
+    hub.store.x("UPDATE machines SET last_seen=? WHERE name='workstation'", (time.time() - 600,))
     calls = len(llm.calls)
     c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@helper still there?"}, headers=adm())
     asyncio.run(autoreply_once(hub))
     msgs = c.get("/api/admin/rooms/r/messages", headers=adm()).json()
-    assert msgs[-1]["sender"] == "helper" and "beep-boop is offline, so local/small can't answer" in msgs[-1]["summary"]
+    assert msgs[-1]["sender"] == "helper" and "workstation is offline, so local/small can't answer" in msgs[-1]["summary"]
     assert len(llm.calls) == calls  # the model wasn't asked
     assert {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}["helper"]["state"] == "offline"
 
@@ -832,7 +832,7 @@ def test_worker_parses_cli_output_and_limits():
 
 def test_worker_prompt_is_small_and_flat():
     w = _load_worker()
-    job = {"id": 9, "room": "r", "sender": "citrus", "text": "!deep why? " + "x" * 50, "room_summary": "talking",
+    job = {"id": 9, "room": "r", "sender": "sam", "text": "!deep why? " + "x" * 50, "room_summary": "talking",
            "parent": {"id": 8, "sender": "bob", "text": "y" * 50}}
     p = w.build_prompt(job, 30)
     assert "Room #r summary: talking" in p and "!deep" not in p and "#8 from bob" in p
@@ -959,11 +959,11 @@ def test_worker_rechecks_agents_before_dropping_a_job(monkeypatch):
     worker, posted, hellos = w.Worker(), [], []
     monkeypatch.setattr(worker, "hello", lambda force=False: hellos.append(force))
     monkeypatch.setattr(worker, "reply", lambda job, text: posted.append(text))
-    worker.machine = "beep-boop"
-    job = {"agent": "gemini", "id": 18, "room": "r", "sender": "citrus", "human": True,
+    worker.machine = "workstation"
+    job = {"agent": "gemini", "id": 18, "room": "r", "sender": "sam", "human": True,
            "created": worker.started, "text": "@gemini hi"}
     worker.handle(job)
-    assert hellos == [True] and posted == ["(gemini isn't set up on beep-boop yet; not answered)"]
+    assert hellos == [True] and posted == ["(gemini isn't set up on workstation yet; not answered)"]
     # Another agent's @gemini-local is not for gemini: no run, no reply.
     worker.handle({**job, "human": False, "sender": "gemini-local", "text": "@gemini-local again"})
     assert hellos == [True] and len(posted) == 1
@@ -974,7 +974,7 @@ def test_worker_says_when_power_was_lowered(monkeypatch):
     import subprocess
     w = _load_worker()
     worker, posted = w.Worker(), []
-    worker.machine, worker.agents = "beep-boop", {"codex": {"cli": "claude", "power": "full", "dir": "/srv/x"}}
+    worker.machine, worker.agents = "workstation", {"codex": {"cli": "claude", "power": "full", "dir": "/srv/x"}}
     monkeypatch.setattr(w, "report", lambda *a, **kw: "ok")
     monkeypatch.setattr(worker, "reply", lambda job, text: posted.append(text))
     seen = {}
@@ -983,7 +983,7 @@ def test_worker_says_when_power_was_lowered(monkeypatch):
         seen["argv"] = argv
         return subprocess.CompletedProcess(argv, 0, json.dumps({"result": "no can do", "usage": {}}), "")
     monkeypatch.setattr(w.subprocess, "run", fake_run)
-    worker.handle({"agent": "codex", "id": 37, "room": "r", "sender": "citrus", "human": True,
+    worker.handle({"agent": "codex", "id": 37, "room": "r", "sender": "sam", "human": True,
                    "created": worker.started, "text": "@codex make a picture"})
     system = seen["argv"][seen["argv"].index("--system-prompt") + 1]
     assert "can't create files" in system and "plain text" in system
