@@ -1228,3 +1228,18 @@ def test_worker_reads_ollama_tags(tmp_path):
     finally:
         srv.shutdown()
     assert w.ollama_models("http://127.0.0.1:9") is None  # nothing listening
+
+
+def test_worker_takes_agy_pictures_only_from_its_own_conversation(tmp_path):
+    import json
+    import time
+    w = _load_worker()
+    since = time.time() - 1
+    for cid in ("1d55a2b5-2bbf", "other-conv"):
+        (tmp_path / cid).mkdir()
+        (tmp_path / cid / "fox.jpg").write_bytes(b"x")
+    out = json.dumps({"conversation_id": "1d55a2b5-2bbf", "response": "Generating image..."})
+    assert w.agy_images(out, since, str(tmp_path)) == [str(tmp_path / "1d55a2b5-2bbf" / "fox.jpg")]
+    assert w.agy_images(json.dumps({"conversation_id": "../other-conv"}), since, str(tmp_path)) == []
+    assert w.agy_images("not json", since, str(tmp_path)) == []
+    assert w.claims_picture("Created ./bunch-out/moon-cat.png using built-in image generation.")

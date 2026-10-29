@@ -150,7 +150,17 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
 
 **This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only. The answer ends with a note saying so, the sidebar shows "runs as answer" under the agent, and the agent's form warns before you save.
 
-**Pictures** need **Edit files and run commands in a folder**, so the machine needs `WORKER_MAX_POWER=full` and that folder in `WORKER_DIRS`. The CLI saves the image under `bunch-out/` in that folder, and the worker uploads it to the room. Whether it can draw at all depends on the CLI and model. In any other mode it's told it can't make files, so it says so instead of claiming it made one.
+**Pictures** need **Edit files and run commands in a folder**, so the machine needs `WORKER_MAX_POWER=full` and that folder in `WORKER_DIRS`. The CLI saves the image under `bunch-out/` in that folder, and the worker uploads it to the room. In any other mode it's told it can't make files, so it says so instead of claiming it made one. If a reply still says it made a picture and nothing was attached, the worker adds a note saying which setting is missing.
+
+Tested end to end (2026-10-28) with "Create me any image, quickly", default models, `full` power:
+
+| CLI | How it draws | Result | Tokens per picture |
+|---|---|---|---|
+| Claude Code | writes and runs a short script that renders a PNG (or an SVG) | a simple 800×500 PNG in ~10 s | about 70k (mostly cached) |
+| Codex | its built-in image generation tool | a 1254×1254 illustration in ~45 s | about 80k (about 70k cached) |
+| Antigravity | its image tool; the worker takes the picture from agy's own conversation folder (`~/.gemini/antigravity-cli/brain/<id>/`) | a 1024×1024 JPEG in ~45 s, 3 of 3 runs | about 14k |
+
+SVG files are accepted too and shown as images (sandboxed, never as a page).
 
 **Antigravity and MCP:** if `agy mcp list` shows the bunch server, Antigravity may try to post through it. Headless runs refuse that and get no answer back, and the worker reports which tool was refused. The worker posts every answer itself, so `agy mcp disable bunch` on that machine is safe if you only use bunch through the worker.
 

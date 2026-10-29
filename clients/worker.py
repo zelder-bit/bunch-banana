@@ -72,7 +72,7 @@ IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".svg": "image/svg+xml"}  # the hub shows SVG only as a sandboxed image, never inline
 # A reply that says it made a picture or file. Checked against what was actually uploaded.
 CLAIM_RE = re.compile(r"\b(?:i(?:'ve| have)?\s+)?(?:created|made|generated|drew|drawn|painted|rendered|saved|attached)\b"
-                      r"(?:[^.!?\n]|\.(?=\w)){0,60}\b(?:image|picture|pic|png|jpe?g|svg|drawing|illustration|painting|"
+                      r"(?:[^.!?\n]|\.(?=\S)){0,60}\b(?:image|picture|pic|png|jpe?g|svg|drawing|illustration|painting|"
                       r"watercolou?r|sketch|logo|photo|wallpaper|background|file)s?\b", re.I)
 
 
@@ -90,6 +90,22 @@ def find_images(root, since):
             except OSError:
                 pass
     return sorted(found)[:4]
+
+
+AGY_BRAIN = os.path.expanduser("~/.gemini/antigravity-cli/brain")  # agy keeps each conversation's files here
+
+
+def agy_images(out, since, brain=AGY_BRAIN):
+    """Pictures agy's image tool made in this run. It saves them in its conversation folder, not the
+    working folder; the JSON output names that conversation, so nothing from other agy sessions is picked up."""
+    try:
+        cid = json.loads(out).get("conversation_id") or ""
+    except (ValueError, AttributeError):
+        return []
+    if not re.fullmatch(r"[0-9a-f-]{8,64}", cid):
+        return []
+    d = os.path.join(brain, cid)
+    return find_images(d, since) if os.path.isdir(d) else []
 
 
 def upload(agent, room, path):
@@ -245,8 +261,8 @@ def parse_output(cli, out, err, rc):
                 error = (err_.get("message") if isinstance(err_, dict) else err_) or text or d["status"]
             elif not text and d.get("denied_actions"):  # "SUCCESS" with nothing said: a tool was refused
                 tools = ", ".join(a.get("display_name") or a.get("action") or "?" for a in d["denied_actions"])
-                error = (f"no answer: it tried {tools}, which headless runs can't use "
-                         "(agy mcp list shows the MCP servers it can reach)")
+                error = f"no answer: it tried {tools}, which headless runs can't use" + \
+                    (" (agy mcp list shows the MCP servers it can reach)" if "mcp" in tools.lower() else "")
     except (ValueError, TypeError, AttributeError):
         pass
     if not text and not error:
@@ -374,6 +390,8 @@ class Worker:
         # Pictures come back as files in a folder only the worker uses, so nothing else in a project gets posted.
         out = os.path.join(d, OUT_DIR) if d else self.scratch
         system += picture_hint(power, d)
+        if cli == "agy" and power == "full":  # it can't run commands headless, but its own image tool works
+            system += " For a picture, use your image generation tool, not commands."
         lowered = power != (cfg.get("power") or "answer")
         if lowered:
             print(f"  power {cfg.get('power')} not allowed here (WORKER_MAX_POWER/WORKER_DIRS); using {power}",
@@ -390,6 +408,13 @@ class Worker:
         except subprocess.TimeoutExpired:
             text, tokens, error = "", 0, f"timed out after {TIMEOUT}s"
         pics = []
+        if cli == "agy" and power == "full" and not error:
+            os.makedirs(out, exist_ok=True)
+            for path in agy_images(p.stdout, started_at):
+                try:
+                    shutil.move(path, os.path.join(out, os.path.basename(path)))
+                except OSError as e:
+                    print(f"  could not take {path}: {e}", file=sys.stderr)
         if not LIMIT_RE.search(error or ""):
             for path in find_images(out, started_at) if os.path.isdir(out) else []:
                 try:
