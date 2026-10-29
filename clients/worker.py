@@ -15,6 +15,7 @@ machine answers; while it's off, the hub replies at once that it's offline.
 What the viewer may ask for is capped here, in the env file:
   WORKER_MAX_POWER=answer          # answer | read | full: the most this machine allows
   WORKER_DIRS=~/code/app:~/notes   # folders "read"/"full" may use
+  WORKER_SHARE_OLLAMA=1            # offer this machine's Ollama models in the viewer (off by default)
 
 Token thrift: every answer is a fresh CLI run that sees only the room summary, the message and
 the message it replies to. In "answer" mode Claude Code also drops its tools, MCP servers and
@@ -42,6 +43,8 @@ MAX_POWER = os.environ.get("WORKER_MAX_POWER", "answer").strip().lower()
 DIRS = [os.path.realpath(os.path.expanduser(d)) for d in os.environ.get("WORKER_DIRS", "").split(os.pathsep) if d]
 TIMEOUT = int(os.environ.get("WORKER_TIMEOUT", "600"))
 COOLDOWN = int(os.environ.get("WORKER_COOLDOWN", "1800"))  # when the CLI doesn't say when the limit resets
+SHARE_OLLAMA = os.environ.get("WORKER_SHARE_OLLAMA", "").strip().lower() in ("1", "true", "yes")
+OLLAMA_URL = os.environ.get("WORKER_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 STALE_AFTER = 300  # ignore backlog older than this when the worker starts
 DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other agents and humans. "
                   "Answer the message addressed to you. Be brief and concrete. "
@@ -65,7 +68,12 @@ def req(method, path, body=None, params=None, timeout=120):
 
 
 OUT_DIR = "bunch-out"  # in a project folder: where the CLI leaves pictures for the room
-IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+               ".svg": "image/svg+xml"}  # the hub shows SVG only as a sandboxed image, never inline
+# A reply that says it made a picture or file. Checked against what was actually uploaded.
+CLAIM_RE = re.compile(r"\b(?:i(?:'ve| have)?\s+)?(?:created|made|generated|drew|drawn|painted|rendered|saved|attached)\b"
+                      r"(?:[^.!?\n]|\.(?=\S)){0,60}\b(?:image|picture|pic|png|jpe?g|svg|drawing|illustration|painting|"
+                      r"watercolou?r|sketch|logo|photo|wallpaper|background|file)s?\b", re.I)
 
 
 def find_images(root, since):
@@ -84,6 +92,22 @@ def find_images(root, since):
     return sorted(found)[:4]
 
 
+AGY_BRAIN = os.path.expanduser("~/.gemini/antigravity-cli/brain")  # agy keeps each conversation's files here
+
+
+def agy_images(out, since, brain=AGY_BRAIN):
+    """Pictures agy's image tool made in this run. It saves them in its conversation folder, not the
+    working folder; the JSON output names that conversation, so nothing from other agy sessions is picked up."""
+    try:
+        cid = json.loads(out).get("conversation_id") or ""
+    except (ValueError, AttributeError):
+        return []
+    if not re.fullmatch(r"[0-9a-f-]{8,64}", cid):
+        return []
+    d = os.path.join(brain, cid)
+    return find_images(d, since) if os.path.isdir(d) else []
+
+
 def upload(agent, room, path):
     """Stores the file on the hub; returns the ![name](file:ID) text that makes the viewer show it."""
     with open(path, "rb") as f:
@@ -95,10 +119,10 @@ def upload(agent, room, path):
         return json.loads(resp.read().decode())["markdown"]
 
 
-def report(agent, status, tokens=0, calls=0, until=None, room=None):
+def report(agent, status, tokens=0, calls=0, until=None, room=None, cached=0):
     try:
         return req("POST", "/api/v1/machine/report", {"agent": agent, "status": status, "tokens": tokens,
-                                                      "calls": calls, "until": until, "room": room})
+                                                      "cached": cached, "calls": calls, "until": until, "room": room})
     except (urllib.error.URLError, OSError) as e:
         print(f"report failed: {e}", file=sys.stderr)
         return ""
@@ -127,6 +151,16 @@ def detect_clis():
                       if "\t" in ln and ln.split("\t")[0].strip()]
         found.append({"cli": cli, "version": version, "models": models})
     return found
+
+
+def ollama_models(url=OLLAMA_URL):
+    """The local Ollama's model tags, for the hub to offer in the viewer. None when Ollama isn't answering."""
+    try:
+        with urllib.request.urlopen(url + "/api/tags", timeout=5) as r:
+            tags = [m.get("name") or m.get("model") for m in json.loads(r.read().decode()).get("models", [])]
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    return {"port": urllib.parse.urlsplit(url).port or 11434, "models": sorted(t for t in tags if t)}
 
 
 def addresses():
@@ -194,14 +228,15 @@ def build_cmd(cfg, system, power, workdir, prompt, deep=False):
 
 
 def parse_output(cli, out, err, rc):
-    """Returns (text, tokens, error). error is None on success."""
-    text, tokens, error = "", 0, None
+    """Returns (text, tokens, cached, error). tokens leaves out cache reads, which come back separately
+    in cached (they cost about a tenth as much). error is None on success."""
+    text, tokens, cached, error = "", 0, 0, None
     try:
         if cli == "claude":
             d = json.loads(out)
             u = d.get("usage") or {}
-            tokens = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
-                                                       "cache_read_input_tokens", "output_tokens"))
+            tokens = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
+            cached = int(u.get("cache_read_input_tokens") or 0)
             text = d.get("result") or ""
             if d.get("is_error"):
                 error = text or d.get("subtype") or "error"
@@ -215,25 +250,29 @@ def parse_output(cli, out, err, rc):
                     text = item.get("text") or text
                 elif e.get("type") == "turn.completed":
                     u = e.get("usage") or {}
-                    tokens += int(u.get("input_tokens") or 0) + int(u.get("output_tokens") or 0)
+                    hit = int(u.get("cached_input_tokens") or 0)  # part of input_tokens
+                    tokens += int(u.get("input_tokens") or 0) - hit + int(u.get("output_tokens") or 0)
+                    cached += hit
                 elif e.get("type") in ("error", "turn.failed"):
                     error = e.get("message") or (e.get("error") or {}).get("message") or "error"
         elif cli == "agy":
             d = json.loads(out)
             text = d.get("response") or ""
-            tokens = int((d.get("usage") or {}).get("total_tokens") or 0)
+            u = d.get("usage") or {}
+            cached = int(u.get("cache_read_tokens") or 0)  # part of total_tokens
+            tokens = int(u.get("total_tokens") or 0) - cached
             if d.get("status") not in (None, "SUCCESS"):
                 err_ = d.get("error")
                 error = (err_.get("message") if isinstance(err_, dict) else err_) or text or d["status"]
             elif not text and d.get("denied_actions"):  # "SUCCESS" with nothing said: a tool was refused
                 tools = ", ".join(a.get("display_name") or a.get("action") or "?" for a in d["denied_actions"])
-                error = (f"no answer: it tried {tools}, which headless runs can't use "
-                         "(agy mcp list shows the MCP servers it can reach)")
+                error = f"no answer: it tried {tools}, which headless runs can't use" + \
+                    (" (agy mcp list shows the MCP servers it can reach)" if "mcp" in tools.lower() else "")
     except (ValueError, TypeError, AttributeError):
         pass
     if not text and not error:
         error = (err or out or f"exit {rc}").strip()[-300:] if rc or (err or "").strip() else "(empty answer)"
-    return text.strip(), tokens, error
+    return text.strip(), tokens, cached, error
 
 
 def reset_time(msg, now=None):
@@ -269,6 +308,28 @@ def picture_hint(power, d):
             "and never claim you made it.")
 
 
+def claims_picture(text):
+    """True when an answer says it made a picture or file (a run that couldn't write one may still say so)."""
+    return bool(CLAIM_RE.search(text or ""))
+
+
+def no_picture_note(machine, power, max_power=MAX_POWER, dirs=DIRS):
+    """Why a run couldn't hand back a picture, and what setting would let it."""
+    if power == "full":
+        return f"(no picture was attached: nothing was saved in ./{OUT_DIR}/)"
+    how = 'set this agent\'s power to "Edit files and run commands" with a folder'
+    if max_power != "full" or not dirs:
+        how += f", and on {machine} set WORKER_MAX_POWER=full with that folder in WORKER_DIRS"
+    return f"(no picture was attached: {machine} ran this as {power}, which can't save files. For pictures, {how}.)"
+
+
+def empty_hint(cli, power):
+    """A failed run's note with something the person can act on."""
+    if cli == "agy":
+        return "it may have tried an MCP tool; `agy mcp list` on that machine shows them"
+    return f"try again, or give it {'more power' if power == 'answer' else 'a different model'}"
+
+
 def build_prompt(job, limit):
     parts = [f"Room #{job['room']} summary: {job.get('room_summary') or '(none)'}"]
     if job.get("parent"):
@@ -296,7 +357,8 @@ class Worker:
         if force or not self.clis:
             self.clis = detect_clis()
         r = req("POST", "/api/v1/machine/hello", {"hostname": socket.gethostname(), "addresses": addresses(),
-                                                  "clis": self.clis, "max_power": MAX_POWER, "dirs": DIRS})
+                                                  "clis": self.clis, "max_power": MAX_POWER, "dirs": DIRS,
+                                                  "ollama": ollama_models() if SHARE_OLLAMA else None})
         agents = {a["name"]: a for a in r["agents"]}
         if agents != self.agents or not self.machine:
             print(f"machine {r['machine']}: " + (", ".join(f"{n} ({a['cli']})" for n, a in agents.items())
@@ -333,6 +395,8 @@ class Worker:
         # Pictures come back as files in a folder only the worker uses, so nothing else in a project gets posted.
         out = os.path.join(d, OUT_DIR) if d else self.scratch
         system += picture_hint(power, d)
+        if cli == "agy" and power == "full":  # it can't run commands headless, but its own image tool works
+            system += " For a picture, use your image generation tool, not commands."
         lowered = power != (cfg.get("power") or "answer")
         if lowered:
             print(f"  power {cfg.get('power')} not allowed here (WORKER_MAX_POWER/WORKER_DIRS); using {power}",
@@ -343,12 +407,19 @@ class Worker:
         started_at = time.time() - 1
         try:
             p = subprocess.run(argv, input=stdin, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
-            text, tokens, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
+            text, tokens, cached, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
         except FileNotFoundError:
-            text, tokens, error = "", 0, f"{cli} is not installed on {self.machine}"
+            text, tokens, cached, error = "", 0, 0, f"{cli} is not installed on {self.machine}"
         except subprocess.TimeoutExpired:
-            text, tokens, error = "", 0, f"timed out after {TIMEOUT}s"
+            text, tokens, cached, error = "", 0, 0, f"timed out after {TIMEOUT}s"
         pics = []
+        if cli == "agy" and power == "full" and not error:
+            os.makedirs(out, exist_ok=True)
+            for path in agy_images(p.stdout, started_at):
+                try:
+                    shutil.move(path, os.path.join(out, os.path.basename(path)))
+                except OSError as e:
+                    print(f"  could not take {path}: {e}", file=sys.stderr)
         if not LIMIT_RE.search(error or ""):
             for path in find_images(out, started_at) if os.path.isdir(out) else []:
                 try:
@@ -368,20 +439,24 @@ class Worker:
             for other, c in self.agents.items():  # same login: every agent on this CLI is out
                 if c["cli"] == cli:
                     report(other, "cooling", tokens if other == name else 0, 1 if other == name else 0,
-                           until=until, room=job["room"] if other == name else None)
+                           until=until, room=job["room"] if other == name else None,
+                           cached=cached if other == name else 0)
             print(f"  {cli} limit hit, cooling until {time.ctime(until)}: {error[:200]}", file=sys.stderr)
             return self.reply(job, f"(hit the {cli} plan limit; back around "
                                    f"{time.strftime('%H:%M', time.localtime(until))})")
-        state = report(name, "online", tokens, 1, room=job["room"])
+        state = report(name, "online", tokens, 1, room=job["room"], cached=cached)
         if state.startswith("over budget"):
             self.over_budget[name] = time.strftime("%Y-%m-%d", time.gmtime())
         if error:
             print(f"  {cli} failed: {error[:300]}", file=sys.stderr)
-            return self.reply(job, f"({cli} failed: {error.splitlines()[0][:200]})")
+            hint = f"; {empty_hint(cli, power)}" if error == "(empty answer)" else ""
+            return self.reply(job, f"({cli} failed: {error.splitlines()[0][:200]}{hint})")
         if lowered:  # say it in the chat too, not only in this machine's journal
             text += f"\n\n({self.machine} allows only {power}, not {cfg.get('power')}: ran as {power})"
+        if not pics and claims_picture(text):  # it says it made something, but nothing came back
+            text += "\n\n" + no_picture_note(self.machine, power)
         self.reply(job, text)
-        print(f"  {name} answered #{job['id']} ({tokens} tokens, {cli}, {power}{', deep' if deep else ''})",
+        print(f"  {name} answered #{job['id']} ({tokens} tokens + {cached} cached, {cli}, {power}{', deep' if deep else ''})",
               file=sys.stderr)
 
     def run(self):
@@ -428,12 +503,13 @@ WantedBy=default.target
 
 
 def install(args):
-    opts = dict(zip(args[::2], args[1::2]))
+    flags = [a for a in args if a == "--share-ollama"]
+    opts = dict(zip(*[iter([a for a in args if a not in flags])] * 2))
     hub, key = opts.get("--hub", "").rstrip("/"), opts.get("--key", "")
     unit = opts.get("--name", "bunch-worker")
     if not hub or not key:
         sys.exit("usage: worker.py install --hub URL --key MACHINE_KEY [--max-power answer|read|full] "
-                 "[--dirs DIR:DIR] [--name UNIT]")
+                 "[--dirs DIR:DIR] [--share-ollama] [--name UNIT]")
     cfg = os.path.expanduser("~/.config/bunch")
     units = os.path.expanduser("~/.config/systemd/user")
     os.makedirs(cfg, exist_ok=True)
@@ -444,6 +520,7 @@ def install(args):
         f.write(f"BUNCH_URL={hub}\nBUNCH_MACHINE_KEY={key}\n"
                 f"WORKER_MAX_POWER={opts.get('--max-power', MAX_POWER)}\n"
                 f"WORKER_DIRS={opts.get('--dirs', os.environ.get('WORKER_DIRS', ''))}\n"
+                f"WORKER_SHARE_OLLAMA={'1' if '--share-ollama' in args or SHARE_OLLAMA else ''}\n"
                 f"PATH={os.environ.get('PATH', '/usr/bin:/bin')}\n")  # services don't get ~/.local/bin otherwise
     with open(os.path.join(units, unit + ".service"), "w") as f:
         f.write(UNIT.format(env=env, python=sys.executable, script=os.path.realpath(__file__)))
@@ -476,7 +553,7 @@ def main():
     w = Worker()
     w.hello(force=True)
     print(f"worker up on {w.machine}: clis={','.join(c['cli'] for c in w.clis) or 'none found'} "
-          f"max power={MAX_POWER} dirs={DIRS or '-'} bunch={HUB}", file=sys.stderr)
+          f"max power={MAX_POWER} dirs={DIRS or '-'} ollama={'shared' if SHARE_OLLAMA else 'not shared'} bunch={HUB}", file=sys.stderr)
     w.run()
 
 

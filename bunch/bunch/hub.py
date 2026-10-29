@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import posixpath
 import re
 import time
 
@@ -13,6 +14,7 @@ from .llm import LLM, LLMError
 from .store import Store, valid_name
 
 WORKER_CLIS = ("claude", "codex", "agy")
+CACHE_WEIGHT = 0.1  # a cached input token costs about a tenth of a fresh one (Anthropic, OpenAI, Google)
 WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edit + run in dir
 WORKER_STATUSES = ("online", "busy", "cooling")
 WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long = off or not running
@@ -332,9 +334,10 @@ class Hub:
         return self.s.daily_tokens
 
     def spent(self, agent: str) -> int:
-        """Tokens counted against the daily budget: gateway asks plus a worker's own CLI runs."""
+        """Tokens counted against the daily budget: gateway asks plus a worker's own CLI runs,
+        with cache reads weighted like providers bill them."""
         u = self.store.usage_today(agent)
-        return u["ask"] + u["sub"]
+        return u["ask"] + u["sub"] + int(u["cached"] * CACHE_WEIGHT)
 
     # ---------------------------------------------------------------- worker
     # An agent can live in one of three places: on the hub (a gateway model: `model` set), on a
@@ -350,6 +353,24 @@ class Hub:
         if not cfg or not cfg.get("machine"):
             return {"mode": "manual"}
         return {**cfg, "system": row["system"] or ""}  # persona, shared with hub agents
+
+    def runs_as(self, row) -> str | None:
+        """The power a machine agent actually gets: its setting, capped by the machine's WORKER_MAX_POWER and
+        WORKER_DIRS (as clients/worker.py's effective_power does). None when it isn't on a machine."""
+        cfg = self.worker_config(row)
+        m = self.store.machine(cfg.get("machine") or "") if cfg.get("mode") == "worker" or cfg.get("machine") else None
+        if not m:
+            return None
+        want = cfg.get("power") if cfg.get("power") in WORKER_POWERS else "answer"
+        cap = m["max_power"] if m["max_power"] in WORKER_POWERS else "answer"
+        power = min(want, cap, key=WORKER_POWERS.index)
+        d = posixpath.normpath(cfg.get("dir") or "")
+        dirs = json.loads(m["dirs"] or "[]")
+        if power != "answer" and d.startswith("/") and not any(d == a or d.startswith(a.rstrip("/") + "/") for a in dirs):
+            power = "answer"  # folder not allowed there (a ~/ path is only known on the machine: trust it)
+        if power != "answer" and not dirs:
+            power = "answer"
+        return power
 
     def machine_agents(self, machine: str) -> list:
         return [a for a in self.store.agents()
@@ -465,13 +486,13 @@ class Hub:
                 pass  # rate limit / paused room: the notice is a courtesy
 
     def worker_report(self, agent: str, status: str, tokens: int = 0, calls: int = 0,
-                      until: float | None = None, room: str | None = None) -> str:
+                      until: float | None = None, room: str | None = None, cached: int = 0) -> str:
         """A worker says what it's doing and what its CLI spent. Returns the budget state in one line."""
         if status not in WORKER_STATUSES:
             raise HubError(f"status must be one of {', '.join(WORKER_STATUSES)}")
         st = self.store
-        if tokens or calls:
-            st.add_usage(agent, sub=max(0, int(tokens)), calls=max(0, int(calls)))
+        if tokens or calls or cached:
+            st.add_usage(agent, sub=max(0, int(tokens)), calls=max(0, int(calls)), cached=max(0, int(cached)))
         st.set_status(agent, status, until if status == "cooling" else None)
         if room:  # viewer shows "thinking…" while the CLI runs
             self.broadcast({"type": "typing", "agent": agent, "room": room, **({} if status == "busy" else {"done": True})})

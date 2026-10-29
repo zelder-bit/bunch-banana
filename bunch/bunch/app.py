@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from urllib.parse import quote
 from contextlib import asynccontextmanager
@@ -105,6 +106,7 @@ class ReportIn(BaseModel):
     agent: str
     status: str
     tokens: int = 0
+    cached: int = 0     # cache reads, not in tokens (older workers leave it out)
     calls: int = 0
     until: float | None = None
     room: str | None = None
@@ -133,6 +135,23 @@ class HelloIn(BaseModel):
     clis: list[dict] = []
     max_power: str = "answer"
     dirs: list[str] = []
+    ollama: dict | None = None   # {port, models}: only when the machine shares its Ollama models
+
+
+class ModelIn(BaseModel):
+    name: str          # what clients ask for, e.g. local/coder
+    model: str         # LiteLLM's model string, e.g. ollama_chat/qwen2.5-coder:14b
+    api_base: str | None = None
+    check: bool = True  # send one short message through the gateway before keeping it
+
+
+class ModelRefIn(BaseModel):
+    name: str
+    to: str | None = None
+    force: bool = False
+
+
+MODEL_NAME_RE = re.compile(r"[A-Za-z0-9._:/-]{1,64}")
 
 
 class MachineIn(BaseModel):
@@ -157,7 +176,20 @@ def _machine_json(hub: Hub, m, admin: bool) -> dict:
     if admin:
         out["dirs"] = json.loads(m["dirs"] or "[]")
         out["addresses"] = json.loads(m["addresses"] or "[]")
+        out["ollama"] = ollama_share(m)
     return out
+
+
+def ollama_share(m) -> dict | None:
+    """The Ollama models a machine shares, and the URL the gateway would use to reach them."""
+    o = json.loads(m["ollama"] or "null")
+    if not o:
+        return None
+    addrs = json.loads(m["addresses"] or "[]")
+    # A name (tailnet or LAN DNS) survives address changes better than an IP; IPv6 last.
+    host = next((a for a in addrs if any(c.isalpha() for c in a) and ":" not in a), None) \
+        or next((a for a in addrs if ":" not in a), None) or m["hostname"] or m["name"]
+    return {"url": f"http://{host}:{o['port']}", "models": o["models"]}
 
 
 def _pw_mark(pw_hash: str) -> str:
@@ -174,7 +206,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     llm = llm or LLM(s.litellm_url, s.litellm_key)
     hub = Hub(store, s, llm)
 
-    INLINE_IMAGES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+    # SVG is shown too: the viewer only puts files in <img> (no scripts there), and opened directly the
+    # CSP below sandboxes it, so a script in one can't run on this origin.
+    INLINE_IMAGES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"}
 
     def retention_days() -> float:
         try:
@@ -379,8 +413,15 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         clis = [{"cli": str(c.get("cli", ""))[:16], "version": str(c.get("version", ""))[:64],
                  "models": [str(x)[:64] for x in (c.get("models") or [])][:50]}
                 for c in body.clis[:10] if c.get("cli") in WORKER_CLIS]
+        ollama = None
+        if isinstance(body.ollama, dict) and isinstance(body.ollama.get("models"), list):
+            try:
+                port = max(1, min(65535, int(body.ollama.get("port") or 11434)))
+            except (TypeError, ValueError):
+                port = 11434
+            ollama = {"port": port, "models": sorted({str(t)[:100] for t in body.ollama["models"][:200] if t})}
         store.set_machine_report(m["name"], body.hostname[:64], [a[:64] for a in body.addresses[:20]], clis,
-                                 power, [d[:512] for d in body.dirs[:20]])
+                                 power, [d[:512] for d in body.dirs[:20]], ollama)
         hub.broadcast({"type": "agents"})
         return {"machine": m["name"],
                 "agents": [{"name": a["name"], **hub.worker_config(a)} for a in hub.machine_agents(m["name"])]}
@@ -437,7 +478,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def machine_report(body: ReportIn, authorization: str | None = Header(None)):
         a = machine_agent(machine_of(authorization), body.agent)
         return PlainTextResponse(hub.worker_report(a["name"], body.status, body.tokens, body.calls,
-                                                   body.until, body.room))
+                                                   body.until, body.room, body.cached))
 
     @app.get("/api/v1/rooms")
     async def api_rooms(authorization: str | None = Header(None)):
@@ -503,7 +544,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         row = store.file(fid)
         if not row:
             raise HTTPException(404, "no such file")
-        inline = row["mime"] in INLINE_IMAGES  # anything else (SVG, HTML...) downloads instead of running here
+        inline = row["mime"] in INLINE_IMAGES  # anything else (HTML...) downloads instead of running here
         headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600",
                    "Content-Security-Policy": "default-src 'none'; sandbox"}
         if not inline:
@@ -564,8 +605,10 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "budget_set": a["daily_tokens"], "system": a["system"] if admin else None,
                         "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"],
                         "sub_tokens_today": u["sub"], "sub_calls_today": u["calls"],
+                        "sub_cached_today": u["cached"], "spent_today": hub.spent(a["name"]),
                         "state": hub.worker_state(a), "status_until": a["status_until"],
                         "worker": _worker_view(hub.worker_config(a), admin),
+                        "runs_as": hub.runs_as(a),
                         "runs_on": hub.model_host(a["model"]) if a["model"] else None,
                         "machine": hub.agent_machine(a), "first_responder": a["name"] == first})
         for system, model in (("_summarizer", s.summary_model), ("_router", s.router_model)):
@@ -587,7 +630,121 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         except LLMError as e:
             raise HTTPException(502, str(e))
         await hub.refresh_model_hosts()
-        return [{"name": n, "runs_on": hub.model_host(n), "machine": hub.model_machine(n)} for n in names]
+        try:
+            deps = await llm.model_info()
+        except (LLMError, AttributeError):  # older LiteLLM / key without access: list only
+            deps = []
+        stored = {d["name"] for d in deps if d["stored"]}
+        return [{"name": n, "runs_on": hub.model_host(n), "machine": hub.model_machine(n),
+                 "stored": n in stored, "used_by": model_users(n),
+                 "gone": any(model_gone(d) for d in deps if d["name"] == n)} for n in names]
+
+    def model_gone(d: dict) -> bool:
+        """An Ollama model on a machine that shares its list, but that machine no longer has it."""
+        tag = d["model"].split("/", 1)[1] if d["model"].startswith(("ollama/", "ollama_chat/")) else None
+        for m in store.machines():
+            o = ollama_share(m)
+            if tag and o and d["api_base"].rstrip("/") == o["url"]:
+                return tag not in o["models"]
+        return False
+
+    def model_users(name: str) -> list[str]:
+        """Who answers with a gateway model: agents, and the hub's own summarizer and router."""
+        out = [a["name"] for a in store.agents() if a["model"] == name]
+        return out + [sys for sys, m in (("_summarizer", s.summary_model), ("_router", s.router_model)) if m == name]
+
+    async def check_model(name: str) -> None:
+        try:
+            await llm.chat(name, [{"role": "user", "content": "Reply with OK."}], 5)
+        except LLMError as e:
+            raise HTTPException(502, f"{name} didn't answer through the gateway: {e}. If it's an Ollama server on "
+                                     "another machine, it needs OLLAMA_HOST=0.0.0.0 and its port (11434) open "
+                                     "to the gateway.")
+
+    async def stored_deployments(name: str) -> list[dict]:
+        try:
+            deps = [m for m in await llm.model_info() if m["name"] == name]
+        except LLMError as e:
+            raise HTTPException(502, str(e))
+        if not deps:
+            raise HTTPException(404, "no such model")
+        if not any(d["stored"] for d in deps):
+            raise HTTPException(400, f"{name} is in litellm/config.yaml; change it there")
+        return [d for d in deps if d["stored"]]
+
+    def models_changed() -> None:
+        hub._hosts_at = 0.0  # re-read hosts on the next look
+        hub.broadcast({"type": "agents"})
+
+    @app.post("/api/admin/models")
+    async def admin_add_model(request: Request, body: ModelIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        name, model, base = body.name.strip(), body.model.strip(), (body.api_base or "").strip() or None
+        if not MODEL_NAME_RE.fullmatch(name) or not model or len(model) > 200:
+            raise HTTPException(400, "name: letters, digits and . _ - / : (up to 64); model required")
+        if base and not base.startswith(("http://", "https://")):
+            raise HTTPException(400, "server address must start with http:// or https://")
+        try:
+            if name in await llm.models():
+                raise HTTPException(409, f"the gateway already has {name}")
+            await llm.add_model(name, model, base)
+        except LLMError as e:
+            raise HTTPException(502, str(e))
+        if body.check:
+            try:
+                await check_model(name)
+            except HTTPException:
+                for d in [m for m in await llm.model_info() if m["name"] == name and m["stored"]]:
+                    await llm.delete_model(d["id"])  # don't keep a model nobody can reach
+                raise
+        models_changed()
+        return {"name": name}
+
+    @app.post("/api/admin/models/test")
+    async def admin_test_model(request: Request, body: ModelRefIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        await check_model(body.name)
+        return {"name": body.name, "ok": True}
+
+    @app.post("/api/admin/models/delete")
+    async def admin_delete_model(request: Request, body: ModelRefIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        deps = await stored_deployments(body.name)
+        users = model_users(body.name)
+        if users and not body.force:
+            raise HTTPException(409, f"{', '.join(users)} use{'s' if len(users) == 1 else ''} {body.name}")
+        try:
+            for d in deps:
+                await llm.delete_model(d["id"])
+        except LLMError as e:
+            raise HTTPException(502, str(e))
+        models_changed()
+        return {"deleted": body.name, "used_by": users}
+
+    @app.post("/api/admin/models/rename")
+    async def admin_rename_model(request: Request, body: ModelRefIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        to = (body.to or "").strip()
+        if not MODEL_NAME_RE.fullmatch(to):
+            raise HTTPException(400, "new name: letters, digits and . _ - / : (up to 64)")
+        deps = await stored_deployments(body.name)
+        if set(model_users(body.name)) & {"_summarizer", "_router"}:
+            raise HTTPException(409, f"{body.name} is set in .env (BUNCH_SUMMARY_MODEL / BUNCH_ROUTER_MODEL); "
+                                     "change it there first")
+        try:
+            if to in await llm.models():
+                raise HTTPException(409, f"the gateway already has {to}")
+            for d in deps:
+                await llm.add_model(to, d["model"], d["api_base"] or None)
+            for d in deps:
+                await llm.delete_model(d["id"])
+        except LLMError as e:
+            raise HTTPException(502, str(e))
+        moved = model_users(body.name)
+        for a in moved:
+            store.set_agent_info(a, model=to)
+        models_changed()
+        return {"name": to, "agents_moved": moved}
 
     @app.post("/api/admin/agents")
     async def admin_add_agent(request: Request, body: AgentIn, authorization: str | None = Header(None)):

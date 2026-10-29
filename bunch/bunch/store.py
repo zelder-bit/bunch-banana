@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS machines(
   addresses TEXT NOT NULL DEFAULT '[]',     -- JSON list: IPs / names it's reachable as (to spot gateway models on it)
   clis TEXT NOT NULL DEFAULT '[]',          -- JSON list: [{cli, version, models}]
   max_power TEXT NOT NULL DEFAULT 'answer',
-  dirs TEXT NOT NULL DEFAULT '[]'
+  dirs TEXT NOT NULL DEFAULT '[]',
+  ollama TEXT                               -- JSON {port, models}: Ollama models it shares (WORKER_SHARE_OLLAMA)
 );
 CREATE TABLE IF NOT EXISTS files(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS usage(
   ctx_tokens INTEGER NOT NULL DEFAULT 0,    -- estimated tokens the hub put into the agent's context
   sub_tokens INTEGER NOT NULL DEFAULT 0,    -- tokens a worker spent on its own subscription CLI
   sub_calls INTEGER NOT NULL DEFAULT 0,     -- CLI runs by that worker
+  sub_cached INTEGER NOT NULL DEFAULT 0,    -- cache reads in those runs (not in sub_tokens; cost about 1/10)
   PRIMARY KEY(agent, day)
 );
 """
@@ -102,9 +104,13 @@ AGENT_COLUMNS = {
     "status": "TEXT",
     "status_until": "REAL",
 }
+MACHINE_COLUMNS = {
+    "ollama": "TEXT",
+}
 USAGE_COLUMNS = {
     "sub_tokens": "INTEGER NOT NULL DEFAULT 0",
     "sub_calls": "INTEGER NOT NULL DEFAULT 0",
+    "sub_cached": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _ph = PasswordHasher()
@@ -141,6 +147,10 @@ class Store:
             for col, decl in AGENT_COLUMNS.items():
                 if col not in have:
                     self.db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
+            have = {r["name"] for r in self.db.execute("PRAGMA table_info(machines)")}
+            for col, decl in MACHINE_COLUMNS.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE machines ADD COLUMN {col} {decl}")
             have = {r["name"] for r in self.db.execute("PRAGMA table_info(usage)")}
             for col, decl in USAGE_COLUMNS.items():
                 if col not in have:
@@ -334,9 +344,10 @@ class Store:
         return row
 
     def set_machine_report(self, name: str, hostname: str, addresses: list, clis: list,
-                           max_power: str, dirs: list) -> None:
-        self.x("UPDATE machines SET hostname=?, addresses=?, clis=?, max_power=?, dirs=? WHERE name=?",
-               (hostname, json.dumps(addresses), json.dumps(clis), max_power, json.dumps(dirs), name))
+                           max_power: str, dirs: list, ollama: dict | None = None) -> None:
+        self.x("UPDATE machines SET hostname=?, addresses=?, clis=?, max_power=?, dirs=?, ollama=? WHERE name=?",
+               (hostname, json.dumps(addresses), json.dumps(clis), max_power, json.dumps(dirs),
+                json.dumps(ollama) if ollama else None, name))
 
     def rotate_machine_key(self, name: str) -> str:
         key = "bunchm_" + secrets.token_urlsafe(24)
@@ -347,21 +358,23 @@ class Store:
         return self.x("DELETE FROM machines WHERE name=?", (name,)).rowcount > 0
 
     # -- usage -----------------------------------------------------------
-    def add_usage(self, agent: str, ask: int = 0, ctx: int = 0, sub: int = 0, calls: int = 0) -> None:
+    def add_usage(self, agent: str, ask: int = 0, ctx: int = 0, sub: int = 0, calls: int = 0,
+                  cached: int = 0) -> None:
         self.x(
-            "INSERT INTO usage(agent,day,ask_tokens,ctx_tokens,sub_tokens,sub_calls) VALUES(?,?,?,?,?,?) "
+            "INSERT INTO usage(agent,day,ask_tokens,ctx_tokens,sub_tokens,sub_calls,sub_cached) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(agent,day) DO UPDATE SET ask_tokens=ask_tokens+excluded.ask_tokens, "
             "ctx_tokens=ctx_tokens+excluded.ctx_tokens, sub_tokens=sub_tokens+excluded.sub_tokens, "
-            "sub_calls=sub_calls+excluded.sub_calls",
-            (agent, today(), ask, ctx, sub, calls),
+            "sub_calls=sub_calls+excluded.sub_calls, sub_cached=sub_cached+excluded.sub_cached",
+            (agent, today(), ask, ctx, sub, calls, cached),
         )
 
     def usage_today(self, agent: str) -> dict:
-        row = self.one("SELECT ask_tokens, ctx_tokens, sub_tokens, sub_calls FROM usage WHERE agent=? AND day=?",
-                       (agent, today()))
+        row = self.one("SELECT ask_tokens, ctx_tokens, sub_tokens, sub_calls, sub_cached FROM usage "
+                       "WHERE agent=? AND day=?", (agent, today()))
         if not row:
-            return {"ask": 0, "ctx": 0, "sub": 0, "calls": 0}
-        return {"ask": row["ask_tokens"], "ctx": row["ctx_tokens"], "sub": row["sub_tokens"], "calls": row["sub_calls"]}
+            return {"ask": 0, "ctx": 0, "sub": 0, "calls": 0, "cached": 0}
+        return {"ask": row["ask_tokens"], "ctx": row["ctx_tokens"], "sub": row["sub_tokens"], "calls": row["sub_calls"],
+                "cached": row["sub_cached"]}
 
     # -- rooms & messages ------------------------------------------------
     def ensure_room(self, room: str) -> None:

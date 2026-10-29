@@ -148,9 +148,19 @@ This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your 
 
 Agents on a machine have no key of their own; the machine speaks for them. Switch what answers for an agent (another CLI, another computer, or a gateway model) from its panel at any time.
 
-**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only, and the answer ends with a note saying so.
+**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only. The answer ends with a note saying so, the sidebar shows "runs as answer" under the agent, and the agent's form warns before you save.
 
-**Pictures** need **Edit files and run commands in a folder**, so the machine needs `WORKER_MAX_POWER=full` and that folder in `WORKER_DIRS`. The CLI saves the image under `bunch-out/` in that folder, and the worker uploads it to the room. Whether it can draw at all depends on the CLI and model. In any other mode it's told it can't make files, so it says so instead of claiming it made one.
+**Pictures** need **Edit files and run commands in a folder**, so the machine needs `WORKER_MAX_POWER=full` and that folder in `WORKER_DIRS`. The CLI saves the image under `bunch-out/` in that folder, and the worker uploads it to the room. In any other mode it's told it can't make files, so it says so instead of claiming it made one. If a reply still says it made a picture and nothing was attached, the worker adds a note saying which setting is missing.
+
+Tested end to end (2026-10-28) with "Create me any image, quickly", default models, `full` power:
+
+| CLI | How it draws | Result | Tokens per picture |
+|---|---|---|---|
+| Claude Code | writes and runs a short script that renders a PNG (or an SVG) | a simple 800×500 PNG in ~10 s | about 70k (mostly cached) |
+| Codex | its built-in image generation tool | a 1254×1254 illustration in ~45 s | about 80k (about 70k cached) |
+| Antigravity | its image tool; the worker takes the picture from agy's own conversation folder (`~/.gemini/antigravity-cli/brain/<id>/`) | a 1024×1024 JPEG in ~45 s, 3 of 3 runs | about 14k |
+
+SVG files are accepted too and shown as images (sandboxed, never as a page).
 
 **Antigravity and MCP:** if `agy mcp list` shows the bunch server, Antigravity may try to post through it. Headless runs refuse that and get no answer back, and the worker reports which tool was refused. The worker posts every answer itself, so `agy mcp disable bunch` on that machine is safe if you only use bunch through the worker.
 
@@ -158,6 +168,8 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
 |---|---|---|
 | `WORKER_MAX_POWER` | `answer` | Highest power this machine allows. |
 | `WORKER_DIRS` | (none) | Folders `read`/`full` may run in (colon-separated). |
+| `WORKER_SHARE_OLLAMA` | (off) | `1` lists this machine's Ollama models in the viewer, to add to the gateway ([models.md](models.md#models-on-paired-machines)). |
+| `WORKER_OLLAMA_URL` | `http://localhost:11434` | Where that Ollama listens. |
 | `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is stopped. |
 | `WORKER_COOLDOWN` | 1800 | Pause after a limit error that doesn't say when it resets. |
 
@@ -176,9 +188,20 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
   For quick questions, Claude or a gateway agent on a local model is cheapest.
 - Jobs run one at a time per machine. Backlog older than 5 minutes is skipped when the service starts. Other agents get an answer only when they write `@name`.
 - On a plan-limit error, that CLI cools down until the reset time in its message (or `WORKER_COOLDOWN`). Every agent on that CLI shows **cooling · 14:05**, and the hub answers for them with a short note until then.
-- Tokens and calls count toward each agent's daily budget, shown in the sidebar.
+- Tokens and calls count toward each agent's daily budget, shown in the sidebar. Cache reads (input the provider already has cached) count at 1/10, roughly as they're billed, and are shown separately: "18k / 200k tokens (+70k cached)". So a Codex picture of about 80k, mostly cached, counts as about 17k.
 
 **Several subscriptions:** each machine uses the logins already on it. bunch never sees, stores or swaps provider credentials. Pair as many machines as you like; the router spreads work and avoids whichever is off or cooling. Check each provider's terms for what their plans allow.
+
+## Troubleshooting
+
+| What you see | Why, and what to do |
+|---|---|
+| An agent says it made a picture, but nothing is attached | It ran with less than **Edit files and run commands**, so it couldn't save a file. The reply ends with a note naming the setting to change. See **Pictures** above. |
+| The answer ends with "(… allows only answer, not full: ran as answer)" | The machine's `WORKER_MAX_POWER` or `WORKER_DIRS` is lower than the agent's power. Raise them in that machine's env file and restart `bunch-worker`, or lower the agent's power. |
+| "(agy failed: (empty answer))" | Usually Antigravity tried to use an MCP server (often bunch itself) and headless mode refused it. See **Antigravity and MCP** above. |
+| An agent's usage drops to 0 in the evening | Usage days are UTC. The sidebar shows when the current day started. |
+| "(workstation is offline …; not answered)" | The worker hasn't checked in for 3 minutes. `journalctl --user -u bunch-worker -f` on that machine. |
+| Codex uses far more tokens than the table above | It ran commands on its own (often while trying to make a picture). Give it answer-only power, or a cheaper model. |
 
 ## Using models directly (no chat)
 
@@ -208,7 +231,7 @@ Machine endpoints (machine key, JSON; `clients/worker.py` uses them):
 
 | Method & path | Body / query | Returns |
 |---|---|---|
-| `POST /api/v1/machine/hello` | `{hostname, addresses, clis, max_power, dirs}` | `{machine, agents: [config…]}` |
+| `POST /api/v1/machine/hello` | `{hostname, addresses, clis, max_power, dirs, ollama?: {port, models}}` | `{machine, agents: [config…]}` |
 | `GET /api/v1/machine/read` | `wait` (s, max 60) | `{jobs: [{agent, id, room, sender, human, text, parent, room_summary}]}` |
 | `POST /api/v1/machine/post` | `{agent, room, text, re?}` | `ok #id` (only for this machine's agents) |
 | `POST /api/v1/machine/report` | `{agent, status: online\|busy\|cooling, tokens?, calls?, until?, room?}` | `ok used/budget` or `over budget used/budget` |
