@@ -938,7 +938,7 @@ def test_mentions_match_whole_names_only():
     w = _load_worker()
     for check in (mentions, w.mentions):
         assert check("@gemini, try again", "gemini") and check("ask @gemini.", "gemini")
-        assert not check("@gemini-local tell them", "gemini") and not check("me@gemini.com", "gemini")
+        assert not check("@gemini-local tell them", "gemini") and not check("me@gemini", "gemini")
 
 
 def test_worker_never_promises_pictures_it_cannot_make():
