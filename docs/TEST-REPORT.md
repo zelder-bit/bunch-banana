@@ -1,8 +1,8 @@
 # User test report (2026-10-28)
 
-End goal (from memory, 2026-10-28): from the laptop, message the proxmox hub and have beep-boop's paid CLIs (claude, codex, agy) answer while it's on; when it's off, an immediate "offline, not answered" note. The user also set up a `pic-generation` room expecting agents to make images.
+End goal (from memory, 2026-10-28): from the laptop, message the proxmox hub and have workstation's paid CLIs (claude, codex, agy) answer while it's on; when it's off, an immediate "offline, not answered" note. The user also set up a `pic-generation` room expecting agents to make images.
 
-What was tested, as a user, without changing anything as of 2026-10-28: the live hub on the proxmox server (signed in as citrus, read-only look at the viewer), all 40 messages in #general and #pic-generation (read through the bunch MCP `get`), the `bunch-worker` journal on beep-boop, and the worker and hub code behind each failure. The worker is up (`clis=claude,codex,agy`, `WORKER_MAX_POWER=answer`, `WORKER_DIRS=` empty).
+What was tested, as a user, without changing anything as of 2026-10-28: the live hub on the proxmox server (signed in as the owner, read-only look at the viewer), all 40 messages in #general and #pic-generation (read through the bunch MCP `get`), the `bunch-worker` journal on workstation, and the worker and hub code behind each failure. The worker is up (`clis=claude,codex,agy`, `WORKER_MAX_POWER=answer`, `WORKER_DIRS=` empty).
 
 The fixes are planned in [FIX-PLAN.md](FIX-PLAN.md).
 
@@ -20,7 +20,7 @@ The fixes are planned in [FIX-PLAN.md](FIX-PLAN.md).
 | 7 | Med | The power the viewer allows is silently lowered: "power full not allowed here… using answer" is logged for every job, and the user is never told. | The viewer lets you pick `full` for a machine whose limit is `answer`. The worker only prints a warning to its journal. |
 | 8 | Low | gemini-local posted the literal text "(empty answer)" (#28, #34). | A local model repeating the worker's error text from the room summary or context. The hub posts it as a real answer. |
 | 9 | Low | codex used 56,741 tokens on one answer-only run (#37). The README says about 15k. | Cached input or a large default prompt. Worth checking how the count is made, and whether the README number is right. |
-| 10 | Low | #pic-generation got "citrus opened #pic-generation" twice (#16, #17). | The room is created twice, or the open post isn't idempotent. Not traced yet. |
+| 10 | Low | #pic-generation got "<owner> opened #pic-generation" twice (#16, #17). | The room is created twice, or the open post isn't idempotent. Not traced yet. |
 | 11 | Unconfirmed | #15 "@claude" (before the claude agent existed) got no reply and no "no such agent" note. | An @ to a name that doesn't exist is silently ignored. To confirm in code. |
 | 12 | Med | In the viewer sidebar, **claude shows "ask 0 / 200k"** even though it answered #31 (the worker logged 825 tokens). gemini shows "1 call" after about 5 agy runs, while codex shows 71k and 2 calls, which is correct. | The worker calls `report(name, "online", tokens, 1)` before it checks for errors, so failed runs should count. Something between the worker's report and the hub's usage table or day bucket drops calls. Trace `worker_report` → `store.add_usage` and the viewer's label. |
 | 13 | Low | The viewer's one-line summary of #33 reads "The user confirmed they can see #general…", but claude wrote that, not the user. | The summarizer for long messages gets the speaker wrong (`bunch/bunch/summarizer.py` or the summary step in `hub.post`). |

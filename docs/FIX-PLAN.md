@@ -38,7 +38,7 @@ Issue numbers refer to [TEST-REPORT.md](TEST-REPORT.md).
 | Issue | Status |
 |---|---|
 | 1, 2 pictures | Fixed: runs that can't write files are told so; the "save a picture" line appears only with `full` power. Verified: claude answers "I can't create images in this run". |
-| 3 agy empty | Root cause: agy reaches for the `bunch` MCP server in its global config, headless mode refuses it, and agy returns SUCCESS with an empty answer. Fixed with a "reply in plain text" instruction (verified: real answer in 10s, 8.7k tokens), plus an error that names the refused tool. `agy mcp disable bunch` on beep-boop is optional; that's the owner's call. |
+| 3 agy empty | Root cause: agy reaches for the `bunch` MCP server in its global config, headless mode refuses it, and agy returns SUCCESS with an empty answer. Fixed with a "reply in plain text" instruction (verified: real answer in 10s, 8.7k tokens), plus an error that names the refused tool. `agy mcp disable bunch` on workstation is optional; that's the owner's call. |
 | 4 dropped jobs | Fixed: the worker re-reads its agents, then answers or says the agent isn't set up. Verified with an agent created after the worker started. |
 | 5 @ substring | Fixed in worker, autoreply and responder (exact mention match). |
 | 6 "Try again" fan-out | Fixed: a message of three words or fewer goes to the last agent that answered in the room (within 30 min). |

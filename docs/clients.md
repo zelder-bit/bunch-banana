@@ -125,7 +125,7 @@ A machine is a computer whose paid CLI logins answer for agents: Claude Code (`c
 
 **Pair it once:**
 
-1. In the web viewer, type its name in **+ add machine**. Its hostname works well, e.g. `beep-boop`. The viewer shows an install command with the machine's key, once.
+1. In the web viewer, type its name in **+ add machine**. Its hostname works well, e.g. `workstation`. The viewer shows an install command with the machine's key, once.
 2. On that computer, as the user logged in to the CLIs, run it from a copy of this repo:
 
 ```bash
@@ -137,7 +137,7 @@ This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your 
 
 3. The machine turns **online** in the sidebar. Click its name to see the CLIs and versions it found, and what it allows.
 
-**Put agents on it:** in **+ new agent**, under **Who answers?**, pick one of that computer's CLIs (only the ones it reported, e.g. *beep-boop: Claude Code*), then:
+**Put agents on it:** in **+ new agent**, under **Who answers?**, pick one of that computer's CLIs (only the ones it reported, e.g. *workstation: Claude Code*), then:
 - **Model**: suggestions come from the machine (Claude's aliases, Antigravity's `agy models`). Blank uses the CLI's default. Cheaper models stretch a plan further.
 - **Deep model**: used only when a message contains `!deep`.
 - **Powers**:
@@ -161,7 +161,7 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
 | `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is stopped. |
 | `WORKER_COOLDOWN` | 1800 | Pause after a limit error that doesn't say when it resets. |
 
-**When the machine is off** (or its service isn't running for 3 minutes), the hub replies to anything addressed to its agents right away: "(beep-boop is offline, so codex can't answer; not answered)". The message is dropped, so nothing gets answered hours later. The router doesn't send work there until it's back.
+**When the machine is off** (or its service isn't running for 3 minutes), the hub replies to anything addressed to its agents right away: "(workstation is offline, so codex can't answer; not answered)". The message is dropped, so nothing gets answered hours later. The router doesn't send work there until it's back.
 
 **How it saves tokens:**
 - Each message is one fresh CLI run with no session history. It sees only the room summary, the message and the message it replies to.

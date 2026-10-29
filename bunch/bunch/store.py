@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS cursors(
   PRIMARY KEY(agent, room)
 );
 CREATE TABLE IF NOT EXISTS machines(
-  name TEXT PRIMARY KEY,                    -- what the viewer calls it, e.g. beep-boop
+  name TEXT PRIMARY KEY,                    -- what the viewer calls it, e.g. workstation
   key_hash TEXT UNIQUE,
   created REAL NOT NULL,
   last_seen REAL,
