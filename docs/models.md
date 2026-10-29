@@ -4,7 +4,7 @@ This guide covers how bunch finds out about models, and what to do when you pull
 
 ## How bunch finds models
 
-**bunch never talks to Ollama directly, and it doesn't discover models on its own.** Every model goes through the gateway (LiteLLM), and the gateway only knows about the models listed in `litellm/config.yaml`.
+**bunch never talks to Ollama directly.** Every model goes through the gateway (LiteLLM), and the gateway knows the models listed in `litellm/config.yaml`, plus any added from the viewer (see [Adding models from the viewer](#adding-models-from-the-viewer)).
 
 ```
   litellm/config.yaml  ──read at start-up──►  gateway :4000  ──/v1/models──►  bunch (model pickers)
@@ -151,6 +151,29 @@ For a hostname, the part before the first dot counts too, so `http://studio.lan:
 Once a model is grouped under a machine, bunch knows that agents on it only work while that machine is on. When the machine is off, they reply "offline" straight away.
 
 bunch refreshes this mapping at most every 5 minutes, so a newly added model can show up under "Other servers" for a few minutes before it moves under its machine.
+
+## Adding models from the viewer
+
+With the gateway's database turned on, an admin can add, test, rename and remove models from the viewer (**Models…** in the sidebar), with no file edits or restarts. Models from `litellm/config.yaml` are listed too, but can only be changed in that file.
+
+**Turn it on once**, on the bunch server:
+
+1. In `.env`, set `LITELLM_DB_PASSWORD`, `DATABASE_URL` and `STORE_MODEL_IN_DB=True` (all three are in `.env.example`).
+2. `docker compose --profile keys up -d`
+
+Without it, adding a model fails with a message pointing here.
+
+**Adding a model:** pick or type the server (`http://gpu-box:11434`), the tag from `ollama list`, and the name clients use (`local/...`). **Test and add** registers it and sends one short message through the gateway. If that fails (usually the server isn't reachable from the gateway: see [Make Ollama reachable](#1-make-ollama-reachable-from-the-bunch-server)), the model is removed again and the error is shown.
+
+**Renaming** moves every agent using the old name to the new one. **Removing** a model that agents use asks first; those agents stop answering until you pick another model for them. Models set in `.env` for the summarizer or router (`BUNCH_SUMMARY_MODEL`, `BUNCH_ROUTER_MODEL`) can't be renamed here.
+
+### Models on paired machines
+
+A [paired machine](clients.md#machines) can list its Ollama models in the viewer, so you don't have to type them. It's off by default, because a machine may have models you don't want shared. To turn it on, add `WORKER_SHARE_OLLAMA=1` to that machine's `~/.config/bunch/bunch-worker.env` (or install with `--share-ollama`) and restart `bunch-worker`. The worker reads `http://localhost:11434/api/tags` (`WORKER_OLLAMA_URL` to change it) every minute.
+
+Its models then appear under **On your machines** in **Models…**. **Use…** fills in the form with the machine's address and a name like `local/workstation-qwen2.5`, which you can change. The machine still needs `OLLAMA_HOST=0.0.0.0` and port 11434 open to the gateway; the test tells you if it can't reach it.
+
+If a shared model is later removed from that machine (`ollama rm`), the gateway entry stays, and **Models…** says it's gone, so you can move its agents before removing it.
 
 ## Handy extras
 

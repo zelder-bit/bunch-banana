@@ -761,7 +761,9 @@ def test_gateway_models_show_which_machine_they_run_on(env):
     # Grouped by the computer that answers: the local model lives on workstation, the API on no machine.
     assert agents["helper"]["machine"] == "workstation" and agents["big"]["machine"] is None
     models = {m["name"]: m for m in c.get("/api/admin/models", headers=adm()).json()}
-    assert models["local/small"] == {"name": "local/small", "runs_on": "workstation", "machine": "workstation"}
+    assert {k: models["local/small"][k] for k in ("name", "runs_on", "machine")} == \
+        {"name": "local/small", "runs_on": "workstation", "machine": "workstation"}
+    assert models["local/small"]["used_by"] == ["helper", "_summarizer"]
     assert models["paid/big"]["machine"] is None and models["paid/big"]["runs_on"] == "api.example.com"
 
 
@@ -902,19 +904,22 @@ def test_files_upload_serve_and_purge(env):
     got = c.get(f"/api/admin/files/{fid}", headers=adm())
     assert got.content == PNG and got.headers["content-type"] == "image/png"
     assert c.get(f"/api/admin/files/{fid}").status_code == 401
-    svg = up("x.svg", "image/svg+xml", b"<svg onload=alert(1)/>").json()["id"]  # never rendered inline
+    svg = up("x.svg", "image/svg+xml", b"<svg onload=alert(1)/>").json()["id"]  # an image, but sandboxed
     r = c.get(f"/api/admin/files/{svg}", headers=adm())
+    assert r.headers["content-type"].startswith("image/svg+xml") and "sandbox" in r.headers["content-security-policy"]
+    page = up("x.html", "text/html", b"<script>alert(1)</script>").json()["id"]  # never rendered inline
+    r = c.get(f"/api/admin/files/{page}", headers=adm())
     assert r.headers["content-type"] == "application/octet-stream" and "attachment" in r.headers["content-disposition"]
     assert c.get("/api/admin/files", headers=h(k["alice"])).status_code in (401, 403)
     listing = c.get("/api/admin/files", headers=adm()).json()
-    assert listing["rooms"][0]["n"] == 2 and len(listing["files"]) == 2
+    assert listing["rooms"][0]["n"] == 3 and len(listing["files"]) == 3
     assert c.post("/api/admin/files/purge", json={}, headers=adm()).status_code == 400
     assert c.post("/api/admin/files/purge", json={"ids": []}, headers=adm()).json()["deleted"] == 0
     uni = up("ハロウィン.pdf", "application/pdf", b"%PDF").json()["id"]  # non-Latin-1 name downloads
     r = c.get(f"/api/admin/files/{uni}", headers=adm())
     assert r.status_code == 200 and "filename*=UTF-8''%E3%83%8F" in r.headers["content-disposition"]
     c.post("/api/admin/files/purge", json={"ids": [uni]}, headers=adm())
-    assert c.post("/api/admin/files/purge", json={"ids": [svg]}, headers=adm()).json()["deleted"] == 1
+    assert c.post("/api/admin/files/purge", json={"ids": [svg, page]}, headers=adm()).json()["deleted"] == 2
     assert c.put("/api/admin/files/retention", json={"days": 7}, headers=adm()).json()["retention_days"] == 7
     assert c.get(f"/api/admin/files/{fid}", headers=adm()).status_code == 200  # younger than 7 days
     assert c.post("/api/admin/files/purge", json={"older_than_days": 0}, headers=adm()).json()["deleted"] == 1
@@ -1060,3 +1065,166 @@ def test_message_summary_knows_who_spoke(env):
     asyncio.run(summarize_once(hub))
     msg = next(m for m in llm.calls if "20 words" in m[1][0]["content"])
     assert "third person" in msg[1][0]["content"] and msg[1][1]["content"].startswith("From bob:")
+
+
+# --------------------------------------------------- gateway models from the viewer
+class GatewayModels:
+    """Stands in for LiteLLM's /model/* API: config-file models plus ones added at runtime."""
+    def __init__(self, llm, db=True):
+        self.deps = [{"name": "local/small", "id": "cfg1", "api_base": "http://192.0.2.7:11434",
+                      "model": "ollama_chat/qwen2.5:3b", "stored": False}]
+        self.db, self.fail_chat, self.n = db, set(), 0
+        llm.model_info, llm.add_model, llm.delete_model = self.model_info, self.add_model, self.delete_model
+        llm.models = self.models
+        chat = llm.chat
+
+        async def checked_chat(model, *a, **kw):
+            if model in self.fail_chat:
+                from bunch.llm import LLMError
+                raise LLMError("gateway 500: connection refused")
+            return await chat(model, *a, **kw)
+        llm.chat = checked_chat
+
+    async def models(self):
+        return sorted({d["name"] for d in self.deps} | {"paid/big"})
+
+    async def model_info(self):
+        return [dict(d) for d in self.deps]
+
+    async def add_model(self, name, model, api_base=None):
+        from bunch.llm import LLMError, NO_DB
+        if not self.db:
+            raise LLMError(NO_DB)
+        self.n += 1
+        self.deps.append({"name": name, "id": f"db{self.n}", "api_base": api_base or "", "model": model, "stored": True})
+
+    async def delete_model(self, mid):
+        self.deps = [d for d in self.deps if d["id"] != mid]
+
+
+def test_admin_adds_tests_renames_and_removes_models(env):
+    c, k, app, llm = env
+    gw = GatewayModels(llm)
+    add = lambda **b: c.post("/api/admin/models", json={"name": "local/coder", "model": "ollama_chat/qwen2.5-coder:14b",
+                                                         "api_base": "http://gpu.example.com:11434", **b}, headers=adm())
+    assert c.post("/api/admin/models", json={"name": "x", "model": "y"}, headers=h(k["alice"])).status_code in (401, 403)
+    assert add(name="bad name").status_code == 400 and add(api_base="gpu:11434").status_code == 400
+    assert add(name="local/small").status_code == 409  # already there
+    gw.fail_chat.add("local/coder")
+    r = add()
+    assert r.status_code == 502 and "OLLAMA_HOST" in r.json()["detail"]
+    assert "local/coder" not in {d["name"] for d in gw.deps}  # an unreachable model isn't kept
+    gw.fail_chat.clear()
+    assert add().status_code == 200
+    models = {m["name"]: m for m in c.get("/api/admin/models", headers=adm()).json()}
+    assert models["local/coder"]["stored"] and not models["local/small"]["stored"]
+    assert c.post("/api/admin/models/test", json={"name": "local/coder"}, headers=adm()).json()["ok"]
+    # config-file models are changed in config.yaml, not here
+    assert c.post("/api/admin/models/delete", json={"name": "local/small"}, headers=adm()).status_code == 400
+    c.post("/api/admin/agents", json={"name": "coder", "model": "local/coder"}, headers=adm())
+    r = c.post("/api/admin/models/rename", json={"name": "local/coder", "to": "local/code"}, headers=adm())
+    assert r.status_code == 200 and r.json()["agents_moved"] == ["coder"]
+    assert {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}["coder"]["model"] == "local/code"
+    assert c.post("/api/admin/models/delete", json={"name": "local/code"}, headers=adm()).status_code == 409  # in use
+    r = c.post("/api/admin/models/delete", json={"name": "local/code", "force": True}, headers=adm())
+    assert r.status_code == 200 and r.json()["used_by"] == ["coder"] and "local/code" not in {d["name"] for d in gw.deps}
+    # the summarizer's model is set in .env: renaming it here would break it
+    gw.deps.append({"name": "local/small", "id": "db9", "api_base": "", "model": "x", "stored": True})
+    assert c.post("/api/admin/models/rename", json={"name": "local/small", "to": "local/s"}, headers=adm()).status_code == 409
+
+
+def test_adding_models_without_gateway_database_says_how(env):
+    c, k, app, llm = env
+    GatewayModels(llm, db=False)
+    r = c.post("/api/admin/models", json={"name": "local/coder", "model": "ollama_chat/x"}, headers=adm())
+    assert r.status_code == 502 and "STORE_MODEL_IN_DB" in r.json()["detail"]
+
+
+def test_llm_maps_no_database_error():
+    import httpx
+    from bunch.llm import LLM, LLMError, NO_DB
+    llm = LLM("http://gw", "k")
+    orig = httpx.AsyncClient
+
+    def client(**kw):
+        return orig(transport=httpx.MockTransport(lambda req: httpx.Response(
+            500, json={"error": {"message": "No DB Connected. Set STORE_MODEL_IN_DB=True"}})), **kw)
+    httpx.AsyncClient = client
+    try:
+        with pytest.raises(LLMError) as e:
+            asyncio.run(llm.add_model("local/x", "ollama_chat/x", "http://h:11434"))
+    finally:
+        httpx.AsyncClient = orig
+    assert str(e.value) == NO_DB
+
+
+def test_machine_shares_ollama_models_and_spots_gone_ones(env):
+    c, k, app, llm = env
+    gw = GatewayModels(llm)
+    key = _machine(c)
+    hello = lambda o: c.post("/api/v1/machine/hello", json={"hostname": "workstation", "addresses": ["192.0.2.7", "workstation"],
+                                                            "clis": CLIS, "ollama": o}, headers=h(key))
+    m = c.get("/api/admin/machines", headers=adm()).json()[0]
+    assert m["ollama"] is None  # not shared unless the machine opts in
+    hello({"port": 11434, "models": ["qwen2.5:3b", "llama3.1:8b"]})
+    m = c.get("/api/admin/machines", headers=adm()).json()[0]
+    assert m["ollama"] == {"url": "http://workstation:11434", "models": ["llama3.1:8b", "qwen2.5:3b"]}
+    assert c.get("/api/admin/machines", headers=h(k["alice"])).status_code in (401, 403) or \
+        "ollama" not in c.get("/api/admin/machines", headers=h(k["alice"])).json()[0]
+    gw.deps.append({"name": "local/ws-llama", "id": "db1", "api_base": "http://workstation:11434",
+                    "model": "ollama_chat/llama3.1:8b", "stored": True})
+    gone = lambda: {x["name"]: x["gone"] for x in c.get("/api/admin/models", headers=adm()).json()}["local/ws-llama"]
+    assert gone() is False
+    hello({"port": 11434, "models": ["qwen2.5:3b"]})  # ollama rm llama3.1:8b on that machine
+    assert gone() is True
+
+
+def test_viewer_sees_power_the_machine_actually_allows(env):
+    c, k, app, llm = env
+    _machine(c)  # max_power read, dirs /srv/app
+    _on(c, "alice", power="full", dir="/srv/app")
+    _on(c, "bob", power="read", dir="/srv/other")
+    _on(c, "carol", power="read", dir="/srv/app/sub")
+    agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
+    assert agents["alice"]["runs_as"] == "read" and agents["bob"]["runs_as"] == "answer"
+    assert agents["carol"]["runs_as"] == "read"
+
+
+def test_worker_flags_pictures_it_never_made():
+    w = _load_worker()
+    assert w.claims_picture("Created a sleepy watercolor fox. 🦊")
+    assert w.claims_picture("I've generated the image for you.")
+    assert w.claims_picture("Saved it as fox.png")
+    assert not w.claims_picture("I can't create images in this run.")
+    assert not w.claims_picture("Here is how to resize an image with PIL.")
+    note = w.no_picture_note("workstation", "answer", max_power="answer", dirs=[])
+    assert "ran this as answer" in note and "WORKER_MAX_POWER=full" in note
+    assert "WORKER_MAX_POWER" not in w.no_picture_note("ws", "read", max_power="full", dirs=["/srv"])
+    assert "nothing was saved" in w.no_picture_note("ws", "full")
+    assert ".svg" in w.IMAGE_TYPES
+    assert "mcp" in w.empty_hint("agy", "answer")
+
+
+def test_worker_reads_ollama_tags(tmp_path):
+    import http.server
+    import json
+    import threading
+    w = _load_worker()
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps({"models": [{"name": "qwen2.5:3b"}, {"model": "llama3.1:8b"}]}).encode()
+            self.send_response(200 if self.path == "/api/tags" else 404)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        assert w.ollama_models(f"http://127.0.0.1:{port}") == {"port": port, "models": ["llama3.1:8b", "qwen2.5:3b"]}
+    finally:
+        srv.shutdown()
+    assert w.ollama_models("http://127.0.0.1:9") is None  # nothing listening

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import posixpath
 import re
 import time
 
@@ -350,6 +351,24 @@ class Hub:
         if not cfg or not cfg.get("machine"):
             return {"mode": "manual"}
         return {**cfg, "system": row["system"] or ""}  # persona, shared with hub agents
+
+    def runs_as(self, row) -> str | None:
+        """The power a machine agent actually gets: its setting, capped by the machine's WORKER_MAX_POWER and
+        WORKER_DIRS (as clients/worker.py's effective_power does). None when it isn't on a machine."""
+        cfg = self.worker_config(row)
+        m = self.store.machine(cfg.get("machine") or "") if cfg.get("mode") == "worker" or cfg.get("machine") else None
+        if not m:
+            return None
+        want = cfg.get("power") if cfg.get("power") in WORKER_POWERS else "answer"
+        cap = m["max_power"] if m["max_power"] in WORKER_POWERS else "answer"
+        power = min(want, cap, key=WORKER_POWERS.index)
+        d = posixpath.normpath(cfg.get("dir") or "")
+        dirs = json.loads(m["dirs"] or "[]")
+        if power != "answer" and d.startswith("/") and not any(d == a or d.startswith(a.rstrip("/") + "/") for a in dirs):
+            power = "answer"  # folder not allowed there (a ~/ path is only known on the machine: trust it)
+        if power != "answer" and not dirs:
+            power = "answer"
+        return power
 
     def machine_agents(self, machine: str) -> list:
         return [a for a in self.store.agents()

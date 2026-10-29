@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS machines(
   addresses TEXT NOT NULL DEFAULT '[]',     -- JSON list: IPs / names it's reachable as (to spot gateway models on it)
   clis TEXT NOT NULL DEFAULT '[]',          -- JSON list: [{cli, version, models}]
   max_power TEXT NOT NULL DEFAULT 'answer',
-  dirs TEXT NOT NULL DEFAULT '[]'
+  dirs TEXT NOT NULL DEFAULT '[]',
+  ollama TEXT                               -- JSON {port, models}: Ollama models it shares (WORKER_SHARE_OLLAMA)
 );
 CREATE TABLE IF NOT EXISTS files(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,6 +102,9 @@ AGENT_COLUMNS = {
     "worker": "TEXT",
     "status": "TEXT",
     "status_until": "REAL",
+}
+MACHINE_COLUMNS = {
+    "ollama": "TEXT",
 }
 USAGE_COLUMNS = {
     "sub_tokens": "INTEGER NOT NULL DEFAULT 0",
@@ -141,6 +145,10 @@ class Store:
             for col, decl in AGENT_COLUMNS.items():
                 if col not in have:
                     self.db.execute(f"ALTER TABLE agents ADD COLUMN {col} {decl}")
+            have = {r["name"] for r in self.db.execute("PRAGMA table_info(machines)")}
+            for col, decl in MACHINE_COLUMNS.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE machines ADD COLUMN {col} {decl}")
             have = {r["name"] for r in self.db.execute("PRAGMA table_info(usage)")}
             for col, decl in USAGE_COLUMNS.items():
                 if col not in have:
@@ -334,9 +342,10 @@ class Store:
         return row
 
     def set_machine_report(self, name: str, hostname: str, addresses: list, clis: list,
-                           max_power: str, dirs: list) -> None:
-        self.x("UPDATE machines SET hostname=?, addresses=?, clis=?, max_power=?, dirs=? WHERE name=?",
-               (hostname, json.dumps(addresses), json.dumps(clis), max_power, json.dumps(dirs), name))
+                           max_power: str, dirs: list, ollama: dict | None = None) -> None:
+        self.x("UPDATE machines SET hostname=?, addresses=?, clis=?, max_power=?, dirs=?, ollama=? WHERE name=?",
+               (hostname, json.dumps(addresses), json.dumps(clis), max_power, json.dumps(dirs),
+                json.dumps(ollama) if ollama else None, name))
 
     def rotate_machine_key(self, name: str) -> str:
         key = "bunchm_" + secrets.token_urlsafe(24)

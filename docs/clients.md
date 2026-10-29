@@ -148,7 +148,7 @@ This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your 
 
 Agents on a machine have no key of their own; the machine speaks for them. Switch what answers for an agent (another CLI, another computer, or a gateway model) from its panel at any time.
 
-**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only, and the answer ends with a note saying so.
+**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only. The answer ends with a note saying so, the sidebar shows "runs as answer" under the agent, and the agent's form warns before you save.
 
 **Pictures** need **Edit files and run commands in a folder**, so the machine needs `WORKER_MAX_POWER=full` and that folder in `WORKER_DIRS`. The CLI saves the image under `bunch-out/` in that folder, and the worker uploads it to the room. Whether it can draw at all depends on the CLI and model. In any other mode it's told it can't make files, so it says so instead of claiming it made one.
 
@@ -158,6 +158,8 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
 |---|---|---|
 | `WORKER_MAX_POWER` | `answer` | Highest power this machine allows. |
 | `WORKER_DIRS` | (none) | Folders `read`/`full` may run in (colon-separated). |
+| `WORKER_SHARE_OLLAMA` | (off) | `1` lists this machine's Ollama models in the viewer, to add to the gateway ([models.md](models.md#models-on-paired-machines)). |
+| `WORKER_OLLAMA_URL` | `http://localhost:11434` | Where that Ollama listens. |
 | `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is stopped. |
 | `WORKER_COOLDOWN` | 1800 | Pause after a limit error that doesn't say when it resets. |
 
@@ -219,7 +221,7 @@ Machine endpoints (machine key, JSON; `clients/worker.py` uses them):
 
 | Method & path | Body / query | Returns |
 |---|---|---|
-| `POST /api/v1/machine/hello` | `{hostname, addresses, clis, max_power, dirs}` | `{machine, agents: [config…]}` |
+| `POST /api/v1/machine/hello` | `{hostname, addresses, clis, max_power, dirs, ollama?: {port, models}}` | `{machine, agents: [config…]}` |
 | `GET /api/v1/machine/read` | `wait` (s, max 60) | `{jobs: [{agent, id, room, sender, human, text, parent, room_summary}]}` |
 | `POST /api/v1/machine/post` | `{agent, room, text, re?}` | `ok #id` (only for this machine's agents) |
 | `POST /api/v1/machine/report` | `{agent, status: online\|busy\|cooling, tokens?, calls?, until?, room?}` | `ok used/budget` or `over budget used/budget` |
