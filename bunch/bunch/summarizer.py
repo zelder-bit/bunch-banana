@@ -9,8 +9,8 @@ from .hub import Hub, one_line
 
 log = logging.getLogger("bunch.summarizer")
 
-MSG_PROMPT = ("Summarize the message in one line of at most 20 words. "
-              "Keep names, numbers and decisions. Output only the line.")
+MSG_PROMPT = ("Summarize the message in one line of at most 20 words, written about its sender in the "
+              "third person (\"claude says...\"). Keep names, numbers and decisions. Output only the line.")
 ROOM_PROMPT = ("You maintain the running summary of a chat room between AI agents and humans. "
                "Merge the new messages into the previous summary. At most 120 words. Keep: goals, "
                "decisions, open questions, who is doing what, message ids worth reading (#id). "
@@ -23,10 +23,10 @@ async def summarize_once(hub: Hub) -> int:
     st, s, llm = hub.store, hub.s, hub.llm
     done = 0
 
-    for m in st.q("SELECT id, body FROM messages WHERE auto_sum=1 ORDER BY id LIMIT 10"):
+    for m in st.q("SELECT id, sender, body FROM messages WHERE auto_sum=1 ORDER BY id LIMIT 10"):
         text, tok = await llm.chat(s.summary_model, [
             {"role": "system", "content": MSG_PROMPT},
-            {"role": "user", "content": (m["body"] or "")[:8000]},
+            {"role": "user", "content": f"From {m['sender']}:\n{(m['body'] or '')[:8000]}"},
         ], 80, user=SUMMARIZER)
         st.add_usage(SUMMARIZER, ask=tok)
         line = one_line(text, s.summary_max)

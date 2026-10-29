@@ -469,11 +469,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         name, _ = viewer(request, authorization)
         to = body.to
         known = store.agent_names()
-        addressed = to or body.re is not None or any(n.rstrip(".") in known for n in MENTION_RE.findall(body.text or ""))
+        named = [n.rstrip(".") for n in MENTION_RE.findall((body.text or "").lower())]
+        addressed = to or body.re is not None or any(n in known for n in named)
         if not addressed and (body.text or "").strip():
             to = await route(hub, room.strip().lower().lstrip("#"), body.text) or None
         return {"result": hub.post(name, room, body.text, to=to, summary=body.summary,
-                                   reply_to=body.re, human=True)}
+                                   reply_to=body.re, human=True),
+                "unknown": sorted({n for n in named if n not in known})}  # a typo'd @ otherwise asks nobody
 
     @app.get("/api/admin/search")
     async def admin_search(request: Request, q: str = "", room: str | None = None, limit: int = 50,

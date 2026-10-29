@@ -930,3 +930,106 @@ def test_backup_copies_attachments(tmp_path):
     fid = st.add_file("r", "a.png", "image/png", PNG, "alice")
     st.backup(str(tmp_path / "bk.db"))
     assert (tmp_path / "bk.db.files" / str(fid)).read_bytes() == PNG
+
+
+# --------------------------------------------------- findings from the 2026-10-28 user test
+def test_mentions_match_whole_names_only():
+    from bunch.hub import mentions
+    w = _load_worker()
+    for check in (mentions, w.mentions):
+        assert check("@gemini, try again", "gemini") and check("ask @gemini.", "gemini")
+        assert not check("@gemini-local tell them", "gemini") and not check("me@gemini", "gemini")
+
+
+def test_worker_never_promises_pictures_it_cannot_make():
+    import json
+    w = _load_worker()
+    assert "can't create files" in w.picture_hint("answer", "") and "never claim" in w.picture_hint("read", "/srv/x")
+    assert "bunch-out" in w.picture_hint("full", "/srv/x")
+    # agy "succeeds" with nothing to say when a tool it reached for was refused: say which.
+    out = json.dumps({"status": "SUCCESS", "response": "", "usage": {"total_tokens": 15596},
+                      "denied_actions": [{"action": "mcp", "display_name": "CallMcpTool"}]})
+    text, tokens, err = w.parse_output("agy", out, "jetski: no output produced", 0)
+    assert text == "" and tokens == 15596 and "CallMcpTool" in err
+    assert w.parse_output("agy", json.dumps({"status": "SUCCESS", "response": ""}), "", 0)[2] == "(empty answer)"
+
+
+def test_worker_rechecks_agents_before_dropping_a_job(monkeypatch):
+    w = _load_worker()
+    worker, posted, hellos = w.Worker(), [], []
+    monkeypatch.setattr(worker, "hello", lambda force=False: hellos.append(force))
+    monkeypatch.setattr(worker, "reply", lambda job, text: posted.append(text))
+    worker.machine = "beep-boop"
+    job = {"agent": "gemini", "id": 18, "room": "r", "sender": "citrus", "human": True,
+           "created": worker.started, "text": "@gemini hi"}
+    worker.handle(job)
+    assert hellos == [True] and posted == ["(gemini isn't set up on beep-boop yet; not answered)"]
+    # Another agent's @gemini-local is not for gemini: no run, no reply.
+    worker.handle({**job, "human": False, "sender": "gemini-local", "text": "@gemini-local again"})
+    assert hellos == [True] and len(posted) == 1
+
+
+def test_worker_says_when_power_was_lowered(monkeypatch):
+    import json
+    import subprocess
+    w = _load_worker()
+    worker, posted = w.Worker(), []
+    worker.machine, worker.agents = "beep-boop", {"codex": {"cli": "claude", "power": "full", "dir": "/srv/x"}}
+    monkeypatch.setattr(w, "report", lambda *a, **kw: "ok")
+    monkeypatch.setattr(worker, "reply", lambda job, text: posted.append(text))
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"result": "no can do", "usage": {}}), "")
+    monkeypatch.setattr(w.subprocess, "run", fake_run)
+    worker.handle({"agent": "codex", "id": 37, "room": "r", "sender": "citrus", "human": True,
+                   "created": worker.started, "text": "@codex make a picture"})
+    system = seen["argv"][seen["argv"].index("--system-prompt") + 1]
+    assert "can't create files" in system and "plain text" in system
+    assert posted[0].startswith("no can do") and "allows only answer, not full" in posted[0]
+
+
+def test_router_sends_short_follow_ups_to_the_last_agent(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "local/small"})
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@bob make it"}, headers=adm())
+    tool(c, k["bob"], "post", room="r", text="(agy failed: (empty answer))")
+
+    async def picks_two(*a, **kw):
+        raise AssertionError("a follow-up shouldn't need the router model")
+    llm.chat = picks_two
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "Try again"}, headers=adm())
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == ["bob"]
+
+
+def test_auto_agent_drops_copied_error_notes(env):
+    from bunch.autoreply import FILLER_RE, answer
+    c, k, app, _ = env
+    hub = app.state.hub
+    assert FILLER_RE.match("(empty answer)") and FILLER_RE.match("(agy failed: (empty answer))")
+    assert not FILLER_RE.match("(I think so)")
+
+    async def parrot(*a, raw=False, **kw):
+        return "(empty answer)"
+    hub.ask = parrot
+    mid = int(hub.post("human", "r", "@bob try again", human=True).split("#")[1])
+    bob = dict(hub.store.agent("bob"), model="m", system="")
+    asyncio.run(answer(hub, bob, hub.store.message(mid)))
+    assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
+
+
+def test_viewer_post_flags_unknown_mentions(env):
+    c, k, app, llm = env
+    r = c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@claude hello, cc @bob"}, headers=adm())
+    assert r.json()["unknown"] == ["claude"]
+
+
+def test_message_summary_knows_who_spoke(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    tool(c, k["bob"], "post", room="r", text="I can see #general. " + "x" * 400)
+    asyncio.run(summarize_once(hub))
+    msg = next(m for m in llm.calls if "20 words" in m[1][0]["content"])
+    assert "third person" in msg[1][0]["content"] and msg[1][1]["content"].startswith("From bob:")

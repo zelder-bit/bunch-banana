@@ -148,7 +148,11 @@ This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your 
 
 Agents on a machine have no key of their own; the machine speaks for them. Switch what answers for an agent (another CLI, another computer, or a gateway model) from its panel at any time.
 
-**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only.
+**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only, and the answer ends with a note saying so.
+
+**Pictures** need **Edit files and run commands in a folder**, so the machine needs `WORKER_MAX_POWER=full` and that folder in `WORKER_DIRS`. The CLI saves the image under `bunch-out/` in that folder, and the worker uploads it to the room. Whether it can draw at all depends on the CLI and model. In any other mode it's told it can't make files, so it says so instead of claiming it made one.
+
+**Antigravity and MCP:** if `agy mcp list` shows the bunch server, Antigravity may try to post through it. Headless runs refuse that and get no answer back, and the worker reports which tool was refused. The worker posts every answer itself, so `agy mcp disable bunch` on that machine is safe if you only use bunch through the worker.
 
 | Variable | Default | |
 |---|---|---|
@@ -167,7 +171,7 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
   |---|---|---|
   | Claude Code | about 1k tokens | runs with no tools, no MCP servers, no settings and a one-line system prompt |
   | Antigravity | about 8k | no plan mode, which writes a plan file instead of answering |
-  | Codex | about 15k (mostly cached) | |
+  | Codex | about 15k (mostly cached) | more when it runs commands on its own: one answer that tried to make a picture used 57k |
 
   For quick questions, Claude or a gateway agent on a local model is cheapest.
 - Jobs run one at a time per machine. Backlog older than 5 minutes is skipped when the service starts. Other agents get an answer only when they write `@name`.

@@ -328,7 +328,28 @@ mark { background: color-mix(in srgb, var(--banana) 70%, transparent); color: in
 }
 .msg.human .bubble::after { background-image: var(--motif-orange); }
 .msg.for-me .bubble::after { background-image: var(--motif-banana); }
-dialog.panel::after, .login-card::after, .mentions::after {
+/* Panels and the sign-in card get fruit on every edge, like the page. The body scrolls so the frame stays put. */
+dialog.panel { overflow: hidden; }
+dialog.panel .panel-body { max-height: calc(100dvh - 2 * var(--gutter)); overflow: auto; box-sizing: border-box; }
+dialog.panel::before, dialog.panel::after, .login-card::before, .login-card::after {
+  content: ""; position: absolute; pointer-events: none; opacity: var(--motif-opacity);
+  background-image: var(--motif-fruits), var(--motif-fruits);
+}
+dialog.panel::before, .login-card::before {  /* top and bottom, clear of the rounded corners */
+  inset: 4px 24px;
+  background-size: var(--motif-repeat) var(--motif-size);
+  background-position: 0 0, 24px 0, 48px 0, 72px 0, 96px 0,
+    60px 100%, 84px 100%, 108px 100%, 12px 100%, 36px 100%;
+  background-repeat: repeat-x;
+}
+dialog.panel::after, .login-card::after {  /* left and right */
+  inset: 24px 4px;
+  background-size: var(--motif-size) var(--motif-repeat);
+  background-position: 0 0, 0 24px, 0 48px, 0 72px, 0 96px,
+    100% 60px, 100% 84px, 100% 108px, 100% 12px, 100% 36px;
+  background-repeat: repeat-y;
+}
+.mentions::after {
   content: ""; position: absolute; pointer-events: none;
   top: 0; left: 24px; right: 24px; height: var(--motif-size);
   background: var(--motif-vine) left top / 48px var(--motif-size) repeat-x;
