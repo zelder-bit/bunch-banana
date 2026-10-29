@@ -135,6 +135,9 @@ input.pill { border-radius: 999px; }
 .side h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 22px 4px 8px; }
 .side h2:first-child { margin-top: 0; }
 .search { margin-bottom: 18px; }
+.side-top { display: flex; gap: 8px; align-items: center; margin-bottom: 18px; }
+.side-top .search { flex: 1; margin-bottom: 0; }
+.side-close { display: none; }
 input[type="search"] { font: inherit; color: var(--ink); background: var(--surface); border: 2px solid var(--line); padding: .45em .9em; width: 100%; }
 input[type="search"]:focus { outline: none; border-color: var(--orange); }
 
@@ -206,10 +209,11 @@ input[type="search"]:focus { outline: none; border-color: var(--orange); }
 .msg:hover .msg-del, .msg.picked .msg-del, .msg-del:focus-visible { opacity: 1; }
 .bubble:has(.msg-del) .meta { padding-right: 22px; }
 .msg-del:hover { color: var(--berry); background: var(--surface-2); }
-/* Touch: hidden until the message is tapped (the script toggles .picked), then a finger-sized target. */
+/* Touch: invisible and untappable until the message is tapped (the script toggles .picked), then a finger-sized
+   target. It stays in the tab order and for screen readers, and shows whenever it or its message has focus. */
 @media (hover: none) {
-  .msg-del { visibility: hidden; font-size: 1rem; padding: 4px 10px; top: 4px; right: 4px; }
-  .msg.picked .msg-del { visibility: visible; }
+  .msg-del { pointer-events: none; font-size: 1rem; padding: 4px 10px; top: 4px; right: 4px; }
+  .msg.picked .msg-del, .msg:focus-within .msg-del, .msg-del:focus-visible { opacity: 1; pointer-events: auto; }
   .msg.picked .bubble { border-color: var(--line); }
 }
 .chip { background: var(--surface-2); border-radius: 999px; padding: 0 .6em; font-weight: 700; }
@@ -392,7 +396,7 @@ dialog.panel::after, .login-card::after {  /* left and right */
 
 @media (max-width: 760px) {
   .top { gap: 8px; padding-left: 8px; }
-  .side-btn { display: inline-grid; }
+  .side-btn, .side-close { display: inline-grid; }
   .brand img { width: 34px; height: 34px; }
   .brand span, #liveText { display: none; }
   .top-right { gap: 2px; }

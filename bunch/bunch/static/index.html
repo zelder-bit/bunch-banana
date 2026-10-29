@@ -52,9 +52,12 @@
     <div class="body">
       <div class="scrim" id="scrim" hidden></div>
       <aside class="side" id="side" aria-label="Rooms and agents">
-        <form class="search" id="searchForm" role="search">
-          <input type="search" class="pill" id="searchIn" placeholder="Search messages" aria-label="Search messages" minlength="2">
-        </form>
+        <div class="side-top">
+          <form class="search" id="searchForm" role="search">
+            <input type="search" class="pill" id="searchIn" placeholder="Search messages" aria-label="Search messages" minlength="2">
+          </form>
+          <button class="icon-btn side-close" id="sideClose" type="button" aria-label="Close rooms and agents">✕</button>
+        </div>
         <h2>Rooms</h2>
         <nav id="rooms" aria-label="Rooms"></nav>
         <form class="add" id="newRoomForm">
@@ -98,7 +101,7 @@
 
       <section class="chat">
         <div class="room-head">
-          <h1><span id="roomName">bunch</span><span id="roomCount" class="muted"></span>
+          <h1><span id="roomName" tabindex="-1">bunch</span><span id="roomCount" class="muted"></span>
             <button class="btn small ghost room-bot" id="botMode" type="button" aria-pressed="false" hidden
               title="Agents hand work to each other without waiting for you, until one posts [done]">Bot mode: off</button>
             <button class="icon-btn room-more" id="roomMore" type="button" popovertarget="roomMenu" aria-label="Room options" title="Room options" hidden>⋯</button></h1>
@@ -189,19 +192,28 @@
 
   // --- phones: the sidebar is a drawer behind the ☰ button, so the room gets the whole screen ----
   const narrow = matchMedia("(max-width: 760px)");
-  function setSide(open) {
+  // Closing it moves focus out first (an inert drawer can't hold it): to `focusTo`, or else back to ☰.
+  function setSide(open, focusTo) {
     open = open && narrow.matches;
+    const side = $("side"), wasOpen = document.body.classList.contains("side-open");
+    // A tap on the scrim leaves focus on <body>: count that as being in the drawer too.
+    const hadFocus = side.contains(document.activeElement) || (wasOpen && document.activeElement === document.body);
     document.body.classList.toggle("side-open", open);
     $("sideBtn").setAttribute("aria-expanded", String(open));
     $("scrim").hidden = !open;
-    $("side").inert = narrow.matches && !open;      // a closed drawer is out of reach for Tab and screen readers
-    if (open) ($("side").querySelector(".room.active") || $("searchIn")).focus();
+    // An open drawer acts like a dialog: the header (☰ included, it's under the drawer) and the room are out
+    // of reach behind it. Cleared before focus moves back, so ☰ can take it.
+    document.querySelector(".top").inert = open;
+    document.querySelector(".chat").inert = open;
+    if (narrow.matches && !open && hadFocus) (focusTo || $("sideBtn")).focus();
+    side.inert = narrow.matches && !open;           // a closed drawer is out of reach for Tab and screen readers
+    if (open) (side.querySelector(".room.active") || $("searchIn")).focus();
   }
   $("sideBtn").onclick = () => setSide(!document.body.classList.contains("side-open"));
-  $("scrim").onclick = () => setSide(false);
+  $("scrim").onclick = $("sideClose").onclick = () => setSide(false);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && document.body.classList.contains("side-open") && !document.querySelector("dialog[open]")) {
-      setSide(false); $("sideBtn").focus();
+      setSide(false);
     }
   });
   function fitComposer() {
@@ -210,21 +222,41 @@
   narrow.addEventListener("change", () => { setSide(false); fitComposer(); });
   setSide(false); fitComposer();
 
-  // The room menu (⋯) opens under its button.
-  $("roomMenu").addEventListener("beforetoggle", (e) => {
-    if (e.newState !== "open") return;
+  // The room menu (⋯) opens under its button. It's placed once on opening, so a resize closes it.
+  const placeMenu = () => {
     const r = $("roomMore").getBoundingClientRect(), menu = $("roomMenu");
     menu.style.top = r.bottom + 6 + "px";
     menu.style.right = Math.max(8, innerWidth - r.right) + "px";
-  });
+  };
+  const hasPopover = Object.prototype.hasOwnProperty.call(HTMLElement.prototype, "popover");
+  function closeRoomMenu() {
+    if (hasPopover) { try { $("roomMenu").hidePopover(); } catch {} }
+    else { $("roomMenu").hidden = true; $("roomMore").setAttribute("aria-expanded", "false"); }
+  }
+  if (hasPopover) {
+    $("roomMenu").addEventListener("beforetoggle", (e) => { if (e.newState === "open") placeMenu(); });
+  } else {  // older browsers ignore popover="": show and hide the menu by hand
+    $("roomMenu").hidden = true; $("roomMore").setAttribute("aria-expanded", "false");
+    $("roomMore").onclick = () => {
+      const open = $("roomMenu").hidden;
+      if (open) placeMenu();
+      $("roomMenu").hidden = !open; $("roomMore").setAttribute("aria-expanded", String(open));
+    };
+    document.addEventListener("click", (e) => { if (!e.target.closest("#roomMore, #roomMenu")) closeRoomMenu(); });
+  }
+  addEventListener("resize", closeRoomMenu);
 
   // --- small helpers -------------------------------------------------------------
+  // An open dialog sits in the top layer, above any z-index. The toast box is a popover, so it goes there
+  // too; showing it again puts it above whatever opened since.
+  function raiseToasts() {
+    const box = $("toasts");
+    if (box.showPopover && box.children.length) { try { if (box.matches(":popover-open")) box.hidePopover(); box.showPopover(); } catch {} }
+  }
   function toast(text, kind = "") {
     const t = h("div", { class: "toast " + kind }, text), box = $("toasts");
     box.append(t);
-    // An open dialog sits in the top layer, above any z-index. The toast box is a popover, so it goes there
-    // too; showing it again puts it above whatever opened since.
-    if (box.showPopover) { try { if (box.matches(":popover-open")) box.hidePopover(); box.showPopover(); } catch {} }
+    raiseToasts();
     setTimeout(() => t.classList.add("out"), 3800);
     setTimeout(() => { t.remove(); if (!box.children.length && box.hidePopover) try { box.hidePopover(); } catch {} }, 4300);
   }
@@ -323,10 +355,17 @@
     const el = $("summary"), btn = $("summaryMore");
     if (el.textContent !== text) el.textContent = text;
     el.hidden = !text;
-    const open = btn.getAttribute("aria-expanded") === "true";
-    el.classList.toggle("open", open);
-    btn.hidden = !text || (!open && el.scrollHeight <= el.clientHeight + 1);
+    el.classList.toggle("open", btn.getAttribute("aria-expanded") === "true");
+    fitSummaryMore();
   }
+  // "more" only while the text is cut off. Re-checked when the summary's box changes size (resize, rotation,
+  // crossing the phone breakpoint); this only shows or hides the button, so it can't feed back into the size.
+  function fitSummaryMore() {
+    const el = $("summary"), btn = $("summaryMore");
+    const open = btn.getAttribute("aria-expanded") === "true";
+    btn.hidden = !el.textContent || (!open && el.scrollHeight <= el.clientHeight + 1);
+  }
+  if ("ResizeObserver" in window) new ResizeObserver(fitSummaryMore).observe($("summary"));
   $("summaryMore").onclick = () => {
     const btn = $("summaryMore"), open = btn.getAttribute("aria-expanded") !== "true";
     btn.setAttribute("aria-expanded", String(open)); btn.textContent = open ? "less" : "more";
@@ -444,6 +483,7 @@
         h("button", { type: "button", class: "icon-btn", "aria-label": "Close", onclick: () => $("panel").close() }, "✕")),
       ...kids));
     $("panel").showModal();
+    raiseToasts();   // a toast already showing stays above the new dialog
   }
   async function act(fn, okText) {
     try { await fn(); if (okText) toast(okText, "good"); return true; }
@@ -832,10 +872,10 @@
   }
 
   // Touch screens have no hover: tap a message to show its delete button, tap elsewhere to hide it again.
-  $("feed").addEventListener("click", (e) => {
-    if (!me.admin || matchMedia("(hover: hover)").matches) return;
-    if (e.target.closest("a, button, summary, pre, input, textarea")) return;
-    const msg = e.target.closest(".msg");
+  document.addEventListener("click", (e) => {
+    if (!me?.admin || matchMedia("(hover: hover)").matches) return;
+    const msg = e.target.closest("#feed .msg");
+    if (msg && e.target.closest("a, button, summary, pre, input, textarea")) return;  // using something in the message
     $("feed").querySelectorAll(".msg.picked").forEach(x => { if (x !== msg) x.classList.remove("picked"); });
     msg?.classList.toggle("picked");
   });
@@ -868,7 +908,7 @@
   async function openRoom(name) {
     if (name !== current) resetSummary();
     current = name; store.set("bunch.room", name); unread[name] = 0; mentions[name] = 0;
-    setSide(false);
+    setSide(false, $("roomName"));   // picked from the drawer: focus lands on the room, not the keyboard
     renderTyping();
     $("roomName").textContent = "# " + name;
     const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE);
@@ -898,7 +938,7 @@
                   on ? `Bot mode on in #${room}` : `Bot mode off in #${room}`)) loadRooms();
   };
   $("deleteRoom").onclick = async () => {
-    try { $("roomMenu").hidePopover(); } catch {}
+    closeRoomMenu();
     const room = current, n = rooms.find(r => r.name === room)?.count ?? 0;
     if (!room || !confirm(`Delete #${room} and all ${n.toLocaleString()} message${n === 1 ? "" : "s"} in it? This can't be undone.`)) return;
     await act(() => api("/api/admin/rooms/" + enc(room), { method: "DELETE" }), `#${room} deleted`);

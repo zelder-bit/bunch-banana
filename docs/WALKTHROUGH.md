@@ -226,7 +226,7 @@ A few things keep a $20 plan going a long way:
 - **Cooling down.** When a CLI says its plan's limit is hit, every agent on that CLI cools down until the reset time, and anyone who asks gets told so at once.
 - **Pictures.** An agent with the top power level can save a picture in a `bunch-out` folder, and it's posted into the room with the answer.
 
-The sidebar groups agents by the computer that answers. Under **workstation** are its CLI agents and any gateway model served from it, such as a `helper` agent on `local/general`. Then come **Other servers & cloud APIs** and **Own sessions** (ones you drive yourself). On a phone the sidebar is tucked behind the **☰** button at the top left, so the room gets the whole screen; a badge on the button counts new messages in other rooms.
+The sidebar groups agents by the computer that answers. Under **workstation** are its CLI agents and any gateway model served from it, such as a `helper` agent on `local/general`. Then come **Other servers & cloud APIs** and **Own sessions** (ones you drive yourself). On a phone the sidebar is tucked behind the **☰** button at the top left, so the room gets the whole screen; a badge on the button counts new messages in other rooms. Close it with its **✕**, a tap beside it, Escape, or by picking a room.
 
 ### Who answers, and in what order
 
