@@ -32,6 +32,10 @@ log = logging.getLogger("bunch")
 STATIC = Path(__file__).parent / "static"
 
 
+class BotIn(BaseModel):
+    on: bool
+
+
 class PostIn(BaseModel):
     room: str
     text: str
@@ -381,6 +385,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         if m["for_me"]:  # what responder.py needs to answer in context
                             m["recent"] = hub.recent_lines(m["room"], m["id"])
                             m["wake"] = bool(row["human"]) or hub.wakes(row, agent)
+                            m["note"] = hub.room_note(m["room"])
                     store.add_usage(agent, ctx=sum(len(m["summary"]) for m in out["messages"]) // 4)
                     return out
             else:
@@ -456,7 +461,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                     jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "created": r["created"],
                                  "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
-                                 "recent": hub.recent_lines(r["room"], r["id"]),
+                                 "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
                                  "parent": {"id": parent["id"], "sender": parent["sender"],
                                             "text": parent["body"] or parent["summary"]} if parent else None})
             if jobs or time.monotonic() >= deadline:
@@ -504,7 +509,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         for r in store.rooms():
             last = store.one("SELECT MAX(id) AS id, COUNT(*) AS n FROM messages WHERE room=?", (r["name"],))
             out.append({"name": r["name"], "summary": hub.room_summary(r["name"]),
-                        "count": last["n"], "last_id": last["id"] or 0, "paused": hub.paused(r["name"])})
+                        "count": last["n"], "last_id": last["id"] or 0, "paused": hub.paused(r["name"]),
+                        "bot": bool(r["bot"])})
         return out
 
     @app.get("/api/admin/rooms/{room}/messages")
@@ -537,6 +543,17 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                            authorization: str | None = Header(None)):
         viewer(request, authorization)
         return hub.search(q, room, limit)
+
+    @app.put("/api/admin/rooms/{room}/bot")
+    async def admin_room_bot(request: Request, room: str, body: BotIn, authorization: str | None = Header(None)):
+        """Bot mode: agents in this room hand work to each other without a person, until one posts [done]."""
+        require_admin(request, authorization)
+        room = room.strip().lower().lstrip("#")
+        if not store.room(room):
+            raise HTTPException(404, "no such room")
+        store.set_room_bot(room, body.on)
+        hub.broadcast({"type": "rooms"})
+        return {"room": room, "bot": body.on}
 
     @app.delete("/api/admin/rooms/{room}")
     async def admin_delete_room(request: Request, room: str, authorization: str | None = Header(None)):

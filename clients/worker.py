@@ -331,7 +331,8 @@ def empty_hint(cli, power):
 
 
 def build_prompt(job, limit):
-    parts = [f"Room #{job['room']} summary: {job.get('room_summary') or '(none)'}"]
+    parts = [job["note"]] if job.get("note") else []  # bot mode (older hubs don't send it)
+    parts.append(f"Room #{job['room']} summary: {job.get('room_summary') or '(none)'}")
     if job.get("recent"):  # older hubs don't send it
         parts.append(f"Recent messages:\n{job['recent']}")
     if job.get("parent"):

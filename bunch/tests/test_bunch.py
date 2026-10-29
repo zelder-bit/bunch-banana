@@ -491,6 +491,97 @@ def test_llm_retries_and_marks_cut_off_answers():
         httpx.AsyncClient = orig
 
 
+def _bot_room(c, room="b"):
+    c.post("/api/admin/rooms/" + room + "/messages", json={"room": room, "text": "kickoff"}, headers=adm())
+    assert c.put(f"/api/admin/rooms/{room}/bot", json={"on": True}, headers=adm()).status_code == 200
+
+
+def _say(hub, sender, text, room="b"):
+    mid = int(hub.post(sender, room, text, human=sender == "human").split("#")[1])
+    return hub.store.message(mid)
+
+
+def test_bot_mode_passes_one_baton_without_a_hop_limit(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _bot_room(c)
+    _say(hub, "human", "@alice plan a sticker launch")
+    m = _say(hub, "alice", "Drafted the budget.\n@bob, can you price the printer?\n@carol, could you check listings?")
+    assert hub.baton(m) == "bob" and hub.wakes(m, "bob") and not hub.wakes(m, "carol")  # one baton
+    m = _say(hub, "bob", "Printer is $300; check with @carol about listings.")
+    assert not hub.wakes(m, "carol")  # named in passing: nobody is asked, the run ends quietly
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "max_chain": 0})
+    steps = [("carol", "alice", "listing rules"), ("alice", "bob", "shipping costs"), ("bob", "carol", "tax setup"),
+             ("carol", "alice", "photo plan"), ("alice", "bob", "launch date")]
+    for who, nxt, what in steps:  # well past MAX_AGENT_HOPS, all different work
+        m = _say(hub, who, f"Done with {what} for the shop page.\n@{nxt}, can you take the next part?")
+        assert hub.wakes(m, nxt), what
+
+
+def test_bot_mode_stops_repeats_and_ping_pong(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _bot_room(c)
+    _say(hub, "alice", "Sticker plan: Cricut Maker 3, EcoTank printer, vinyl sheets.\n@bob, can you price it?")
+    m = _say(hub, "bob", "Sticker plan: Cricut Maker 3, EcoTank printer, vinyl sheets.\n@alice, can you price it?")
+    assert not hub.wakes(m, "alice")
+    note = c.get("/api/admin/rooms/b/messages", headers=adm()).json()[-1]
+    assert note["sender"] == "bunch" and f"#{m['id']} repeats" in note["summary"]
+    for i, (who, nxt) in enumerate([("alice", "bob"), ("bob", "alice")] * 3):
+        m = _say(hub, who, f"Step {i}: {['costs', 'tax', 'photos', 'listing', 'shipping', 'dates'][i]} sorted out.\n@{nxt}, can you go on?")
+    assert not hub.wakes(m, "alice") and "back and forth" in hub.stall(m)
+
+
+def test_bot_mode_lifts_the_chain_pause_and_ends_on_done(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _bot_room(c)
+    for i in range(8):  # max_chain is 6 in these tests
+        _say(hub, ["alice", "bob", "carol"][i % 3], f"part {i} of the plan with its own details number {i * 7}")
+    assert not hub.paused("b")
+    rooms = {r["name"]: r for r in c.get("/api/admin/rooms", headers=adm()).json()}
+    assert rooms["b"]["bot"] is True and rooms["b"]["paused"] is False
+    _say(hub, "carol", "All parts are in place.\n[done]")
+    assert not hub.bot("b") and hub.paused("b")
+    m = _say(hub, "human", "thanks")
+    m = _say(hub, "alice", "Anything else?\n@bob, can you double-check?")
+    assert hub.wakes(m, "bob") and hub.agent_hops(m) == 1  # back to the normal rules
+
+
+def test_bot_mode_switch_is_admin_only(env):
+    c, k, app, llm = env
+    c.post("/api/admin/rooms/b/messages", json={"room": "b", "text": "hi"}, headers=adm())
+    app.state.hub.store.create_user("pat", "password one")
+    c.post("/api/auth/login", json={"name": "pat", "password": "password one"})
+    assert c.put("/api/admin/rooms/b/bot", json={"on": True}).status_code == 403
+    assert c.put("/api/admin/rooms/nope/bot", json={"on": True}, headers=adm()).status_code == 404
+
+
+def test_bot_mode_runs_to_done_with_auto_agents(env):
+    import time
+    c, k, app, llm = env
+    hub = app.state.hub
+    for n in ("aa", "bb", "cc"):
+        c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
+    turns = []
+
+    async def chat(model, messages, max_tokens, user=None):
+        assert "Bot mode is on" in messages[0]["content"]
+        turns.append(user)
+        if len(turns) >= 7:
+            return f"Turn {len(turns)}: everything is checked.\n[done]", 10
+        nxt = {"aa": "bb", "bb": "cc", "cc": "aa"}[user]
+        work = ["budget", "printer", "vinyl", "listing", "photos", "shipping"][len(turns) - 1]
+        return f"Turn {len(turns)}: I worked out the {work}.\n@{nxt}, can you do the next part?", 10
+    llm.chat = chat
+    _bot_room(c)
+    c.post("/api/admin/rooms/b/messages", json={"room": "b", "text": "@aa plan my sticker shop"}, headers=adm())
+    deadline = time.time() + 15  # the app's own auto-reply loop runs the chain
+    while hub.bot("b") and time.time() < deadline:
+        time.sleep(0.05)
+    assert not hub.bot("b") and turns == ["aa", "bb", "cc", "aa", "bb", "cc", "aa"]
+
+
 def test_summarizer_prompt_names_no_agent():
     from bunch.summarizer import MSG_PROMPT
     assert "claude" not in MSG_PROMPT.lower()

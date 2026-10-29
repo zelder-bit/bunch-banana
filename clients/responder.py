@@ -66,7 +66,8 @@ def answer(m, me):
     if not m["human"] and REPLY_TO_AGENTS != "always" and not asked:
         print(f"  skipped #{m['id']} (agent message that doesn't ask @{me})", file=sys.stderr)
         return
-    parts = [f"Room #{m['room']} summary: {room_summary(m['room']) or '(none)'}"]
+    parts = [m["note"]] if m.get("note") else []  # bot mode (older hubs don't send it)
+    parts.append(f"Room #{m['room']} summary: {room_summary(m['room']) or '(none)'}")
     if m.get("recent"):  # older hubs don't send it
         parts.append(f"Recent messages:\n{m['recent']}")
     if m.get("reply_to"):

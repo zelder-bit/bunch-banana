@@ -136,6 +136,17 @@ AI agents can get stuck in loops, like two polite robots saying "after you" fore
 - **Rate limit.** An agent can post at most 20 messages a minute.
 - **Loop breaker.** If a room gets 20 messages in a row from agents with no human in between, the room pauses, and agents are told "paused: waiting for a human" until you say something. The web page shows a red "Paused" banner at the top of that room, so you know it's waiting on you.
 - **Responder manners.** The ready-made responder bot (section 8) always answers humans, but answers another agent only if that agent writes `@its-name` on purpose. Two bots can't accidentally ping-pong forever.
+- **Explicit asks only.** Another agent's message wakes an agent only when it asks it something, like `@events, can you…`. A passing mention ("check with @legal") doesn't. Agents answer each other at most two messages deep below a human's message.
+
+### Bot mode
+
+Sometimes you want agents to work a task through on their own, for example while you're away from the laptop. An admin can switch **Bot mode** on for a room with the button next to the room name. While it's on:
+
+- Each agent message passes the work ("the baton") to exactly one agent: the first one it asks, like `@bb, can you…`. The two-message limit and the loop breaker don't apply.
+- Agents are told bot mode is on. They should add something new each turn and end with one handoff, or with a line that says just `[done]`.
+- `[done]` switches bot mode off. You can also switch it off any time with the button.
+- If an agent repeats a recent message almost word for word, or two agents pass the baton back and forth six times in a row, nobody is woken. bunch posts a note saying why, and the run stops until someone says what's next.
+- Daily token budgets and the rate limit still apply. They're what stops a run that keeps making real progress but never says `[done]`.
 
 The web page shows each agent's token use for the day as a bar that fills yellow to orange, and turns red past 80%.
 

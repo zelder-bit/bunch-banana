@@ -23,6 +23,18 @@ DUPLICATE_WINDOW = 600  # the same text from the same human this soon after is a
 MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a human message
 TURN_WAIT = 180  # agents addressed together answer in turn; stop waiting on a slow one after this long
 
+# Bot mode (per room, admins switch it on): agents hand work to each other without a person, until one
+# posts [done]. One baton per message, and a repeat or a two-agent back-and-forth stops the run.
+HUB_SENDER = "bunch"  # the hub's own notes
+DONE_RE = re.compile(r"^\s*\[done\]\s*$", re.I | re.M)
+ECHO_SIMILARITY = 0.6  # word-trigram overlap with a recent message that counts as a repeat
+ECHO_LOOKBACK = 8
+PING_PONG = 6  # this many agent messages in a row from just two agents is a back-and-forth
+BOT_NOTE = ("Bot mode is on in this room: you and the other agents work on the person's goal without "
+            "waiting for them. Add something new each turn; don't restate what's in the recent messages. "
+            "End with exactly one handoff that starts a line, like '@name, can you <next step>', or, when "
+            "the goal is fully met, a line with just [done].")
+
 FILE_REF = re.compile(r"!\[([^\]]*)\]\(file:(\d+)\)")  # an attached file, see /api/v1/machine/file
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
 # "@events, can you…" / "- **@legal**: please…": mentions that open a line or sentence and then ask.
@@ -66,6 +78,21 @@ def addresses(text: str, name: str) -> bool:
     ("check with @legal about…"): only that wakes an agent when another agent writes it."""
     return any(name in (n.rstrip(".") for n in MENTION_RE.findall(g))
                for g in ADDRESS_RE.findall((text or "").lower()))
+
+
+_HANDOFF_LINE = re.compile(r"^[\s>*_#-]*(?:\**@[a-z0-9][a-z0-9_.-]*\**[\s,:]|\[done\]).*$", re.I | re.M)
+
+
+def _shingles(text: str) -> set:
+    """Word trigrams of text without its handoff lines ("@bb, can you…"), which every turn shares."""
+    words = re.findall(r"\w+", _HANDOFF_LINE.sub("", (text or "").lower()))
+    return {tuple(words[i:i + 3]) for i in range(len(words) - 2)} or {(w,) for w in words}
+
+
+def _similar(a: str, b: str) -> float:
+    """Word-trigram Jaccard similarity: 1.0 for the same text, near 0 for unrelated text."""
+    sa, sb = _shingles(a), _shingles(b)
+    return len(sa & sb) / len(sa | sb) if sa and sb else 0.0
 
 
 def _recips(m) -> list[str]:
@@ -164,6 +191,8 @@ class Hub:
         self._notify(mid)
         if recips:
             self._unavailable_notices(mid)
+        if not human and sender != HUB_SENDER and self.bot(room):
+            self._bot_turn(mid)
         return f"ok #{mid}"
 
     def _check_rate(self, sender: str) -> None:
@@ -175,9 +204,10 @@ class Hub:
             raise HubError("rate limit: too many posts this minute")
 
     def paused(self, room: str) -> bool:
-        """Loop breaker: after max_chain agent-only messages in a row, a human has to speak."""
+        """Loop breaker: after max_chain agent-only messages in a row, a human has to speak.
+        Not in bot mode, where the baton rules (see wakes) stop loops instead."""
         n = self.s.max_chain
-        if n <= 0:
+        if n <= 0 or self.bot(room):
             return False
         rows = self.store.q("SELECT human FROM messages WHERE room=? ORDER BY id DESC LIMIT ?", (room, n))
         return len(rows) >= n and not any(r["human"] for r in rows)
@@ -303,10 +333,62 @@ class Hub:
                 return p["id"]
         return None
 
+    # ------------------------------------------------------------- bot mode
+    def bot(self, room: str) -> bool:
+        r = self.store.room(room)
+        return bool(r and r["bot"])
+
+    def room_note(self, room: str) -> str:
+        """What every answer prompt in this room starts with ("" outside bot mode)."""
+        return BOT_NOTE if self.bot(room) else ""
+
+    def baton(self, m) -> str | None:
+        """The one agent a bot-mode message hands work to: the first one it explicitly asks."""
+        for group in ADDRESS_RE.findall((m["body"] or m["summary"] or "").lower()):
+            for n in MENTION_RE.findall(group):
+                n = n.rstrip(".")
+                if n != m["sender"] and n != HUB_SENDER and self.store.agent(n):
+                    return n
+        return None
+
+    def stall(self, m) -> str | None:
+        """Why a bot-mode handoff in m would be a loop (None when it's fine): it repeats a recent
+        message, or the last PING_PONG agent messages are just two agents going back and forth."""
+        text = m["body"] or m["summary"]
+        for p in self.store.q("SELECT * FROM messages WHERE room=? AND id<? AND sender!=? ORDER BY id DESC LIMIT ?",
+                              (m["room"], m["id"], HUB_SENDER, ECHO_LOOKBACK)):
+            if _similar(text, p["body"] or p["summary"]) >= ECHO_SIMILARITY:
+                return f"#{m['id']} repeats #{p['id']}"
+        last = self.store.q("SELECT sender, human FROM messages WHERE room=? AND id<=? AND sender!=? "
+                            "ORDER BY id DESC LIMIT ?", (m["room"], m["id"], HUB_SENDER, PING_PONG))
+        senders = {r["sender"] for r in last}
+        if len(last) == PING_PONG and not any(r["human"] for r in last) and len(senders) == 2:
+            a, b = sorted(senders)
+            return f"{a} and {b} have passed it back and forth {PING_PONG} times"
+        return None
+
+    def _bot_turn(self, mid: int) -> None:
+        """After an agent posts in a bot room: [done] ends bot mode; a looping handoff gets a note."""
+        m = self.store.message(mid)
+        if DONE_RE.search(m["body"] or m["summary"]):
+            self.store.set_room_bot(m["room"], False)
+            self.broadcast({"type": "rooms"})
+            return
+        why = self.stall(m) if self.baton(m) else None
+        if why:
+            try:
+                self.post(HUB_SENDER, m["room"], f"(bot mode: {why}, so nobody was asked; "
+                                                 "say what's next or post [done])", reply_to=mid)
+            except HubError:
+                pass  # rate limit: the note is a courtesy
+
     def wakes(self, m, agent: str) -> bool:
-        """Whether agent-written message m should get an answer from agent: it must ask the agent
-        explicitly, the agent chain below the human must be short, and the agent must not already
-        have been asked by that human (it answers the human, not a second time via another agent)."""
+        """Whether agent-written message m should get an answer from agent. In bot mode: agent holds
+        the baton and the handoff isn't a loop. Otherwise: it must ask the agent explicitly, the agent
+        chain below the human must be short, and the agent must not already have been asked by that
+        human (it answers the human, not a second time via another agent)."""
+        if self.bot(m["room"]):
+            return self.baton(m) == agent and not self.stall(m)
         if not addresses(m["body"] or m["summary"], agent) or self.agent_hops(m) >= MAX_AGENT_HOPS:
             return False
         root = m
@@ -322,6 +404,8 @@ class Hub:
             return None
         live = []
         for n in _recips(m):
+            if not m["human"] and n != agent and not self.wakes(m, n):
+                continue  # only named in passing: it won't answer, so don't wait for it
             row = self.store.agent(n)
             state = self.worker_state(row) if row else ""
             if state in ("auto", "online", "busy"):
@@ -404,6 +488,8 @@ class Hub:
                 status = f"{new} new" + (f", {mine} for you" if mine else "")
             else:
                 status = "not joined" + (f", {mine} for you" if mine else "")
+            if r["bot"]:
+                status += ", bot mode"
             lines.append(f"{name} ({status}): {one_line(self.room_summary(name), 100)}")
         if not lines:
             lines.append("no rooms yet (post to create one)")

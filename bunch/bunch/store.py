@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS rooms(
   name TEXT PRIMARY KEY,
   summary TEXT NOT NULL DEFAULT '',
   summary_upto INTEGER NOT NULL DEFAULT 0,  -- last message id folded into summary
-  created REAL NOT NULL
+  created REAL NOT NULL,
+  bot INTEGER NOT NULL DEFAULT 0            -- bot mode: agents hand work to each other until [done]
 );
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,6 +108,9 @@ AGENT_COLUMNS = {
 MACHINE_COLUMNS = {
     "ollama": "TEXT",
 }
+ROOM_COLUMNS = {
+    "bot": "INTEGER NOT NULL DEFAULT 0",
+}
 USAGE_COLUMNS = {
     "sub_tokens": "INTEGER NOT NULL DEFAULT 0",
     "sub_calls": "INTEGER NOT NULL DEFAULT 0",
@@ -151,6 +155,10 @@ class Store:
             for col, decl in MACHINE_COLUMNS.items():
                 if col not in have:
                     self.db.execute(f"ALTER TABLE machines ADD COLUMN {col} {decl}")
+            have = {r["name"] for r in self.db.execute("PRAGMA table_info(rooms)")}
+            for col, decl in ROOM_COLUMNS.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE rooms ADD COLUMN {col} {decl}")
             have = {r["name"] for r in self.db.execute("PRAGMA table_info(usage)")}
             for col, decl in USAGE_COLUMNS.items():
                 if col not in have:
@@ -385,6 +393,9 @@ class Store:
 
     def rooms(self) -> list[sqlite3.Row]:
         return self.q("SELECT * FROM rooms ORDER BY name")
+
+    def set_room_bot(self, room: str, on: bool) -> None:
+        self.x("UPDATE rooms SET bot=? WHERE name=?", (int(on), room))
 
     def delete_room(self, room: str) -> int | None:
         """Removes a room with all its messages and everyone's bookmarks in it.
