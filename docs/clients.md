@@ -188,7 +188,7 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
   For quick questions, Claude or a gateway agent on a local model is cheapest.
 - Jobs run one at a time per machine. Backlog older than 5 minutes is skipped when the service starts. Other agents get an answer only when they write `@name`.
 - On a plan-limit error, that CLI cools down until the reset time in its message (or `WORKER_COOLDOWN`). Every agent on that CLI shows **cooling · 14:05**, and the hub answers for them with a short note until then.
-- Tokens and calls count toward each agent's daily budget, shown in the sidebar.
+- Tokens and calls count toward each agent's daily budget, shown in the sidebar. Cache reads (input the provider already has cached) count at 1/10, roughly as they're billed, and are shown separately: "18k / 200k tokens (+70k cached)". So a Codex picture of about 80k, mostly cached, counts as about 17k.
 
 **Several subscriptions:** each machine uses the logins already on it. bunch never sees, stores or swaps provider credentials. Pair as many machines as you like; the router spreads work and avoids whichever is off or cooling. Check each provider's terms for what their plans allow.
 

@@ -588,7 +588,7 @@ def test_old_usage_table_is_migrated(tmp_path):
     db.commit(); db.close()
     st = Store(path)
     st.add_usage("x", ask=5, sub=40, calls=2)
-    assert st.usage_today("x") == {"ask": 5, "ctx": 0, "sub": 40, "calls": 2}
+    assert st.usage_today("x") == {"ask": 5, "ctx": 0, "sub": 40, "calls": 2, "cached": 0}
     assert st.machines() == []
 
 
@@ -841,18 +841,22 @@ def test_worker_parses_cli_output_and_limits():
     w = _load_worker()
     out = json.dumps({"result": "pong", "is_error": False, "usage": {"input_tokens": 2, "cache_creation_input_tokens": 910,
                                                                     "cache_read_input_tokens": 0, "output_tokens": 4}})
-    assert w.parse_output("claude", out, "", 0) == ("pong", 916, None)
+    assert w.parse_output("claude", out, "", 0) == ("pong", 916, 0, None)
+    out = json.dumps({"result": "pong", "usage": {"input_tokens": 3, "cache_read_input_tokens": 9000, "output_tokens": 4}})
+    assert w.parse_output("claude", out, "", 0) == ("pong", 7, 9000, None)
     out = "\n".join(json.dumps(e) for e in [
         {"type": "item.completed", "item": {"type": "agent_message", "text": "pong"}},
         {"type": "turn.completed", "usage": {"input_tokens": 14833, "cached_input_tokens": 12160, "output_tokens": 5}}])
-    assert w.parse_output("codex", out, "", 0) == ("pong", 14838, None)
+    assert w.parse_output("codex", out, "", 0) == ("pong", 2678, 12160, None)
     out = json.dumps({"status": "SUCCESS", "response": "pong\n", "usage": {"input_tokens": 8922, "total_tokens": 8923}})
-    assert w.parse_output("agy", out, "", 0) == ("pong", 8923, None)
+    assert w.parse_output("agy", out, "", 0) == ("pong", 8923, 0, None)
+    out = json.dumps({"status": "SUCCESS", "response": "pong", "usage": {"cache_read_tokens": 900, "total_tokens": 1000}})
+    assert w.parse_output("agy", out, "", 0) == ("pong", 100, 900, None)
     out = json.dumps({"status": "ERROR", "error": {"message": "quota exceeded"}, "usage": {}})
-    assert w.parse_output("agy", out, "", 1)[2] == "quota exceeded"
-    text, _, err = w.parse_output("claude", json.dumps({"is_error": True, "result": "Claude AI usage limit reached|1767225600"}), "", 1)
+    assert w.parse_output("agy", out, "", 1)[3] == "quota exceeded"
+    text, _, _, err = w.parse_output("claude", json.dumps({"is_error": True, "result": "Claude AI usage limit reached|1767225600"}), "", 1)
     assert w.LIMIT_RE.search(err) and w.reset_time(err) == 1767225600.0
-    assert w.parse_output("codex", "", "boom", 2)[2] == "boom"
+    assert w.parse_output("codex", "", "boom", 2)[3] == "boom"
     now = 1_000_000.0
     assert w.reset_time("You've hit your usage limit. Try again in 2 hours 5 minutes.", now) == now + 7500
     assert w.reset_time("quota exceeded", now) == now + w.COOLDOWN
@@ -981,9 +985,9 @@ def test_worker_never_promises_pictures_it_cannot_make():
     # agy "succeeds" with nothing to say when a tool it reached for was refused: say which.
     out = json.dumps({"status": "SUCCESS", "response": "", "usage": {"total_tokens": 15596},
                       "denied_actions": [{"action": "mcp", "display_name": "CallMcpTool"}]})
-    text, tokens, err = w.parse_output("agy", out, "jetski: no output produced", 0)
+    text, tokens, _, err = w.parse_output("agy", out, "jetski: no output produced", 0)
     assert text == "" and tokens == 15596 and "CallMcpTool" in err
-    assert w.parse_output("agy", json.dumps({"status": "SUCCESS", "response": ""}), "", 0)[2] == "(empty answer)"
+    assert w.parse_output("agy", json.dumps({"status": "SUCCESS", "response": ""}), "", 0)[3] == "(empty answer)"
 
 
 def test_worker_rechecks_agents_before_dropping_a_job(monkeypatch):
@@ -1243,3 +1247,15 @@ def test_worker_takes_agy_pictures_only_from_its_own_conversation(tmp_path):
     assert w.agy_images(json.dumps({"conversation_id": "../other-conv"}), since, str(tmp_path)) == []
     assert w.agy_images("not json", since, str(tmp_path)) == []
     assert w.claims_picture("Created ./bunch-out/moon-cat.png using built-in image generation.")
+
+
+def test_cached_tokens_count_a_tenth_toward_the_budget(env):
+    c, k, app, llm = env
+    key = _machine(c)
+    _on(c, "alice")
+    rep = lambda **b: c.post("/api/v1/machine/report", json={"agent": "alice", "status": "online", **b}, headers=h(key))
+    assert rep(tokens=10, calls=1, cached=1000).text == "ok 110/250"
+    assert rep(tokens=5, calls=1).text == "ok 115/250"  # an older worker sends no cached count
+    a = {x["name"]: x for x in c.get("/api/admin/agents", headers=adm()).json()}["alice"]
+    assert (a["sub_tokens_today"], a["sub_cached_today"], a["sub_calls_today"], a["spent_today"]) == (15, 1000, 2, 115)
+    assert rep(tokens=0, calls=1, cached=1400).text == "over budget 255/250"

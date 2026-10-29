@@ -106,6 +106,7 @@ class ReportIn(BaseModel):
     agent: str
     status: str
     tokens: int = 0
+    cached: int = 0     # cache reads, not in tokens (older workers leave it out)
     calls: int = 0
     until: float | None = None
     room: str | None = None
@@ -477,7 +478,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def machine_report(body: ReportIn, authorization: str | None = Header(None)):
         a = machine_agent(machine_of(authorization), body.agent)
         return PlainTextResponse(hub.worker_report(a["name"], body.status, body.tokens, body.calls,
-                                                   body.until, body.room))
+                                                   body.until, body.room, body.cached))
 
     @app.get("/api/v1/rooms")
     async def api_rooms(authorization: str | None = Header(None)):
@@ -604,6 +605,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "budget_set": a["daily_tokens"], "system": a["system"] if admin else None,
                         "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"],
                         "sub_tokens_today": u["sub"], "sub_calls_today": u["calls"],
+                        "sub_cached_today": u["cached"], "spent_today": hub.spent(a["name"]),
                         "state": hub.worker_state(a), "status_until": a["status_until"],
                         "worker": _worker_view(hub.worker_config(a), admin),
                         "runs_as": hub.runs_as(a),

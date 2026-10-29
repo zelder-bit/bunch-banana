@@ -119,10 +119,10 @@ def upload(agent, room, path):
         return json.loads(resp.read().decode())["markdown"]
 
 
-def report(agent, status, tokens=0, calls=0, until=None, room=None):
+def report(agent, status, tokens=0, calls=0, until=None, room=None, cached=0):
     try:
         return req("POST", "/api/v1/machine/report", {"agent": agent, "status": status, "tokens": tokens,
-                                                      "calls": calls, "until": until, "room": room})
+                                                      "cached": cached, "calls": calls, "until": until, "room": room})
     except (urllib.error.URLError, OSError) as e:
         print(f"report failed: {e}", file=sys.stderr)
         return ""
@@ -228,14 +228,15 @@ def build_cmd(cfg, system, power, workdir, prompt, deep=False):
 
 
 def parse_output(cli, out, err, rc):
-    """Returns (text, tokens, error). error is None on success."""
-    text, tokens, error = "", 0, None
+    """Returns (text, tokens, cached, error). tokens leaves out cache reads, which come back separately
+    in cached (they cost about a tenth as much). error is None on success."""
+    text, tokens, cached, error = "", 0, 0, None
     try:
         if cli == "claude":
             d = json.loads(out)
             u = d.get("usage") or {}
-            tokens = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
-                                                       "cache_read_input_tokens", "output_tokens"))
+            tokens = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
+            cached = int(u.get("cache_read_input_tokens") or 0)
             text = d.get("result") or ""
             if d.get("is_error"):
                 error = text or d.get("subtype") or "error"
@@ -249,13 +250,17 @@ def parse_output(cli, out, err, rc):
                     text = item.get("text") or text
                 elif e.get("type") == "turn.completed":
                     u = e.get("usage") or {}
-                    tokens += int(u.get("input_tokens") or 0) + int(u.get("output_tokens") or 0)
+                    hit = int(u.get("cached_input_tokens") or 0)  # part of input_tokens
+                    tokens += int(u.get("input_tokens") or 0) - hit + int(u.get("output_tokens") or 0)
+                    cached += hit
                 elif e.get("type") in ("error", "turn.failed"):
                     error = e.get("message") or (e.get("error") or {}).get("message") or "error"
         elif cli == "agy":
             d = json.loads(out)
             text = d.get("response") or ""
-            tokens = int((d.get("usage") or {}).get("total_tokens") or 0)
+            u = d.get("usage") or {}
+            cached = int(u.get("cache_read_tokens") or 0)  # part of total_tokens
+            tokens = int(u.get("total_tokens") or 0) - cached
             if d.get("status") not in (None, "SUCCESS"):
                 err_ = d.get("error")
                 error = (err_.get("message") if isinstance(err_, dict) else err_) or text or d["status"]
@@ -267,7 +272,7 @@ def parse_output(cli, out, err, rc):
         pass
     if not text and not error:
         error = (err or out or f"exit {rc}").strip()[-300:] if rc or (err or "").strip() else "(empty answer)"
-    return text.strip(), tokens, error
+    return text.strip(), tokens, cached, error
 
 
 def reset_time(msg, now=None):
@@ -402,11 +407,11 @@ class Worker:
         started_at = time.time() - 1
         try:
             p = subprocess.run(argv, input=stdin, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
-            text, tokens, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
+            text, tokens, cached, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
         except FileNotFoundError:
-            text, tokens, error = "", 0, f"{cli} is not installed on {self.machine}"
+            text, tokens, cached, error = "", 0, 0, f"{cli} is not installed on {self.machine}"
         except subprocess.TimeoutExpired:
-            text, tokens, error = "", 0, f"timed out after {TIMEOUT}s"
+            text, tokens, cached, error = "", 0, 0, f"timed out after {TIMEOUT}s"
         pics = []
         if cli == "agy" and power == "full" and not error:
             os.makedirs(out, exist_ok=True)
@@ -434,11 +439,12 @@ class Worker:
             for other, c in self.agents.items():  # same login: every agent on this CLI is out
                 if c["cli"] == cli:
                     report(other, "cooling", tokens if other == name else 0, 1 if other == name else 0,
-                           until=until, room=job["room"] if other == name else None)
+                           until=until, room=job["room"] if other == name else None,
+                           cached=cached if other == name else 0)
             print(f"  {cli} limit hit, cooling until {time.ctime(until)}: {error[:200]}", file=sys.stderr)
             return self.reply(job, f"(hit the {cli} plan limit; back around "
                                    f"{time.strftime('%H:%M', time.localtime(until))})")
-        state = report(name, "online", tokens, 1, room=job["room"])
+        state = report(name, "online", tokens, 1, room=job["room"], cached=cached)
         if state.startswith("over budget"):
             self.over_budget[name] = time.strftime("%Y-%m-%d", time.gmtime())
         if error:
@@ -450,7 +456,7 @@ class Worker:
         if not pics and claims_picture(text):  # it says it made something, but nothing came back
             text += "\n\n" + no_picture_note(self.machine, power)
         self.reply(job, text)
-        print(f"  {name} answered #{job['id']} ({tokens} tokens, {cli}, {power}{', deep' if deep else ''})",
+        print(f"  {name} answered #{job['id']} ({tokens} tokens + {cached} cached, {cli}, {power}{', deep' if deep else ''})",
               file=sys.stderr)
 
     def run(self):

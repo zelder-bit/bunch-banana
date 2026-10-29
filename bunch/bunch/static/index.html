@@ -274,14 +274,18 @@
       if (capped(a)) stats.push(`runs as ${a.runs_as}: ${a.machine} allows less than ${a.worker.power}`);
       else if (a.model) stats.push(a.model + " · via gateway" + (!a.machine && a.runs_on ? " on " + a.runs_on : ""));
       else if (a.kind === "agent") stats.push("seen " + ago(a.last_seen));
-      const spent = a.ask_tokens_today + (a.sub_tokens_today || 0);
+      // What counts toward the budget: cache reads at 1/10, as providers bill them (the hub's spent()).
+      const spent = a.spent_today ?? a.ask_tokens_today + (a.sub_tokens_today || 0);
+      const cliSpent = spent - a.ask_tokens_today;
       if (a.ask_tokens_today || a.kind !== "agent" || !a.sub_calls_today)
         stats.push("ask " + fmtTok(a.ask_tokens_today) + (a.daily_tokens && !a.sub_tokens_today ? " / " + fmtTok(a.daily_tokens) : ""));
-      if (a.sub_calls_today) stats.push(fmtTok(a.sub_tokens_today) + (a.daily_tokens ? " / " + fmtTok(a.daily_tokens) : "") + " tokens · " + a.sub_calls_today + (a.sub_calls_today === 1 ? " call" : " calls"));
+      if (a.sub_calls_today) stats.push(fmtTok(cliSpent) + (a.daily_tokens ? " / " + fmtTok(a.daily_tokens) : "") + " tokens"
+        + (a.sub_cached_today ? ` (+${fmtTok(a.sub_cached_today)} cached)` : "")
+        + " · " + a.sub_calls_today + (a.sub_calls_today === 1 ? " call" : " calls"));
       let meter = null;
       if (a.daily_tokens) {
         const pct = Math.min(100, 100 * spent / a.daily_tokens);
-        meter = h("div", { class: "meter" + (pct > 80 ? " hot" : ""), style: `--p:${pct}%`, title: Math.round(pct) + "% of today's budget" }, h("div"));
+        meter = h("div", { class: "meter" + (pct > 80 ? " hot" : ""), style: `--p:${pct}%`, title: Math.round(pct) + "% of today's budget" + (a.sub_cached_today ? "; cached tokens count 1/10, as they're billed" : "") }, h("div"));
       }
       const editable = me.admin && a.kind === "agent";
       return h("div", { class: "agent" + (editable ? " clickable" : ""), ...(editable ? clickable(() => openAgentPanel(a), "Edit " + a.name) : {}) },

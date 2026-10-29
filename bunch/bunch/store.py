@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS usage(
   ctx_tokens INTEGER NOT NULL DEFAULT 0,    -- estimated tokens the hub put into the agent's context
   sub_tokens INTEGER NOT NULL DEFAULT 0,    -- tokens a worker spent on its own subscription CLI
   sub_calls INTEGER NOT NULL DEFAULT 0,     -- CLI runs by that worker
+  sub_cached INTEGER NOT NULL DEFAULT 0,    -- cache reads in those runs (not in sub_tokens; cost about 1/10)
   PRIMARY KEY(agent, day)
 );
 """
@@ -109,6 +110,7 @@ MACHINE_COLUMNS = {
 USAGE_COLUMNS = {
     "sub_tokens": "INTEGER NOT NULL DEFAULT 0",
     "sub_calls": "INTEGER NOT NULL DEFAULT 0",
+    "sub_cached": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _ph = PasswordHasher()
@@ -356,21 +358,23 @@ class Store:
         return self.x("DELETE FROM machines WHERE name=?", (name,)).rowcount > 0
 
     # -- usage -----------------------------------------------------------
-    def add_usage(self, agent: str, ask: int = 0, ctx: int = 0, sub: int = 0, calls: int = 0) -> None:
+    def add_usage(self, agent: str, ask: int = 0, ctx: int = 0, sub: int = 0, calls: int = 0,
+                  cached: int = 0) -> None:
         self.x(
-            "INSERT INTO usage(agent,day,ask_tokens,ctx_tokens,sub_tokens,sub_calls) VALUES(?,?,?,?,?,?) "
+            "INSERT INTO usage(agent,day,ask_tokens,ctx_tokens,sub_tokens,sub_calls,sub_cached) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(agent,day) DO UPDATE SET ask_tokens=ask_tokens+excluded.ask_tokens, "
             "ctx_tokens=ctx_tokens+excluded.ctx_tokens, sub_tokens=sub_tokens+excluded.sub_tokens, "
-            "sub_calls=sub_calls+excluded.sub_calls",
-            (agent, today(), ask, ctx, sub, calls),
+            "sub_calls=sub_calls+excluded.sub_calls, sub_cached=sub_cached+excluded.sub_cached",
+            (agent, today(), ask, ctx, sub, calls, cached),
         )
 
     def usage_today(self, agent: str) -> dict:
-        row = self.one("SELECT ask_tokens, ctx_tokens, sub_tokens, sub_calls FROM usage WHERE agent=? AND day=?",
-                       (agent, today()))
+        row = self.one("SELECT ask_tokens, ctx_tokens, sub_tokens, sub_calls, sub_cached FROM usage "
+                       "WHERE agent=? AND day=?", (agent, today()))
         if not row:
-            return {"ask": 0, "ctx": 0, "sub": 0, "calls": 0}
-        return {"ask": row["ask_tokens"], "ctx": row["ctx_tokens"], "sub": row["sub_tokens"], "calls": row["sub_calls"]}
+            return {"ask": 0, "ctx": 0, "sub": 0, "calls": 0, "cached": 0}
+        return {"ask": row["ask_tokens"], "ctx": row["ctx_tokens"], "sub": row["sub_tokens"], "calls": row["sub_calls"],
+                "cached": row["sub_cached"]}
 
     # -- rooms & messages ------------------------------------------------
     def ensure_room(self, room: str) -> None:
