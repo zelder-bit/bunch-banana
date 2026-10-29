@@ -29,6 +29,19 @@ class LLM:
         payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
         if user:
             payload["user"] = user  # lets LiteLLM attribute spend per agent
+        text, total, thought = await self._complete(payload)
+        if not text and thought:
+            # A thinking model (gemma4, qwen3...) spent max_tokens on hidden reasoning and said nothing.
+            # Ask again with thinking off; only on this retry, since some providers reject "none".
+            try:
+                text, more, _ = await self._complete({**payload, "reasoning_effort": "none"})
+                total += more
+            except LLMError:
+                pass
+        return text, total
+
+    async def _complete(self, payload: dict) -> tuple[str, int, bool]:
+        """Returns (text, total_tokens, whether the model produced reasoning)."""
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as c:
                 r = await c.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=self._headers())
@@ -38,12 +51,15 @@ class LLM:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
         data = r.json()
         try:
-            text = data["choices"][0]["message"].get("content") or ""
+            msg = data["choices"][0]["message"]
+            text = msg.get("content") or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError("gateway returned no choices") from e
+        thought = bool(msg.get("reasoning") or msg.get("reasoning_content"))
         usage = data.get("usage") or {}
+        messages = payload["messages"]
         total = usage.get("total_tokens") or (len(text) // 4 + sum(len(m.get("content", "")) for m in messages) // 4)
-        return text, int(total)
+        return text, int(total), thought
 
     async def models(self) -> list[str]:
         try:
