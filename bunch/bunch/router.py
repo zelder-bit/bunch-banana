@@ -18,6 +18,8 @@ PROMPT = ("You route chat messages from a human to AI agents. Pick the agent(s) 
           "fits. Reply with only agent names, comma-separated, at most 2, or the word none if no agent should "
           "answer.")
 LABELS = {"auto": "auto, cheap", "online": "subscription", "busy": "subscription, busy"}
+FOLLOW_UP_WORDS = 3   # "try again", "go on", "thanks": too short for the model to route on its own
+FOLLOW_UP_WINDOW = 1800
 
 
 async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[str]:
@@ -42,6 +44,12 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
         agents.append((a, label))
     if not agents:
         return []
+    names = {a["name"] for a, _ in agents}
+    if len(text.split()) <= FOLLOW_UP_WORDS:  # a follow-up goes to whoever answered last here, not to a new pick
+        last = st.one("SELECT sender FROM messages WHERE room=? AND human=0 AND created>? ORDER BY id DESC LIMIT 1",
+                      (room, time.time() - FOLLOW_UP_WINDOW))
+        if last and last["sender"] in names:
+            return [last["sender"]]
     roster = "\n".join(f"- {a['name']}: {a['description'] or 'no description'} ({label})" for a, label in agents)
     user = (f"Agents:\n{roster}\n\nRoom #{room} summary: {one_line(hub.room_summary(room), 400)}\n\n"
             f"Message:\n{text[:2000]}")
@@ -52,7 +60,6 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
         log.warning("routing failed: %s", e)
         return []
     st.add_usage(ROUTER, ask=tokens)
-    names = {a["name"] for a, _ in agents}
     picked: list[str] = []
     for word in re.findall(r"[a-z0-9][a-z0-9_.-]*", (answer or "").lower()):
         if word in names and word not in picked:

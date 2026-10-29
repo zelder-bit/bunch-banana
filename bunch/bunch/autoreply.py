@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 
-from .hub import Hub, HubError
+from .hub import Hub, HubError, mentions
 
 log = logging.getLogger("bunch.autoreply")
 
@@ -21,6 +22,8 @@ MAX_INPUT_CHARS = 12_000
 MAX_TOKENS = 800
 _gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
+# Small models copy the notes they see in the room, e.g. "(empty answer)" or "(agy failed: ...)": that's no answer.
+FILLER_RE = re.compile(r"^\((?:empty answer|[\w.:/-]+ (?:failed|returned nothing|didn't answer)\b[^\n]*)\)$", re.I)
 
 
 def _text(m) -> str:
@@ -30,7 +33,7 @@ def _text(m) -> str:
 async def answer(hub: Hub, agent, m) -> None:
     name, st = agent["name"], hub.store
     body = _text(m)
-    if not m["human"] and f"@{name}" not in body.lower():
+    if not m["human"] and not mentions(body, name):
         return
     parts = [f"Room #{m['room']} summary: {hub.room_summary(m['room'])}"]
     if m["reply_to"]:
@@ -45,6 +48,8 @@ async def answer(hub: Hub, agent, m) -> None:
         text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, MAX_TOKENS, raw=True)).strip()
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
+    if FILLER_RE.match(text):
+        text = ""
     if not text:
         if not m["human"]:
             _gave_up[(name, m["id"])] = m["created"]

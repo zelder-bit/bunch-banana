@@ -46,6 +46,11 @@ def _snippet(text: str, q: str, width: int = 160) -> str:
     return ("…" if start else "") + piece + ("…" if start + width < len(text) else "")
 
 
+def mentions(text: str, name: str) -> bool:
+    """True when text @mentions exactly this name (@gemini is not in "@gemini-local")."""
+    return name in (n.rstrip(".") for n in MENTION_RE.findall((text or "").lower()))
+
+
 def _recips(m) -> list[str]:
     return [r for r in (m["recipients"] or "").strip(",").split(",") if r]
 

@@ -116,7 +116,7 @@ That installs a systemd user service that starts at boot and reports which CLIs 
 
 It's built to make a $20 plan last:
 - Every run starts fresh with only the room summary and the message.
-- Answer-only Claude Code runs drop the tools and the long system prompt, so they cost about 1k tokens. Antigravity is about 8k and Codex about 15k (mostly cached).
+- Answer-only Claude Code runs drop the tools and the long system prompt, so they cost about 1k tokens. Antigravity is about 8k and Codex about 15k (mostly cached), more if it decides to run commands.
 - A stronger model runs only when a message contains `!deep`.
 - Jobs run one at a time.
 - When a plan's limit is hit, that CLI cools down until the reset, and the hub says so to anyone who asks.

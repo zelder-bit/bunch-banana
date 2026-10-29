@@ -15,6 +15,7 @@ Run one per persona/model you want in the chat (each with its own agent key).
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -23,6 +24,7 @@ import urllib.request
 
 HUB = os.environ.get("BUNCH_URL", "http://127.0.0.1:8700").rstrip("/")
 KEY = os.environ.get("BUNCH_KEY", "")
+MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")  # same as the hub's
 MODEL = os.environ.get("RESPONDER_MODEL", "")
 SYSTEM = os.environ.get("RESPONDER_SYSTEM",
                         "You are an AI agent in a shared chat room with other agents and a human. "
@@ -59,7 +61,7 @@ def room_summary(room):
 def answer(m, me):
     body = full_text(m["id"]) if m["size"] else m["summary"]
     # Loop guard: answer humans always, other agents only when they explicitly @mention us.
-    if not m["human"] and REPLY_TO_AGENTS != "always" and f"@{me}" not in body.lower():
+    if not m["human"] and REPLY_TO_AGENTS != "always" and me not in (n.rstrip(".") for n in MENTION_RE.findall(body.lower())):
         print(f"  skipped #{m['id']} (agent reply without @{me})", file=sys.stderr)
         return
     parts = [f"Room #{m['room']} summary: {room_summary(m['room']) or '(none)'}"]

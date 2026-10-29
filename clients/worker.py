@@ -46,9 +46,12 @@ STALE_AFTER = 300  # ignore backlog older than this when the worker starts
 DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other agents and humans. "
                   "Answer the message addressed to you. Be brief and concrete. "
                   "If you need another agent, @mention them.")
+# Every run's answer is posted for it: a CLI that tries its own bunch MCP tool instead gets denied headless.
+PLAIN_REPLY = " Reply with your answer as plain text; it is posted to the room for you. Don't call chat tools."
 LIMIT_RE = re.compile(r"usage limit|rate.?limit|hit your limit|limit reached|quota|resource.?exhausted|"
                       r"too many requests|\b429\b|out of (?:extra )?usage", re.I)
 CLAUDE_MODELS = ["haiku", "sonnet", "opus"]
+MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")  # same as the hub's
 
 
 def req(method, path, body=None, params=None, timeout=120):
@@ -222,10 +225,14 @@ def parse_output(cli, out, err, rc):
             if d.get("status") not in (None, "SUCCESS"):
                 err_ = d.get("error")
                 error = (err_.get("message") if isinstance(err_, dict) else err_) or text or d["status"]
+            elif not text and d.get("denied_actions"):  # "SUCCESS" with nothing said: a tool was refused
+                tools = ", ".join(a.get("display_name") or a.get("action") or "?" for a in d["denied_actions"])
+                error = (f"no answer: it tried {tools}, which headless runs can't use "
+                         "(agy mcp list shows the MCP servers it can reach)")
     except (ValueError, TypeError, AttributeError):
         pass
     if not text and not error:
-        error = (err or out or f"exit {rc}").strip()[-300:] if rc else "(empty answer)"
+        error = (err or out or f"exit {rc}").strip()[-300:] if rc or (err or "").strip() else "(empty answer)"
     return text.strip(), tokens, error
 
 
@@ -247,6 +254,19 @@ def reset_time(msg, now=None):
         at = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, h, mi, 0, 0, 0, -1))
         return at if at > now else at + 86400
     return now + COOLDOWN
+
+
+def mentions(text, name):
+    """True when text @mentions exactly this name (@gemini is not in "@gemini-local")."""
+    return name in (m.rstrip(".") for m in MENTION_RE.findall(text.lower()))
+
+
+def picture_hint(power, d):
+    """What the run is told about pictures: only a run that can write files may promise one."""
+    if power == "full":
+        return f" To send a picture, save it as a .png/.jpg/.webp file in ./{OUT_DIR}/."
+    return (" You can't create files or images in this run: if asked for one, say so plainly "
+            "and never claim you made it.")
 
 
 def build_prompt(job, limit):
@@ -288,14 +308,17 @@ class Worker:
 
     def handle(self, job):
         name = job["agent"]
-        cfg = self.agents.get(name)
-        if not cfg:
-            return
         # Loop guard: answer humans always, other agents only when they explicitly @mention us.
-        if not job["human"] and f"@{name}" not in job["text"].lower():
+        if not job["human"] and not mentions(job["text"], name):
             return
         if job["created"] < self.started - STALE_AFTER:
             return
+        cfg = self.agents.get(name)
+        if not cfg:  # made in the viewer since the last hello: the hub already handed us its message
+            self.hello(force=True)
+            cfg = self.agents.get(name)
+        if not cfg:
+            return self.reply(job, f"({name} isn't set up on {self.machine} yet; not answered)")
         cli = cfg["cli"]
         until = self.cool_until.get(cli, 0)
         if time.time() < until:
@@ -305,13 +328,13 @@ class Worker:
             return self.reply(job, "(daily token budget used; resets 00:00 UTC)")
         deep = "!deep" in job["text"]
         system = (cfg.get("system") or DEFAULT_SYSTEM.format(name=name)) + \
-            f" Keep the answer under about {int(cfg.get('max_output') or 800)} tokens."
+            f" Keep the answer under about {int(cfg.get('max_output') or 800)} tokens." + PLAIN_REPLY
         power, d = effective_power(cfg)
         # Pictures come back as files in a folder only the worker uses, so nothing else in a project gets posted.
         out = os.path.join(d, OUT_DIR) if d else self.scratch
-        system += (f" To send a picture, save it as a .png/.jpg/.webp file in {'./' + OUT_DIR + '/' if d else 'the current directory'}."
-                   if power != "read" else "")
-        if power != (cfg.get("power") or "answer"):
+        system += picture_hint(power, d)
+        lowered = power != (cfg.get("power") or "answer")
+        if lowered:
             print(f"  power {cfg.get('power')} not allowed here (WORKER_MAX_POWER/WORKER_DIRS); using {power}",
                   file=sys.stderr)
         argv, cwd, stdin = build_cmd(cfg, system, power, d or self.scratch,
@@ -355,6 +378,8 @@ class Worker:
         if error:
             print(f"  {cli} failed: {error[:300]}", file=sys.stderr)
             return self.reply(job, f"({cli} failed: {error.splitlines()[0][:200]})")
+        if lowered:  # say it in the chat too, not only in this machine's journal
+            text += f"\n\n({self.machine} allows only {power}, not {cfg.get('power')}: ran as {power})"
         self.reply(job, text)
         print(f"  {name} answered #{job['id']} ({tokens} tokens, {cli}, {power}{', deep' if deep else ''})",
               file=sys.stderr)
