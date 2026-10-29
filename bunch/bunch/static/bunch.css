@@ -390,3 +390,17 @@ dialog.panel::after, .login-card::after {  /* left and right */
 .attach img { display: block; max-width: min(100%, 420px); max-height: 360px; border-radius: 10px; border: 1px solid var(--border, #0003); }
 .file-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: .85rem; }
 .file-row a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- my profile: picture picker --------------------------------------------------------- */
+.profile-head { display: flex; align-items: center; gap: 14px; }
+.avatar.lg { width: 64px; height: 64px; }
+.avatar.lg img { width: 48px; }
+.pic-group h3 { font-size: 1rem; margin-bottom: 8px; }
+.pic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 8px; }
+.pic { aspect-ratio: 1; border-radius: 50%; border: 2px solid transparent; background: var(--surface-2); padding: 0;
+  display: grid; place-items: center; cursor: pointer; transition: transform .12s ease, border-color .12s ease; }
+.pic img { width: 70%; pointer-events: none; }
+.pic:hover { transform: scale(1.08); border-color: var(--peel); }
+.pic:focus-visible { outline: 3px solid var(--banana); outline-offset: 2px; }
+.pic[aria-pressed="true"] { border-color: var(--orange); background: var(--surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 25%, transparent); }
+#whoami .avatar.xs { vertical-align: -3px; }

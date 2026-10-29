@@ -43,7 +43,7 @@
       <div class="top-right">
         <button class="icon-btn" id="notify" title="Notify me when I'm @mentioned" aria-label="Turn on notifications for @mentions" hidden>🔔</button>
         <button class="icon-btn" id="theme" title="Switch light / dark" aria-label="Switch light or dark theme"></button>
-        <button class="btn small ghost" id="whoami" type="button" title="Change my password"></button>
+        <button class="btn small ghost" id="whoami" type="button" title="Your picture and password"></button>
         <button class="btn small ghost" id="logout">Sign out</button>
       </div>
     </header>
@@ -200,14 +200,25 @@
   const fmtTime = (t) => { const d = new Date(t * 1000); const today = new Date().toDateString() === d.toDateString();
     return today ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
 
-  // Every agent gets its own fruit, picked from its name so it never changes. Humans are oranges.
+  // Every agent gets its own fruit, picked from its name so it never changes. People pick theirs (orange by default).
   const FRUITS = ["apple", "banana", "grapes", "kiwi", "lemon", "peach", "strawberry", "watermelon", "coconut", "orange-slice"];
   function fruitFor(name, human) {
-    if (human) return "orange";
+    if (human) return (name === me?.name && me.avatar) || person(name)?.avatar || "orange";
     let x = 0; for (const c of name) x = (x * 31 + c.charCodeAt(0)) >>> 0;
     return FRUITS[x % FRUITS.length];
   }
-  const avatar = (name, human, cls = "") => h("span", { class: "avatar " + cls }, h("img", { src: `static/svg/${fruitFor(name, human)}.svg`, alt: "" }));
+  const avatar = (name, human, cls = "") => h("span", { class: "avatar " + cls },
+    h("img", { src: `static/svg/${fruitFor(name, human)}.svg`, alt: "", "data-who": human ? name : null }));
+  // When someone picks a new picture, every place their face is already drawn follows.
+  function refreshAvatars() {
+    document.querySelectorAll("img[data-who]").forEach(img => {
+      const src = `static/svg/${fruitFor(img.dataset.who, true)}.svg`;
+      if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+    });
+  }
+  function showMe() {
+    $("whoami").replaceChildren(avatar(me.name, true, "xs"), " " + me.name + (me.admin ? " · admin" : ""));
+  }
   const person = (name) => people.find(p => p.name === name);
   const isHuman = (name) => person(name)?.kind === "human";
 
@@ -234,8 +245,7 @@
   async function start() {
     me = await api("/api/auth/me");
     $("login").hidden = true; $("app").hidden = false;
-    $("whoami").textContent = me.name + (me.admin ? " · admin" : "");
-    $("whoami").disabled = !!token;   // the admin token has no password of its own to change
+    showMe();
     document.querySelectorAll(".admin-only").forEach(e => e.hidden = !me.admin);
     await loadAgents();
     if (me.admin) loadUsers().catch(() => {});
@@ -275,6 +285,7 @@
     const [list, ms] = await Promise.all([api("/api/admin/agents"), api("/api/admin/machines")]);
     machines = ms;
     people = list.filter(a => a.kind !== "system");
+    refreshAvatars();
     const row = (a) => {
       const stats = [];
       if (a.worker?.mode === "worker") stats.push(CLI_NAMES[a.worker.cli] + (a.worker.model ? " · " + a.worker.model : ""));
@@ -691,7 +702,35 @@
       field("Current password", cur), field("New password", pw), field("Again", again, "Your other devices will be signed out."),
       h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Change password")));
   }
-  $("whoami").onclick = openMyPasswordPanel;
+  // Your profile: pick a fruit or vegetable for your picture (people only; agents keep theirs), and change your password.
+  const pretty = (n) => n.replace(/-/g, " ").replace(/^./, c => c.toUpperCase());
+  function openProfilePanel() {
+    const grid = (kind, names) => h("div", { class: "pic-group" }, h("h3", null, kind),
+      h("div", { class: "pic-grid", role: "group", "aria-label": kind },
+        names.map(n => h("button", { type: "button", class: "pic", "aria-pressed": String(n === me.avatar),
+          "aria-label": pretty(n), title: pretty(n), "data-pic": n, onclick: () => pick(n) },
+          h("img", { src: `static/svg/${n}.svg`, alt: "" })))));
+    async function pick(n) {
+      if (n === me.avatar) return;
+      const r = await api("/api/auth/me/avatar", { method: "PUT", body: JSON.stringify({ avatar: n }) }).catch(err => {
+        if (err.message !== "unauthorized") toast(err.message, "bad"); });
+      if (!r) return;
+      me.avatar = r.avatar;
+      const self = person(me.name); if (self) self.avatar = r.avatar;
+      $("panel").querySelectorAll(".pic").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.pic === me.avatar)));
+      $("profilePreview").src = `static/svg/${me.avatar}.svg`;
+      showMe(); refreshAvatars();  // the preview above is the confirmation (a toast would sit behind this dialog)
+    }
+    const groups = me.avatars || { fruits: ["orange"] };
+    openPanel("My profile",
+      h("div", { class: "profile-head" }, h("span", { class: "avatar lg" }, h("img", { id: "profilePreview", src: `static/svg/${me.avatar || "orange"}.svg`, alt: "" })),
+        h("div", null, h("strong", null, me.name), h("div", { class: "muted small" }, "Pick your picture. Everyone sees it next to your messages."))),
+      grid("Fruits", groups.fruits || []), grid("Vegetables", groups.vegetables || []),
+      token ? h("p", { class: "muted small" }, "You're signed in with the admin token, which has no password to change.")
+        : h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn", onclick: openMyPasswordPanel }, "Change my password…")));
+    $("panel").querySelector('.pic[aria-pressed="true"]')?.focus();
+  }
+  $("whoami").onclick = openProfilePanel;
 
   // --- messages ------------------------------------------------------------------------
   // Same rule as the server: @name not preceded by a word char or @; a trailing "." ends the sentence.

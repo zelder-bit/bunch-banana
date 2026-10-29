@@ -19,6 +19,13 @@ from argon2.exceptions import InvalidHashError, VerificationError
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
 HUB_SENDER = "bunch"  # the hub posts its own notes under this name, so no agent or person may have it
 RESERVED_NAMES = {HUB_SENDER}
+# Profile pictures people can pick (static/svg/<name>.svg). Agents keep the fruit picked from their name.
+HUMAN_AVATARS = {
+    "fruits": ["orange", "orange-slice", "apple", "banana", "cherries", "coconut", "grapes", "kiwi", "lemon",
+               "peach", "pear", "pineapple", "strawberry", "watermelon"],
+    "vegetables": ["broccoli", "carrot", "corn", "eggplant", "mushroom", "peas", "pepper", "tomato"],
+}
+DEFAULT_HUMAN_AVATAR = "orange"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents(
@@ -35,7 +42,8 @@ CREATE TABLE IF NOT EXISTS agents(
   is_admin INTEGER NOT NULL DEFAULT 0,      -- humans: may manage agents and users
   worker TEXT,                              -- JSON: how clients/worker.py runs this agent (NULL = manual)
   status TEXT,                              -- worker-reported: online / busy / cooling
-  status_until REAL                         -- cooling: when the worker expects to answer again
+  status_until REAL,                        -- cooling: when the worker expects to answer again
+  avatar TEXT                               -- humans: chosen profile picture (NULL = orange)
 );
 CREATE TABLE IF NOT EXISTS rooms(
   name TEXT PRIMARY KEY,
@@ -106,6 +114,7 @@ AGENT_COLUMNS = {
     "worker": "TEXT",
     "status": "TEXT",
     "status_until": "REAL",
+    "avatar": "TEXT",
 }
 MACHINE_COLUMNS = {
     "ollama": "TEXT",
@@ -291,6 +300,15 @@ class Store:
         cur = self.x("DELETE FROM agents WHERE name=? AND kind='human' AND pw_hash IS NOT NULL", (name,))
         self.x("DELETE FROM cursors WHERE agent=?", (name,))
         return cur.rowcount > 0
+
+    def set_avatar(self, name: str, avatar: str | None) -> None:
+        """A person's profile picture; None or the default goes back to the orange."""
+        row = self.agent(name)
+        if not row or row["kind"] != "human":
+            raise LookupError("no such person")
+        if avatar and not any(avatar in group for group in HUMAN_AVATARS.values()):
+            raise ValueError("pick one of the pictures shown")
+        self.x("UPDATE agents SET avatar=? WHERE name=?", (None if avatar in (None, "", DEFAULT_HUMAN_AVATAR) else avatar, name))
 
     def ensure_human(self, name: str) -> None:
         self.x(

@@ -25,7 +25,7 @@ from .config import Settings, load
 from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
 from .router import route
-from .store import RESERVED_NAMES, Store
+from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store
 from .summarizer import summarizer_loop
 
 log = logging.getLogger("bunch")
@@ -88,6 +88,10 @@ class UserIn(BaseModel):
     name: str
     password: str
     admin: bool = False
+
+
+class AvatarIn(BaseModel):
+    avatar: str | None = None  # None = back to the default orange
 
 
 class PasswordIn(BaseModel):
@@ -356,7 +360,22 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @app.get("/api/auth/me")
     async def me(request: Request, authorization: str | None = Header(None)):
         name, admin = viewer(request, authorization)
-        return {"name": name, "admin": admin}
+        row = store.agent(name)
+        return {"name": name, "admin": admin, "avatar": (row["avatar"] if row else None) or DEFAULT_HUMAN_AVATAR,
+                "avatars": HUMAN_AVATARS}
+
+    @app.put("/api/auth/me/avatar")
+    async def set_my_avatar(body: AvatarIn, request: Request, authorization: str | None = Header(None)):
+        """A person picks their own profile picture (fruit or vegetable). Agents keep theirs."""
+        name, _ = viewer(request, authorization)
+        try:
+            store.set_avatar(name, body.avatar)
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        hub.broadcast({"type": "agents"})  # everyone's viewer redraws this person's picture
+        return {"name": name, "avatar": store.agent(name)["avatar"] or DEFAULT_HUMAN_AVATAR}
 
     # ----------------------------------------------------------------- MCP
     @app.post("/mcp")
@@ -655,7 +674,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "worker": _worker_view(hub.worker_config(a), admin),
                         "runs_as": hub.runs_as(a),
                         "runs_on": hub.model_host(a["model"]) if a["model"] else None,
-                        "machine": hub.agent_machine(a), "first_responder": a["name"] == first})
+                        "machine": hub.agent_machine(a), "first_responder": a["name"] == first,
+                        "avatar": (a["avatar"] or DEFAULT_HUMAN_AVATAR) if a["kind"] == "human" else None})
         for system, model in (("_summarizer", s.summary_model), ("_router", s.router_model)):
             u = store.usage_today(system)
             if system == "_summarizer" or u["ask"]:
