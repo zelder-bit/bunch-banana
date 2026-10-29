@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import time
+from urllib.parse import quote
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -112,6 +113,16 @@ class MachinePostIn(BaseModel):
     re: int | None = None
 
 
+class PurgeIn(BaseModel):
+    ids: list[int] | None = None
+    room: str | None = None
+    older_than_days: float | None = None
+
+
+class RetentionIn(BaseModel):
+    days: float = 0   # 0 = keep forever
+
+
 class HelloIn(BaseModel):
     hostname: str = ""
     addresses: list[str] = []
@@ -159,6 +170,26 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     llm = llm or LLM(s.litellm_url, s.litellm_key)
     hub = Hub(store, s, llm)
 
+    INLINE_IMAGES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+    def retention_days() -> float:
+        try:
+            return max(0.0, float(store.setting("file_retention_days", "0")))
+        except ValueError:
+            return 0.0
+
+    async def file_sweeper():
+        while True:
+            try:
+                days = retention_days()
+                if days:
+                    n, _ = store.delete_files(older_than=time.time() - days * 86400)
+                    if n:
+                        log.info("file retention: removed %d files older than %g days", n, days)
+            except Exception as e:  # e.g. database locked: try again next hour
+                log.warning("file retention sweep failed: %s", e)
+            await asyncio.sleep(3600)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub._event = asyncio.Event()  # bind to the running loop
@@ -169,6 +200,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             log.info("summarizer off (set BUNCH_SUMMARY_MODEL to enable)")
         if llm.enabled:
             tasks.append(asyncio.create_task(autoreply_loop(hub)))
+        tasks.append(asyncio.create_task(file_sweeper()))
         yield
         for t in tasks:
             t.cancel()
@@ -381,6 +413,22 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         a = machine_agent(machine_of(authorization), body.agent)
         return PlainTextResponse(hub.post(a["name"], body.room, body.text, reply_to=body.re))
 
+    @app.post("/api/v1/machine/file")
+    async def machine_file(request: Request, agent: str, room: str, name: str = "file",
+                           authorization: str | None = Header(None)):
+        """A worker attaches a file (e.g. a generated image) to a room; the reply cites it as ![name](file:ID)."""
+        a = machine_agent(machine_of(authorization), agent)
+        room = room.strip().lower().lstrip("#")
+        if not store.room(room):
+            raise HTTPException(404, "no such room")
+        data = await request.body()
+        if not data or len(data) > s.max_file:
+            raise HTTPException(413, f"file must be 1..{s.max_file} bytes")
+        mime = (request.headers.get("content-type") or "application/octet-stream").split(";")[0].strip().lower()
+        name = "".join(c for c in name if c.isprintable() and c not in '/\\')[:80] or "file"
+        fid = store.add_file(room, name, mime, data, a["name"])
+        return {"id": fid, "markdown": f"![{name.replace(']', '')}](file:{fid})"}
+
     @app.post("/api/v1/machine/report")
     async def machine_report(body: ReportIn, authorization: str | None = Header(None)):
         a = machine_agent(machine_of(authorization), body.agent)
@@ -442,6 +490,50 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(404, "no such room")
         hub.broadcast({"type": "room_deleted", "room": room})
         return {"deleted": room, "messages": n}
+
+    @app.get("/api/admin/files/{fid}")
+    async def admin_file(request: Request, fid: int, authorization: str | None = Header(None)):
+        viewer(request, authorization)
+        row = store.file(fid)
+        if not row:
+            raise HTTPException(404, "no such file")
+        inline = row["mime"] in INLINE_IMAGES  # anything else (SVG, HTML...) downloads instead of running here
+        headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600",
+                   "Content-Security-Policy": "default-src 'none'; sandbox"}
+        if not inline:
+            ascii_name = row["name"].encode("ascii", "replace").decode().replace('"', "").replace("?", "_")
+            headers["Content-Disposition"] = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(row["name"])}'
+        return FileResponse(store.file_path(fid), media_type=row["mime"] if inline else "application/octet-stream",
+                            headers=headers)
+
+    @app.get("/api/admin/files")
+    async def admin_files(request: Request, room: str | None = None, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        rows = store.q("SELECT * FROM files" + (" WHERE room=?" if room else "") + " ORDER BY id DESC LIMIT 1000",
+                       (room,) if room else ())
+        per_room = store.q("SELECT room, COUNT(*) AS n, SUM(size) AS bytes FROM files GROUP BY room ORDER BY room")
+        return {"retention_days": retention_days(), "max_file": s.max_file,
+                "rooms": [dict(r) for r in per_room], "files": [dict(r) for r in rows]}
+
+    @app.put("/api/admin/files/retention")
+    async def admin_files_retention(request: Request, body: RetentionIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        days = max(0.0, body.days)
+        store.set_setting("file_retention_days", repr(days))
+        n = 0
+        if days:
+            n, _ = store.delete_files(older_than=time.time() - days * 86400)
+        return {"retention_days": days, "deleted": n}
+
+    @app.post("/api/admin/files/purge")
+    async def admin_files_purge(request: Request, body: PurgeIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        cutoff = time.time() - body.older_than_days * 86400 if body.older_than_days is not None else None
+        if body.ids is None and not body.room and cutoff is None:
+            raise HTTPException(400, "say which files: ids, room and/or older_than_days")
+        n, freed = store.delete_files(ids=body.ids, room=(body.room or "").strip().lower().lstrip("#") or None,
+                                      older_than=cutoff)
+        return {"deleted": n, "bytes": freed}
 
     @app.delete("/api/admin/messages/{mid}")
     async def admin_delete_message(request: Request, mid: int, authorization: str | None = Header(None)):

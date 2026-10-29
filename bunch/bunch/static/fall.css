@@ -1,0 +1,60 @@
+/* Falling fruit in the header. */
+
+.top {
+  position: relative;
+  overflow: hidden;
+}
+
+@media (max-width: 760px) {
+  .top {
+    position: sticky;
+  }
+}
+
+.fall {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.top > :not(.fall) {
+  position: relative;
+  z-index: 1;
+}
+
+.fall img {
+  position: absolute;
+  top: 0;
+  left: var(--left, 50%);
+  width: var(--size, 18px);
+  height: var(--size, 18px);
+  opacity: .55;
+  pointer-events: none;
+  user-select: none;
+  animation: fruit-fall var(--dur, 9s) linear var(--delay, 0s) infinite;
+}
+
+@keyframes fruit-fall {
+  0% {
+    transform: translateY(-30px) translateX(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(21px) translateX(var(--sway, 10px)) rotate(18deg);
+  }
+  100% {
+    transform: translateY(72px) translateX(calc(var(--sway, 10px) * -0.5)) rotate(-28deg);
+  }
+}
+
+@media (max-width: 760px) {
+  .fall img:nth-child(even) {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fall {
+    display: none !important;
+  }
+}

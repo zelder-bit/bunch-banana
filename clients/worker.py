@@ -61,6 +61,37 @@ def req(method, path, body=None, params=None, timeout=120):
     return json.loads(raw) if is_json else raw
 
 
+OUT_DIR = "bunch-out"  # in a project folder: where the CLI leaves pictures for the room
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def find_images(root, since):
+    """Image files the CLI wrote under root (3 levels deep) since `since`: how a CLI hands back a picture."""
+    found = []
+    base = root.rstrip(os.sep).count(os.sep)
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if not x.startswith(".") and d.count(os.sep) - base < 2]
+        for f in files:
+            p = os.path.join(d, f)
+            try:
+                if os.path.splitext(f)[1].lower() in IMAGE_TYPES and os.path.getmtime(p) >= since:
+                    found.append(p)
+            except OSError:
+                pass
+    return sorted(found)[:4]
+
+
+def upload(agent, room, path):
+    """Stores the file on the hub; returns the ![name](file:ID) text that makes the viewer show it."""
+    with open(path, "rb") as f:
+        data = f.read()
+    q = urllib.parse.urlencode({"agent": agent, "room": room, "name": os.path.basename(path)})
+    r = urllib.request.Request(f"{HUB}/api/v1/machine/file?{q}", method="POST", data=data, headers={
+        "Authorization": "Bearer " + KEY, "Content-Type": IMAGE_TYPES[os.path.splitext(path)[1].lower()]})
+    with urllib.request.urlopen(r, timeout=120) as resp:
+        return json.loads(resp.read().decode())["markdown"]
+
+
 def report(agent, status, tokens=0, calls=0, until=None, room=None):
     try:
         return req("POST", "/api/v1/machine/report", {"agent": agent, "status": status, "tokens": tokens,
@@ -276,12 +307,17 @@ class Worker:
         system = (cfg.get("system") or DEFAULT_SYSTEM.format(name=name)) + \
             f" Keep the answer under about {int(cfg.get('max_output') or 800)} tokens."
         power, d = effective_power(cfg)
+        # Pictures come back as files in a folder only the worker uses, so nothing else in a project gets posted.
+        out = os.path.join(d, OUT_DIR) if d else self.scratch
+        system += (f" To send a picture, save it as a .png/.jpg/.webp file in {'./' + OUT_DIR + '/' if d else 'the current directory'}."
+                   if power != "read" else "")
         if power != (cfg.get("power") or "answer"):
             print(f"  power {cfg.get('power')} not allowed here (WORKER_MAX_POWER/WORKER_DIRS); using {power}",
                   file=sys.stderr)
         argv, cwd, stdin = build_cmd(cfg, system, power, d or self.scratch,
                                      build_prompt(job, int(cfg.get("max_input_chars") or 12000)), deep)
         report(name, "busy", room=job["room"])
+        started_at = time.time() - 1
         try:
             p = subprocess.run(argv, input=stdin, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
             text, tokens, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
@@ -289,6 +325,21 @@ class Worker:
             text, tokens, error = "", 0, f"{cli} is not installed on {self.machine}"
         except subprocess.TimeoutExpired:
             text, tokens, error = "", 0, f"timed out after {TIMEOUT}s"
+        pics = []
+        if not LIMIT_RE.search(error or ""):
+            for path in find_images(out, started_at) if os.path.isdir(out) else []:
+                try:
+                    pics.append(upload(name, job["room"], path))
+                except (urllib.error.URLError, OSError) as e:
+                    print(f"  could not upload {path}: {e}", file=sys.stderr)
+                    continue
+                try:
+                    os.remove(path)  # it's on the hub now; the folder is the worker's, not the project's
+                except OSError as e:
+                    print(f"  uploaded but could not remove {path}: {e}", file=sys.stderr)
+        if pics:
+            text = (text + "\n\n" + "\n".join(pics)).strip()
+            error = None  # an image with no words is still an answer
         if error and LIMIT_RE.search(error):
             self.cool_until[cli] = until = reset_time(error)
             for other, c in self.agents.items():  # same login: every agent on this CLI is out

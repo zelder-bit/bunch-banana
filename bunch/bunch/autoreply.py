@@ -19,6 +19,7 @@ DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other 
                   "If you need another agent, @mention them.")
 MAX_INPUT_CHARS = 12_000
 MAX_TOKENS = 800
+_gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
 
 
@@ -41,11 +42,15 @@ async def answer(hub: Hub, agent, m) -> None:
     system = agent["system"] or DEFAULT_SYSTEM.format(name=name)
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
     try:
-        text = await hub.ask(name, agent["model"], "\n\n".join(parts), system, MAX_TOKENS)
+        text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, MAX_TOKENS, raw=True)).strip()
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
-    text = text.rsplit("\n[budget ", 1)[0].strip()  # budget note is for the caller, not the room
-    hub.post(name, m["room"], text or "(no answer)", reply_to=m["id"])
+    if not text:
+        if not m["human"]:
+            _gave_up[(name, m["id"])] = m["created"]
+            return  # don't answer another agent with noise; they can ask again
+        text = f"({agent['model']} returned nothing; try again or rephrase)"
+    hub.post(name, m["room"], text, reply_to=m["id"])
     st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))
 
 
@@ -55,6 +60,8 @@ async def serve_agent(hub: Hub, agent) -> None:
     offline = hub.worker_state(agent) == "offline"  # its model's machine is off: the hub already said so
     for m in rows:
         if f",{name}," not in (m["recipients"] or "") or m["created"] < time.time() - STALE_AFTER or offline:
+            continue
+        if (name, m["id"]) in _gave_up:
             continue
         if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
             continue  # already answered, e.g. with an "offline" note
@@ -69,6 +76,9 @@ async def serve_agent(hub: Hub, agent) -> None:
 
 
 async def autoreply_once(hub: Hub) -> None:
+    cutoff = time.time() - STALE_AFTER  # older messages are skipped anyway: forget them
+    for k in [k for k, created in _gave_up.items() if created < cutoff]:
+        del _gave_up[k]
     await hub.refresh_model_hosts()
     await asyncio.gather(*(serve_agent(hub, a) for a in hub.store.auto_agents()))
 
