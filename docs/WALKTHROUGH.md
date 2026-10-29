@@ -46,7 +46,7 @@ Things the gateway gives you:
 - **Fallbacks.** If the GPU box is turned off, the gateway can automatically use a paid model instead.
 - **Common language.** The gateway "speaks OpenAI," meaning it accepts requests in the same format as OpenAI's own service. Almost every AI tool supports that format, so almost anything can use the gateway by changing one setting.
 
-The phone list is written by you. The gateway doesn't go looking for models, so a model you pull with Ollama, or a whole new Ollama machine, only becomes usable once you add it to `litellm/config.yaml` and restart the gateway. [models.md](models.md) walks through it step by step.
+The phone list is written by you. The gateway doesn't go looking for models, so a model you pull with Ollama, or a whole new Ollama machine, only becomes usable once you add it to the list. There are two ways to do that: add it to `litellm/config.yaml` and restart the gateway, or, if you've turned on the gateway's database, click **Models…** in the web page and add it there with no restart. [models.md](models.md) walks through both step by step.
 
 ### bunch: the group chat
 
@@ -116,7 +116,7 @@ Every rule below exists to keep agents' desks clear.
 
 4. **One line per message.** Long text hides behind `get`, and even `get` hands it over 4,000 characters at a time.
 
-5. **Room summaries for newcomers.** A small, cheap model (ideally a free local one) keeps a running summary of each room, about 120 words, refreshed every dozen messages. An agent opening a room for the first time gets the summary plus the latest 5 relevant messages, not 500 messages of backlog.
+5. **Room summaries for newcomers.** A small, cheap model (ideally a free local one) keeps a running summary of each room, about 120 words, refreshed after every 6 new messages. An agent opening a room for the first time gets the summary plus the latest 5 relevant messages, not 500 messages of backlog.
    > *Example:* `joined backups. summary: Nightly backup failing since Mon (disk full). coder proposed pruning snapshots older than 30 days (#18); waiting on human approval.`
 
 6. **Better summaries for long messages.** If an agent posts something long without a summary, bunch first uses the opening words. Then the small model writes a proper one-line summary in the background.
@@ -129,13 +129,13 @@ Every rule below exists to keep agents' desks clear.
 
 ## 6. Safety rails
 
-AI agents can get stuck in loops, like two polite robots saying "after you" forever. bunch has four protections:
+AI agents can get stuck in loops, like two polite robots saying "after you" forever. bunch has several protections:
 
-- **Daily budgets.** Each agent has a daily limit on tokens it can spend through `ask`: 200,000 by default, changeable per agent. When it's used up, `ask` politely refuses until midnight UTC.
+- **Daily budgets.** Each agent has a daily token limit: 200,000 by default, changeable per agent. It counts model calls through the gateway (`ask`, and the answers the hub writes for auto agents) plus the paid CLI runs a machine does for that agent (section 8). Cached tokens count a tenth, the way providers bill them. When it's used up, the agent stops answering until midnight UTC.
   > *Example:* `docker compose exec bunch python -m bunch.cli budget coder 50000`
 - **Rate limit.** An agent can post at most 20 messages a minute.
 - **Loop breaker.** If a room gets 20 messages in a row from agents with no human in between, the room pauses, and agents are told "paused: waiting for a human" until you say something. The web page shows a red "Paused" banner at the top of that room, so you know it's waiting on you.
-- **Responder manners.** The ready-made responder bot (section 8) always answers humans, but answers another agent only if that agent writes `@its-name` on purpose. Two bots can't accidentally ping-pong forever.
+- **Responder manners.** The agents bunch runs for you (section 8) always answer humans, but answer another agent only if that agent writes `@its-name` on purpose. Two bots can't accidentally ping-pong forever.
 - **Explicit asks only.** Another agent's message wakes an agent only when it asks it something, like `@events, can you…`. A passing mention ("check with @legal") doesn't. Agents answer each other at most two messages deep below a human's message.
 
 ### Bot mode
@@ -162,7 +162,7 @@ bunch has three entrances, and all lead to the same five tools.
 claude mcp add --transport http bunch http://bunch.lan:8700/mcp --header "Authorization: Bearer bunch_xxx"
 ```
 
-From then on, Claude sees `read`, `post`, `get`, `ask` and `rooms` as abilities it has. You might say "check bunch for anything addressed to you," and it calls `read` on its own.
+From then on, Claude sees `read`, `post`, `get`, `ask` and `rooms` as abilities it has. You might say "check bunch for anything addressed to you," and it calls `read` on its own. `read` can also wait up to a minute for something new to arrive instead of answering "no new messages" at once.
 
 **Entrance 2: the stdio bridge.** Some AI apps can only use tool servers that run as a program on the same computer. `clients/mcp_stdio_bridge.py` is a tiny go-between: it runs locally and forwards everything to bunch.
 
@@ -187,9 +187,17 @@ client.chat.completions.create(model="local/coder", messages=[{"role": "user", "
 
 ---
 
-## 8. Making a local model join the chat: the responder
+## 8. Making models join the chat
 
-On its own, Ollama doesn't chat in rooms; it just answers when asked. `clients/responder.py` turns any model into a member of the bunch:
+On its own, Ollama doesn't chat in rooms; it just answers when asked. There are three ways to give a model a seat in the chat. When you create an agent in the web page, the **Who answers?** picker offers them, grouped by the computer that does the work.
+
+### Auto agents: the hub answers for them
+
+The simplest way needs no extra program. Create an agent and pick a gateway model for it (or use `add-agent helper --model local/general` on the command line). bunch itself then watches for messages addressed to that agent, builds the same small prompt the responder below uses, asks the model and posts the answer. You can give it a persona, like "You are helper. Be brief."
+
+### The responder: a model on another computer
+
+`clients/responder.py` does the same job as a separate program, for when you'd rather run it somewhere else. It turns any model into a member of the bunch:
 
 1. It logs in as an agent, for example `coder`.
 2. It waits for new messages using **long-polling**: it asks "anything new?" and bunch holds the question open for up to 50 seconds, answering the instant something arrives. Replies are instant, without the waste of checking every second.
@@ -210,7 +218,21 @@ Say your desktop, `workstation`, is logged in to Claude Code, Codex and Antigrav
 
 > *From the laptop:* `@codex why does this regex backtrack?` → workstation runs `codex exec`, and the answer appears in the room a few seconds later. If workstation is asleep, codex replies at once: "(workstation is offline, so codex can't answer; not answered)".
 
+A few things keep a $20 plan going a long way:
+
+- **Power.** Each CLI agent has a power setting: *answer* (no tools, just a reply), *read* (may read files in one folder) or *edit files and run commands* in that folder. The desktop has the final say: its `WORKER_MAX_POWER` and `WORKER_DIRS` settings cap whatever the web page asks for, and the reply says so if it was lowered.
+- **`!deep`.** A stronger model runs only when a message contains `!deep`. The agent's "deep" model is set in the web page.
+- **One at a time.** Jobs on a machine run one after another.
+- **Cooling down.** When a CLI says its plan's limit is hit, every agent on that CLI cools down until the reset time, and anyone who asks gets told so at once.
+- **Pictures.** An agent with the top power level can save a picture in a `bunch-out` folder, and it's posted into the room with the answer.
+
 The sidebar groups agents by the computer that answers. Under **workstation** are its CLI agents and any gateway model served from it, such as a `helper` agent on `local/general`. Then come **Other servers & cloud APIs** and **Own sessions** (ones you drive yourself).
+
+### Who answers, and in what order
+
+- **Several agents at once.** If one message asks `@helper` and `@codex`, they answer one after another, not all at once, and each sees the answers before it. Quick local models go first.
+- **Messages that name nobody.** If routing is on (`BUNCH_ROUTER_MODEL` in `.env`, set to `local/summary` in the example), a small model reads the message and the agents' "Good at" descriptions, and picks the best one, cheapest first. A short follow-up like "go on" goes back to whoever answered last. An admin can also mark one agent **First responder**, and then it takes every un-addressed message without asking the model. That setting only takes effect while routing is on.
+- **Routing off.** A message that names nobody goes to the whole room, and only agents that read the room will see it.
 
 ---
 
@@ -221,13 +243,15 @@ Open `http://your-server:8700` and sign in with your name and password (an admin
 - **Top bar:** the bunch logo, a live indicator (green means updates are flowing), a 🔔 button to turn on notifications, a ☾/☀︎ button to switch between light and dark (it remembers your choice), your name, and Sign out. Click your name to change your password. Your other devices are signed out when you do.
 - **Left side:** a search box, your rooms, then your agents and (for admins) people.
   - An orange bubble counts unread messages in a room. A red `@2` bubble means two of them are addressed to you. The tab title shows the unread count too, like `(3) bunch`.
-  - A green dot means an agent was active in the last 10 minutes, and its line shows today's tokens.
-  - There are boxes to create a new room, agent or person. A new agent's key is shown **once**, so copy it right away.
-- **Managing agents and people (admins):** click an agent to change what it's good at, its model and persona, or its daily budget, to give it a new key (the old one stops working at once), or to delete it. Click a person to reset their password, make them an admin, or remove them. The last admin can't be removed by mistake. Admins also get a **Delete room** button at the top of each room, which removes the room and every message in it (agents can still post there later, which starts it fresh).
+  - A green dot means the agent would answer right now: an auto agent unless its model runs on a paired computer that's off, a machine's agent while that machine is on and not cooling down, and an own session if it checked the chat in the last 10 minutes. Hover over the dot to see why. Each agent's line shows today's tokens.
+  - There are boxes to create a new room, agent, person or machine. A new agent's key is shown **once**, so copy it right away. (Agents that a machine or the hub answers for don't need a key.)
+- **Managing agents and people (admins):** click an agent to change what it's good at, who answers for it, its persona, whether it's the first responder, or its daily budget, to give it a new key (the old one stops working at once), or to delete it. Click a person to reset their password, make them an admin, or remove them. The last admin can't be removed by mistake.
+- **Other admin tools:** **Models…** lists the gateway's models, and adds, tests, renames or removes them when the gateway's database is on. **Files…** shows the pictures agents have posted, room by room, deletes them, and can delete them automatically after some days. At the top of each room, **Bot mode** switches bot mode on and off (section 6), and **Delete room** removes the room and every message in it (agents can still post there later, which starts it fresh).
 - **Search:** type in the search box and press Enter. Matching messages from every room are listed, newest first. Click one to jump straight to it, even if it's far back in the room.
 - **Fruit avatars:** every agent gets its own fruit, picked from its name so it never changes. People are always oranges.
 - **Fruit decorations:** small fruit and leaf motifs run along the page dividers, and a fruit sits on the corner of each message. Dialogs and popups get a leafy vine along their top edge. A few fruit also drift down across the header. They stop (and the header fruit disappear) if your system is set to reduce motion.
 - **Main area:** the room's summary at the top, then messages. Yours have an orange tint, and messages addressed to you get a yellow outline. Small labels show who a message was sent to (`→ coder`) and what it replies to (`re #17`). Long messages have a **Full message** toggle.
+  - Pictures an agent attached show under its message. Click one to open it full size.
   - A room opens on its latest 200 messages. **Load earlier messages** at the top pages further back.
   - While an auto agent works on an answer, "helper is thinking…" shows under the messages.
   - Admins see a small ✕ on each message to delete it for good, for example a pasted password or a runaway agent's spam.
@@ -248,15 +272,21 @@ New messages appear without refreshing. That's a **WebSocket**: a connection the
 | `.env.example` | The template for `.env`, safe to share. |
 | `litellm/config.yaml` | The gateway's phone list of models. **Never committed.** |
 | `litellm/config.example.yaml` | The template for that list. |
-| `bunch/bunch/hub.py` | bunch's brain: what `read`, `post`, `get`, `ask` and `rooms` do. |
+| `bunch/bunch/hub.py` | bunch's brain: what `read`, `post`, `get`, `ask` and `rooms` do, plus the loop guards and bot mode. |
 | `bunch/bunch/store.py` | Saving and loading from the database file. |
 | `bunch/bunch/mcp.py` | Entrance 1: the MCP translator. |
 | `bunch/bunch/app.py` | The web server: all the addresses (URLs) bunch answers on. |
+| `bunch/bunch/autoreply.py` | The background job that answers for auto agents (section 8). |
+| `bunch/bunch/router.py` | Picks who answers a message that names nobody (section 8). |
 | `bunch/bunch/summarizer.py` | The background job that writes room and message summaries. |
+| `bunch/bunch/llm.py` | How bunch talks to the gateway. |
+| `bunch/bunch/config.py` | Every setting and its default. |
 | `bunch/bunch/static/` | The web page, its theme (`bunch.css`), the falling-fruit header (`fall.css`), fonts and fruit artwork. |
 | `bunch/bunch/cli.py` | Admin commands: add agents and people, set budgets, change keys, make backups. |
-| `/data/bunch.db` (in the `bunch-data` volume) | Everything bunch remembers: rooms, messages, agents, people. Copy it safely while bunch runs with `python -m bunch.cli backup /data/backup.db` (see the README for a nightly cron line). |
-| `clients/` | Small helper programs to copy onto your other machines. |
+| `/data/bunch.db` (in the `bunch-data` volume) | Everything bunch remembers: rooms, messages, agents, people, machines. Copy it safely while bunch runs with `python -m bunch.cli backup /data/backup.db` (see the README for a nightly cron line). |
+| `/data/files/` (same volume) | Pictures agents attached. The backup command copies them to `/data/backup.db.files/`. |
+| `clients/` | Small helper programs to copy onto your other machines: `bunchctl.py`, `responder.py`, `worker.py` (machines) and the stdio bridge. |
+| `docs/` | This walkthrough, plus [clients.md](clients.md), [models.md](models.md) and [proxmox.md](proxmox.md). |
 | `scripts/check-public.sh` | The leak check (next section). |
 
 ---
