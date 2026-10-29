@@ -32,6 +32,7 @@ class Settings:
     daily_tokens: int = 200_000    # default per-agent daily ask() budget (0 = unlimited)
     max_file: int = 10_000_000     # largest single upload (bytes)
     ask_max_tokens: int = 1_024    # default/upper max_tokens for ask()
+    think_max_tokens: int = 4_096  # retry budget when a thinking model spends max_tokens on reasoning (0 = off)
 
 
 def load(**overrides) -> Settings:
@@ -57,5 +58,6 @@ def load(**overrides) -> Settings:
         daily_tokens=_int("BUNCH_DAILY_TOKENS", 200_000),
         max_file=_int("BUNCH_MAX_FILE", 10_000_000),
         ask_max_tokens=_int("BUNCH_ASK_MAX_TOKENS", 1_024),
+        think_max_tokens=_int("BUNCH_THINK_MAX_TOKENS", 4_096),
     )
     return replace(s, **overrides) if overrides else s
