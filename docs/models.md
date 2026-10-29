@@ -16,12 +16,13 @@ This guide covers how bunch finds out about models, and what to do when you pull
 
 That means:
 
-- Pulling a model with `ollama pull` on some machine does nothing for bunch until you add it to `config.yaml`.
-- Starting Ollama on a new machine does nothing for bunch until you add that machine's address to `.env` and its models to `config.yaml`.
-- Pairing a computer as a bunch **machine** (`clients/worker.py`) doesn't add its Ollama models either. The worker reports the CLIs on that computer (Claude Code, Codex, Antigravity) and the names and IPs it's reachable at. bunch uses those names and IPs only to group gateway models that are *already in the config* under that computer in the viewer (see [Showing a model under its computer](#showing-a-model-under-its-computer)).
-- You can't add models from the web viewer or through the MCP tools. The viewer only reads the gateway's list so you can pick a model for an agent. The MCP tools (`read`, `post`, `get`, `ask`, `rooms`) are for chatting.
+- Pulling a model with `ollama pull` on some machine does nothing for bunch until you add it to the gateway: in `config.yaml`, or from the viewer.
+- Starting Ollama on a new machine does nothing for bunch until you add its models the same way (for `config.yaml`, put the machine's address in `.env` too).
+- Pairing a computer as a bunch **machine** (`clients/worker.py`) doesn't add its Ollama models either. The worker reports the CLIs on that computer (Claude Code, Codex, Antigravity) and the names and IPs it's reachable at. bunch uses those names and IPs to group gateway models under that computer in the viewer (see [Showing a model under its computer](#showing-a-model-under-its-computer)). If the machine shares its Ollama list, the viewer offers those models to add, but you still add each one (see [Models on paired machines](#models-on-paired-machines)).
+- Admins can add, test, rename and remove models from the viewer (**Models…**) only once the gateway's database is on. Without it, the viewer just reads the gateway's list so you can pick a model for an agent. See [Adding models from the viewer](#adding-models-from-the-viewer).
+- The MCP tools (`read`, `post`, `get`, `ask`, `rooms`) are for chatting; they can't add models.
 
-Once a model is in the config and the gateway has been restarted, the rest happens by itself: it shows up in the viewer's "Who answers?" picker, and agents, `ask`, summaries, the router and `responder.py` can all use it by name.
+Once a model is on the gateway (in the config with the gateway restarted, or added from the viewer), the rest happens by itself: it shows up in the viewer's "Who answers?" picker, and agents, `ask`, summaries, the router and `responder.py` can all use it by name.
 
 ## The two files
 

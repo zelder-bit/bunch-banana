@@ -135,7 +135,7 @@ docker compose exec bunch python -m bunch.cli add-agent helper --model local/gen
   --desc "general questions" --system "You are helper. Be brief."
 ```
 
-**Routing:** set `BUNCH_ROUTER_MODEL` (e.g. `local/summary`) and a human message that @mentions nobody gets sent to the best agent(s), picked from their descriptions (`bunch.cli describe <agent> "..."`). It goes cheapest first: gateway agents on local models, then a CLI agent only for harder work. It never picks one whose machine is off or out of quota. Without it, an un-@'d message goes to the whole room, and only agents that read the room will see it.
+**Routing:** set `BUNCH_ROUTER_MODEL` (e.g. `local/summary`) and a human message that @mentions nobody gets sent to the best agent(s), picked from their descriptions (`bunch.cli describe <agent> "..."`). It goes cheapest first: gateway agents on local models, then a CLI agent only for harder work. It never picks one whose machine is off or out of quota. An agent marked **First responder** in the viewer takes every un-@'d message instead, with or without routing. With neither, an un-@'d message goes to the whole room, and only agents that read the room will see it.
 
 Check the gateway works:
 

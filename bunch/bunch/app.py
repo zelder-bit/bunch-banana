@@ -25,7 +25,7 @@ from .config import Settings, load
 from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
 from .router import route
-from .store import Store
+from .store import RESERVED_NAMES, Store
 from .summarizer import summarizer_loop
 
 log = logging.getLogger("bunch")
@@ -92,6 +92,7 @@ class UserIn(BaseModel):
 
 class PasswordIn(BaseModel):
     password: str
+    current_password: str | None = None  # required when you change your own password from a session
 
 
 class AdminFlagIn(BaseModel):
@@ -205,6 +206,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     s = settings or load()
     if not s.admin_token:
         raise SystemExit("BUNCH_ADMIN_TOKEN is not set. Put a long random value in .env (see README).")
+    if s.human_name in RESERVED_NAMES:
+        raise SystemExit(f"BUNCH_HUMAN_NAME can't be '{s.human_name}': the hub posts its own notes under that name.")
     store = Store(s.db_path)
     store.ensure_human(s.human_name)
     llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens)
@@ -317,8 +320,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     # ---------------------------------------------------------------- login
-    @app.post("/api/auth/login")
-    async def login(body: LoginIn, request: Request):
+    def check_login_rate(request: Request) -> list[float]:
+        """Recent failed password checks from this address; 429 after 10 in 5 minutes."""
         ip = request.client.host if request.client else "?"
         now = time.time()
         for old in [k for k, ts in failed_logins.items() if ts[-1] < now - 300]:  # keep the dict small
@@ -326,12 +329,20 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         recent = [t for t in failed_logins.get(ip, []) if t > now - 300]
         if len(recent) >= 10:
             raise HTTPException(429, "too many failed sign-ins; try again in a few minutes")
+        return recent
+
+    async def failed_login(request: Request, recent: list[float]) -> None:
+        failed_logins[request.client.host if request.client else "?"] = recent + [time.time()]
+        await asyncio.sleep(0.5)
+
+    @app.post("/api/auth/login")
+    async def login(body: LoginIn, request: Request):
+        recent = check_login_rate(request)
         row = store.verify_user(body.name, body.password)
         if not row:
-            failed_logins[ip] = recent + [now]
-            await asyncio.sleep(0.5)
+            await failed_login(request, recent)
             raise HTTPException(401, "wrong name or password")
-        failed_logins.pop(ip, None)
+        failed_logins.pop(request.client.host if request.client else "?", None)
         row = store.agent(row["name"])  # verify_user may have re-hashed the password
         request.session["user"] = row["name"]
         request.session["pw"] = _pw_mark(row["pw_hash"])
@@ -456,6 +467,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         continue  # a double send, or another agent only naming this one / chain too deep
                     if hub.turn_blocker(r, name):
                         hub.held.setdefault(name, {})[r["id"]] = None  # the cursor moved on: keep it here
+                        continue
+                    why = hub.over_budget(name)
+                    if why:  # the hub enforces budgets, so a restarted worker can't run past one
+                        try:
+                            hub.post(name, r["room"], f"({why}; not answered)", reply_to=r["id"])
+                        except HubError:
+                            pass  # rate limit / paused room: the note is a courtesy
                         continue
                     parent = store.message(r["reply_to"]) if r["reply_to"] else None
                     jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
@@ -874,6 +892,12 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         who, admin = viewer(request, authorization)
         if who != name and not admin:
             raise HTTPException(403, "admins only")
+        if who == name and not is_admin(_bearer(authorization)):
+            # Your own password from a session: prove it's you, so a borrowed or stolen session can't lock you out.
+            recent = check_login_rate(request)
+            if not store.verify_user(name, body.current_password or ""):
+                await failed_login(request, recent)
+                raise HTTPException(403, "current password is wrong")  # not 401: that would sign the viewer out
         try:
             store.set_password(name, body.password)
         except ValueError as e:

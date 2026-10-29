@@ -265,7 +265,13 @@ def test_user_login_session_and_roles(env):
     assert msg["sender"] == "pat" and msg["human"] and msg["to"] == ["alice"]
     assert c.post("/api/admin/agents", json={"name": "x"}).status_code == 403
     assert c.get("/api/admin/users").status_code == 403
-    assert c.put("/api/admin/users/pat/password", json={"password": "new password"}).status_code == 200
+    # Changing your own password needs the current one; a wrong one is 403, not 401 (that would sign you out).
+    r = c.put("/api/admin/users/pat/password", json={"password": "new password"})
+    assert r.status_code == 403 and "current password" in r.text
+    assert c.put("/api/admin/users/pat/password", json={"password": "new password", "current_password": "nope nope"}).status_code == 403
+    assert c.get("/api/auth/me").status_code == 200  # still signed in
+    assert c.put("/api/admin/users/pat/password",
+                 json={"password": "new password", "current_password": "correct horse"}).status_code == 200
     with c.websocket_connect("/ws") as ws:   # the login cookie is enough for live updates
         ws.send_json({})
         assert ws.receive_json()["type"] == "ready"
@@ -611,7 +617,8 @@ def test_password_change_signs_out_other_sessions(env):
     for cl in (c, other):
         assert cl.post("/api/auth/login", json={"name": "pat", "password": "first password"}).status_code == 200
     # pat changes their own password: this session stays in, the other one is signed out.
-    assert c.put("/api/admin/users/pat/password", json={"password": "second password"}).status_code == 200
+    assert c.put("/api/admin/users/pat/password",
+                 json={"password": "second password", "current_password": "first password"}).status_code == 200
     assert c.get("/api/auth/me").status_code == 200
     assert other.get("/api/auth/me").status_code == 401
     # an admin reset signs pat out everywhere
@@ -905,6 +912,35 @@ def test_machine_reads_jobs_and_speaks_only_for_its_agents(env):
                   headers=h(key)).text == "ok 30/250"
 
 
+def test_hub_name_is_reserved(env, tmp_path):
+    c, *_ = env
+    r = c.post("/api/admin/agents", json={"name": "Bunch"}, headers=adm())
+    assert r.status_code == 400 and "reserved" in r.text
+    r = c.post("/api/admin/users", json={"name": "bunch", "password": "long enough"}, headers=adm())
+    assert r.status_code == 400 and "reserved" in r.text
+    with pytest.raises(SystemExit):
+        create_app(Settings(db_path=str(tmp_path / "x.db"), admin_token=ADMIN, human_name="bunch"), FakeLLM())
+
+
+def test_hub_holds_machine_agents_to_their_budget(env):
+    c, k, app, _ = env  # daily_tokens=250
+    key = _machine(c)
+    _on(c, "alice")
+    r = c.post("/api/v1/machine/report", json={"agent": "alice", "status": "online", "tokens": 400, "calls": 1},
+               headers=h(key))
+    assert r.text == "over budget 400/250"
+    # A worker that restarted has forgotten that: the hub mustn't hand it the job anyway.
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@alice one more please"}, headers=adm())
+    assert c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"] == []
+    msgs = c.get("/api/admin/rooms/r/messages", headers=adm()).json()
+    assert msgs[-1]["sender"] == "alice" and msgs[-1]["reply_to"] == msgs[-2]["id"]
+    assert msgs[-1]["summary"] == "(daily token budget used (400/250); resets 00:00 UTC; not answered)"
+    # Raising the budget lets the next message through.
+    c.put("/api/admin/agents/alice/budget", json={"daily_tokens": 10_000}, headers=adm())
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@alice and now?"}, headers=adm())
+    assert [j["text"] for j in c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"]] == ["@alice and now?"]
+
+
 def test_offline_machine_says_so_and_drops_the_message(env):
     import time
     c, k, app, _ = env
@@ -998,6 +1034,21 @@ def test_router_first_responder_and_one_auto_agent(env):
     assert not any(a.get("first_responder") for a in c.get("/api/admin/agents", headers=adm()).json())
 
 
+def test_first_responder_works_with_routing_off(env):
+    c, k, app, llm = env
+    assert not app.state.hub.s.router_model  # BUNCH_ROUTER_MODEL blank
+    c.post("/api/admin/agents", json={"name": "qwen", "model": "local/small"}, headers=adm())
+    last = lambda room: [m for m in c.get(f"/api/admin/rooms/{room}/messages", headers=adm()).json() if m["human"]][-1]["to"]
+
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "what is the capital of peru"}, headers=adm())
+    assert last("r") == []  # no first responder, no routing: room-wide, as before
+    c.put("/api/admin/agents/qwen/first", json={"on": True}, headers=adm())
+    c.post("/api/admin/rooms/r2/messages", json={"room": "r2", "text": "and the capital of chile"}, headers=adm())
+    assert last("r2") == ["qwen"]
+    c.post("/api/admin/rooms/r2/messages", json={"room": "r2", "text": "@alice over to you"}, headers=adm())
+    assert last("r2") == ["alice"]  # an @mention still wins
+
+
 def _hosts(app, llm, table):
     async def hosts():
         return table
@@ -1081,8 +1132,13 @@ def test_worker_builds_lean_cli_commands():
     assert argv[argv.index("--model") + 1] == "opus" and "acceptEdits" in argv and "--system-prompt" not in argv
     argv, _, stdin = w.build_cmd({"cli": "codex", "model": ""}, "sys", "read", "/d", "p")
     assert argv[argv.index("-s") + 1] == "read-only" and "-m" not in argv and argv[-1] == "-" and stdin == "sys\n\np"
+    assert "--disable" not in argv  # reading the folder needs the shell
     argv, _, _ = w.build_cmd({"cli": "codex"}, "s", "full", "/d", "p")
-    assert argv[argv.index("-s") + 1] == "workspace-write"
+    assert argv[argv.index("-s") + 1] == "workspace-write" and "--disable" not in argv
+    # Answer-only: its read-only sandbox can still read any file, so the shell is turned off entirely.
+    argv, _, _ = w.build_cmd({"cli": "codex"}, "s", "answer", "/d", "p")
+    disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
+    assert disabled == {"shell_tool", "unified_exec"} and argv[argv.index("-s") + 1] == "read-only" and argv[-1] == "-"
     # agy ignores stdin, so the prompt goes in -p (last, so no flag can swallow it).
     argv, _, stdin = w.build_cmd({"cli": "agy", "model": "gemini-3.8-flash-low"}, "sys", "answer", "/d", "p")
     assert argv[-2:] == ["-p", "sys\n\np"] and stdin is None and "--sandbox" in argv

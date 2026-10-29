@@ -27,9 +27,12 @@ BACK_REF_RE = re.compile(r"\b(?:this|that|it|those|these|more|again|above|expand
 
 
 async def route(hub: Hub, room: str, text: str, timeout: float = 20.0, sender: str | None = None) -> list[str]:
-    """Returns agent names to address; [] when routing is off, fails, or picks nobody."""
+    """Returns agent names to address; [] when nobody is picked. The first responder needs no model, so it
+    takes un-@'d messages even with routing off; the follow-up rules and the model pick need routing on."""
     st, s = hub.store, hub.s
-    if not s.router_model or not hub.llm.enabled:
+    routing = bool(s.router_model and hub.llm.enabled)
+    first = st.setting("first_responder")
+    if not routing and not first:
         return []
     await hub.refresh_model_hosts()  # a gateway model whose machine is off is offline too
     cutoff = time.time() - 600
@@ -52,16 +55,17 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0, sender: s
     # A follow-up goes to whoever answered last here, not to a new pick: any very short message, or one
     # that refers back when the last agent message answered this same person.
     last = st.one("SELECT sender, reply_to FROM messages WHERE room=? AND human=0 AND created>? ORDER BY id DESC LIMIT 1",
-                  (room, time.time() - FOLLOW_UP_WINDOW))
+                  (room, time.time() - FOLLOW_UP_WINDOW)) if routing else None
     if last and last["sender"] in names:
         if len(text.split()) <= FOLLOW_UP_WORDS:
             return [last["sender"]]
         asked = st.message(last["reply_to"]) if last["reply_to"] else None
         if sender and asked and asked["sender"] == sender and BACK_REF_RE.search(text):
             return [last["sender"]]
-    first = st.setting("first_responder")
     if first in names:  # the admin picked who takes un-@'d messages: no need to ask a model
         return [first]
+    if not routing:  # first responder is offline or cooling: the message goes to the whole room
+        return []
     roster = "\n".join(f"- {a['name']}: {a['description'] or 'no description'} ({label})" for a, label in agents)
     recent = hub.recent_lines(room, 0, 6)
     user = (f"Agents:\n{roster}\n\nRoom #{room} summary: {one_line(hub.room_summary(room), 400)}\n\n"

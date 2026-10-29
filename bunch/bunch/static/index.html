@@ -465,7 +465,9 @@
         + (outside ? `That folder isn't in ${m.name}'s WORKER_DIRS (${(m.dirs || []).join(", ") || "none"}), so it will run as answer only. ` : "")
         + (power.value !== "full" ? "Pictures need \"Edit files and run commands\". " : "")
         + (power.value === "full" ? "Anyone who can @mention this agent can make it change files and run commands there."
-          : power.value === "read" ? "Can read anything in the folder and quote it into the chat." : "");
+          : power.value === "read" ? (p.cli === "claude" ? "Can read anything in the folder and quote it into the chat."
+            : `Can read and quote files in the folder. ${CLI_NAMES[p.cli] || p.cli} may also read files outside it, anything `
+              + `the user on ${m?.name || "that machine"} can (e.g. ~/.ssh), so only use this where everyone in the chat is trusted.`) : "");
     };
     who.onchange = power.onchange = sync; dir.oninput = sync;
     sync();
@@ -669,21 +671,24 @@
       if (await act(() => api(`/api/admin/users/${enc(u.name)}`, { method: "DELETE" }), `${u.name} removed`)) { $("panel").close(); loadUsers(); loadAgents(); }
     };
     openPanel(u.name,
-      field("Reset password", pw, "Signs them out everywhere."),
-      h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: setPw }, "Set password")),
+      ...(self  // your own password needs your current one: use the same panel as clicking your name
+        ? [h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn", onclick: openMyPasswordPanel }, "Change my password…"))]
+        : [field("Reset password", pw, "Signs them out everywhere."),
+           h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: setPw }, "Set password"))]),
       h("label", { class: "check" }, adminBox, self ? " Admin (ask another admin to change this)" : " Admin (manage agents and people)"),
       self ? null : h("div", { class: "panel-danger" }, h("button", { type: "button", class: "btn small danger", onclick: remove }, "Remove person")));
   }
 
   function openMyPasswordPanel() {
+    const cur = h("input", { type: "password", autocomplete: "current-password", "aria-label": "Current password" });
     const pw = passwordField("New password"), again = passwordField("New password again");
     const save = async () => {
       if (pw.value !== again.value) return toast("The passwords don't match", "bad");
-      if (await act(() => api(`/api/admin/users/${enc(me.name)}/password`, { method: "PUT", body: JSON.stringify({ password: pw.value }) }),
-        "Password changed")) $("panel").close();
+      if (await act(() => api(`/api/admin/users/${enc(me.name)}/password`, { method: "PUT",
+        body: JSON.stringify({ password: pw.value, current_password: cur.value }) }), "Password changed")) $("panel").close();
     };
     openPanel("Change my password",
-      field("New password", pw), field("Again", again, "Your other devices will be signed out."),
+      field("Current password", cur), field("New password", pw), field("Again", again, "Your other devices will be signed out."),
       h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Change password")));
   }
   $("whoami").onclick = openMyPasswordPanel;

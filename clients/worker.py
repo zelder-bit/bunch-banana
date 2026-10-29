@@ -214,6 +214,8 @@ def build_cmd(cfg, system, power, workdir, prompt, deep=False):
     if cli == "codex":
         argv = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--ignore-rules"]
         argv += ["-m", model] if model else []
+        if power == "answer":  # Codex's read-only sandbox still lets commands read any file the user can: no shell
+            argv += ["--disable", "shell_tool", "--disable", "unified_exec"]
         argv += ["-s", "workspace-write" if power == "full" else "read-only", "-C", workdir, "-"]
         return argv, workdir, f"{system}\n\n{prompt}"
     if cli == "agy":  # agy ignores stdin: the prompt rides in -p

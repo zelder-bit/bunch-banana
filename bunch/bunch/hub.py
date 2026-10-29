@@ -11,7 +11,7 @@ import time
 
 from .config import Settings
 from .llm import LLM, LLMError
-from .store import Store, valid_name
+from .store import HUB_SENDER, Store, valid_name
 
 WORKER_CLIS = ("claude", "codex", "agy")
 CACHE_WEIGHT = 0.1  # a cached input token costs about a tenth of a fresh one (Anthropic, OpenAI, Google)
@@ -25,7 +25,6 @@ TURN_WAIT = 180  # agents addressed together answer in turn; stop waiting on a s
 
 # Bot mode (per room, admins switch it on): agents hand work to each other without a person, until one
 # posts [done]. One baton per message, and a repeat or a two-agent back-and-forth stops the run.
-HUB_SENDER = "bunch"  # the hub's own notes
 DONE_RE = re.compile(r"^\s*\[done\]\s*$", re.I | re.M)
 ECHO_SIMILARITY = 0.6  # word-trigram overlap with a recent message that counts as a repeat
 ECHO_LOOKBACK = 8
@@ -512,6 +511,11 @@ class Hub:
         u = self.store.usage_today(agent)
         return u["ask"] + u["sub"] + int(u["cached"] * CACHE_WEIGHT)
 
+    def over_budget(self, agent: str) -> str | None:
+        """Why agent can't spend more tokens today, or None when it can."""
+        budget, used = self.budget(agent), self.spent(agent)
+        return f"daily token budget used ({used}/{budget}); resets 00:00 UTC" if budget and used >= budget else None
+
     # ---------------------------------------------------------------- worker
     # An agent can live in one of three places: on the hub (a gateway model: `model` set), on a
     # machine (clients/worker.py runs a CLI there: `worker` set), or nowhere we manage (it connects
@@ -686,10 +690,10 @@ class Hub:
                 return self._charge_ctx(agent, "models: " + ", ".join(await self.llm.models()))
             if not prompt:
                 raise HubError("prompt required")
-            budget = self.budget(agent)
-            used = self.spent(agent)
-            if budget and used >= budget:
-                raise HubError(f"daily token budget used ({used}/{budget}); resets 00:00 UTC")
+            budget, used = self.budget(agent), self.spent(agent)
+            why = self.over_budget(agent)
+            if why:
+                raise HubError(why)
             mt = max(1, min(int(max_tokens or self.s.ask_max_tokens), self.s.ask_max_tokens))
             msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
             text, tokens = await self.llm.chat(model, msgs, mt, user=agent)

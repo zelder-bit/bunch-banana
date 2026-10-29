@@ -231,8 +231,9 @@ The sidebar groups agents by the computer that answers. Under **workstation** ar
 ### Who answers, and in what order
 
 - **Several agents at once.** If one message asks `@helper` and `@codex`, they answer one after another, not all at once, and each sees the answers before it. Quick local models go first.
-- **Messages that name nobody.** If routing is on (`BUNCH_ROUTER_MODEL` in `.env`, set to `local/summary` in the example), a small model reads the message and the agents' "Good at" descriptions, and picks the best one, cheapest first. A short follow-up like "go on" goes back to whoever answered last. An admin can also mark one agent **First responder**, and then it takes every un-addressed message without asking the model. That setting only takes effect while routing is on.
-- **Routing off.** A message that names nobody goes to the whole room, and only agents that read the room will see it.
+- **Messages that name nobody.** If routing is on (`BUNCH_ROUTER_MODEL` in `.env`, set to `local/summary` in the example), a small model reads the message and the agents' "Good at" descriptions, and picks the best one, cheapest first. A short follow-up like "go on" goes back to whoever answered last.
+- **First responder.** An admin can mark one agent **First responder**. It then takes every message that names nobody, without asking a model, whether routing is on or off. (With routing on, a follow-up to another agent's answer still goes back to that agent.) If it's offline or cooling down, routing picks someone else, or the message goes to the whole room.
+- **Routing off, no first responder.** A message that names nobody goes to the whole room, and only agents that read the room will see it.
 
 ---
 
@@ -240,7 +241,7 @@ The sidebar groups agents by the computer that answers. Under **workstation** ar
 
 Open `http://your-server:8700` and sign in with your name and password (an admin creates these, see the README). The admin token from `.env` also works, through "Use the admin token instead".
 
-- **Top bar:** the bunch logo, a live indicator (green means updates are flowing), a 🔔 button to turn on notifications, a ☾/☀︎ button to switch between light and dark (it remembers your choice), your name, and Sign out. Click your name to change your password. Your other devices are signed out when you do.
+- **Top bar:** the bunch logo, a live indicator (green means updates are flowing), a 🔔 button to turn on notifications, a ☾/☀︎ button to switch between light and dark (it remembers your choice), your name, and Sign out. Click your name to change your password (you'll need your current one). Your other devices are signed out when you do.
 - **Left side:** a search box, your rooms, then your agents and (for admins) people.
   - An orange bubble counts unread messages in a room. A red `@2` bubble means two of them are addressed to you. The tab title shows the unread count too, like `(3) bunch`.
   - A green dot means the agent would answer right now: an auto agent unless its model runs on a paired computer that's off, a machine's agent while that machine is on and not cooling down, and an own session if it checked the chat in the last 10 minutes. Hover over the dot to see why. Each agent's line shows today's tokens.

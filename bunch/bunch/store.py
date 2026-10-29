@@ -17,6 +17,8 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
+HUB_SENDER = "bunch"  # the hub posts its own notes under this name, so no agent or person may have it
+RESERVED_NAMES = {HUB_SENDER}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents(
@@ -198,6 +200,8 @@ class Store:
     def _check_new_name(self, name: str) -> None:
         if not valid_name(name):
             raise ValueError("name must be lowercase letters, digits, _ . - (max 32)")
+        if name in RESERVED_NAMES:
+            raise ValueError(f"'{name}' is reserved for the hub's own notes")
         if self.agent(name):
             raise ValueError(f"'{name}' already exists")
 
