@@ -16,14 +16,17 @@ PROMPT = ("You route chat messages from a human to AI agents. Pick the agent(s) 
           "Cheapest first: prefer agents marked auto (local models, answer right away). Pick a subscription "
           "agent only when the message needs a stronger model (hard reasoning, real code work) or no auto agent "
           "fits. Usually pick exactly one: two agents answering the same question at once just repeat each "
-          "other. Pick two only when the message asks for two different specialties. Reply with only agent names, "
+          "other. Pick two only when the message asks for two different specialties. If the message continues "
+          "a conversation with an agent (refers back to it, asks for more detail), pick that agent. Reply with only agent names, "
           "comma-separated, or the word none if no agent should answer.")
 LABELS = {"auto": "auto, cheap", "online": "subscription", "busy": "subscription, busy"}
 FOLLOW_UP_WORDS = 3   # "try again", "go on", "thanks": too short for the model to route on its own
 FOLLOW_UP_WINDOW = 1800
+# "go more in depth with this", "can you expand on that": longer, but still a follow-up to the last answer
+BACK_REF_RE = re.compile(r"\b(?:this|that|it|those|these|more|again|above|expand|elaborate|in depth|continue)\b", re.I)
 
 
-async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[str]:
+async def route(hub: Hub, room: str, text: str, timeout: float = 20.0, sender: str | None = None) -> list[str]:
     """Returns agent names to address; [] when routing is off, fails, or picks nobody."""
     st, s = hub.store, hub.s
     if not s.router_model or not hub.llm.enabled:
@@ -46,17 +49,23 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
     if not agents:
         return []
     names = {a["name"] for a, _ in agents}
-    if len(text.split()) <= FOLLOW_UP_WORDS:  # a follow-up goes to whoever answered last here, not to a new pick
-        last = st.one("SELECT sender FROM messages WHERE room=? AND human=0 AND created>? ORDER BY id DESC LIMIT 1",
-                      (room, time.time() - FOLLOW_UP_WINDOW))
-        if last and last["sender"] in names:
+    # A follow-up goes to whoever answered last here, not to a new pick: any very short message, or one
+    # that refers back when the last agent message answered this same person.
+    last = st.one("SELECT sender, reply_to FROM messages WHERE room=? AND human=0 AND created>? ORDER BY id DESC LIMIT 1",
+                  (room, time.time() - FOLLOW_UP_WINDOW))
+    if last and last["sender"] in names:
+        if len(text.split()) <= FOLLOW_UP_WORDS:
+            return [last["sender"]]
+        asked = st.message(last["reply_to"]) if last["reply_to"] else None
+        if sender and asked and asked["sender"] == sender and BACK_REF_RE.search(text):
             return [last["sender"]]
     first = st.setting("first_responder")
     if first in names:  # the admin picked who takes un-@'d messages: no need to ask a model
         return [first]
     roster = "\n".join(f"- {a['name']}: {a['description'] or 'no description'} ({label})" for a, label in agents)
+    recent = hub.recent_lines(room, 0, 6)
     user = (f"Agents:\n{roster}\n\nRoom #{room} summary: {one_line(hub.room_summary(room), 400)}\n\n"
-            f"Message:\n{text[:2000]}")
+            + (f"Recent messages:\n{recent}\n\n" if recent else "") + f"Message:\n{text[:2000]}")
     try:
         answer, tokens = await asyncio.wait_for(hub.llm.chat(s.router_model, [
             {"role": "system", "content": PROMPT}, {"role": "user", "content": user}], 40, user=ROUTER), timeout)

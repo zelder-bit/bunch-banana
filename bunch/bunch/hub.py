@@ -24,6 +24,10 @@ MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a 
 
 FILE_REF = re.compile(r"!\[([^\]]*)\]\(file:(\d+)\)")  # an attached file, see /api/v1/machine/file
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
+# "@events, can you…" / "- **@legal**: please…": mentions that open a line or sentence and then ask.
+_AT = r"\**@[a-z0-9][a-z0-9_.-]*\**"
+ADDRESS_RE = re.compile(r"(?:^|[\n.!?])[\s>*_#-]*(" + _AT + r"(?:\s*(?:,|and|&)\s*" + _AT + r")*)"
+                        r"\s*(?:[,:]|(?:can|could|please|would|will)\b)")
 
 
 class HubError(Exception):
@@ -54,6 +58,13 @@ def _snippet(text: str, q: str, width: int = 160) -> str:
 def mentions(text: str, name: str) -> bool:
     """True when text @mentions exactly this name (@gemini is not in "@gemini-local")."""
     return name in (n.rstrip(".") for n in MENTION_RE.findall((text or "").lower()))
+
+
+def addresses(text: str, name: str) -> bool:
+    """True when text asks this agent something ("@events, can you…"), not just names it
+    ("check with @legal about…"): only that wakes an agent when another agent writes it."""
+    return any(name in (n.rstrip(".") for n in MENTION_RE.findall(g))
+               for g in ADDRESS_RE.findall((text or "").lower()))
 
 
 def _recips(m) -> list[str]:
@@ -264,11 +275,12 @@ class Hub:
             return "(empty)"
         return "recent: " + " | ".join(f"{x['sender']}: {one_line(x['summary'], 70)}" for x in rows[::-1])
 
-    def recent_lines(self, room: str, before_id: int, n: int = RECENT_LINES) -> str:
-        """The last n messages before #before_id as one-line summaries, oldest first: what an answering
-        model needs to not treat every message as the first (the room summary lags by up to summary_every)."""
-        rows = self.store.q("SELECT * FROM messages WHERE room=? AND id<? ORDER BY id DESC LIMIT ?",
-                            (room, before_id, n))
+    def recent_lines(self, room: str, skip_id: int, n: int = RECENT_LINES) -> str:
+        """The room's last n messages other than #skip_id (the one being answered) as one-line summaries,
+        oldest first: what an answering model needs to not treat every message as the first (the room
+        summary lags by up to summary_every). Includes answers posted after skip_id, e.g. by another agent."""
+        rows = self.store.q("SELECT * FROM messages WHERE room=? AND id!=? ORDER BY id DESC LIMIT ?",
+                            (room, skip_id, n))
         out = []
         for m in rows[::-1]:
             rec = _recips(m)
@@ -288,6 +300,17 @@ class Hub:
                     self.store.one("SELECT 1 FROM messages WHERE reply_to=?", (p["id"],)):
                 return p["id"]
         return None
+
+    def wakes(self, m, agent: str) -> bool:
+        """Whether agent-written message m should get an answer from agent: it must ask the agent
+        explicitly, the agent chain below the human must be short, and the agent must not already
+        have been asked by that human (it answers the human, not a second time via another agent)."""
+        if not addresses(m["body"] or m["summary"], agent) or self.agent_hops(m) >= MAX_AGENT_HOPS:
+            return False
+        root = m
+        while root and not root["human"]:
+            root = self.store.message(root["reply_to"]) if root["reply_to"] else None
+        return not (root and agent in _recips(root))
 
     def agent_hops(self, m) -> int:
         """Agent messages in m's reply chain since the last human message (m included)."""

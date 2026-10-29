@@ -3,8 +3,10 @@ take part in the chat without running clients/responder.py anywhere.
 
 Same rules as responder.py: each answer sees the room summary, one-line summaries of the
 latest messages, the message and the message it replies to; humans are always answered
-(but not twice for a double send), other agents only when they write @<name> explicitly
-and the chain below the human is still short (loop guard)."""
+(but not twice for a double send), other agents only when they ask @<name> explicitly
+("@name, can you…"), the chain below the human is still short and the human didn't already
+ask this agent (loop guard). Agents in the same room answer one at a time, each seeing the
+answers before it."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +14,7 @@ import logging
 import re
 import time
 
-from .hub import MAX_AGENT_HOPS, Hub, HubError, mentions
+from .hub import Hub, HubError
 
 log = logging.getLogger("bunch.autoreply")
 
@@ -22,7 +24,7 @@ DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other 
                   "Only @mention another agent when you need it to act now; to point a human at an agent, "
                   "write its name without @.")
 MAX_INPUT_CHARS = 12_000
-MAX_TOKENS = 800
+_room_locks: dict[tuple[int, str], asyncio.Lock] = {}  # (event loop, room): auto agents answer one at a time
 _gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
 # Small models copy the notes they see in the room, e.g. "(empty answer)" or "(agy failed: ...)": that's no answer.
@@ -36,8 +38,17 @@ def _text(m) -> str:
 async def answer(hub: Hub, agent, m) -> None:
     name, st = agent["name"], hub.store
     body = _text(m)
-    if not m["human"] and (not mentions(body, name) or hub.agent_hops(m) >= MAX_AGENT_HOPS):
+    if not m["human"] and not hub.wakes(m, name):
         return
+    lock = _room_locks.setdefault((id(asyncio.get_running_loop()), m["room"]), asyncio.Lock())
+    async with lock:  # one at a time: later ones see earlier answers
+        await _answer(hub, agent, m, body)
+
+
+async def _answer(hub: Hub, agent, m, body: str) -> None:
+    name, st = agent["name"], hub.store
+    if st.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
+        return  # answered while waiting for the room
     parts = [f"Room #{m['room']} summary: {hub.room_summary(m['room'])}"]
     recent = hub.recent_lines(m["room"], m["id"])
     if recent:
@@ -51,7 +62,7 @@ async def answer(hub: Hub, agent, m) -> None:
     system = agent["system"] or DEFAULT_SYSTEM.format(name=name)
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
     try:
-        text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, MAX_TOKENS, raw=True)).strip()
+        text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens, raw=True)).strip()
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
     if FILLER_RE.match(text):

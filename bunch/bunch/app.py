@@ -22,7 +22,7 @@ from . import __version__
 from . import mcp as mcpmod
 from .autoreply import autoreply_loop
 from .config import Settings, load
-from .hub import MAX_AGENT_HOPS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
+from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
 from .router import route
 from .store import Store
@@ -376,10 +376,11 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                     out = {"header": header, "more": more,
                            "messages": [{**hub.message_json(m), "for_me": agent in hub.message_json(m)["to"],
                                          "size": len(m["body"] or "")} for m in rows]}
-                    for m in out["messages"]:
+                    for m, row in zip(out["messages"], rows):
                         m.pop("body")
                         if m["for_me"]:  # what responder.py needs to answer in context
                             m["recent"] = hub.recent_lines(m["room"], m["id"])
+                            m["wake"] = bool(row["human"]) or hub.wakes(row, agent)
                     store.add_usage(agent, ctx=sum(len(m["summary"]) for m in out["messages"]) // 4)
                     return out
             else:
@@ -445,8 +446,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         continue  # room chatter: workers only answer what's addressed to them
                     if store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (r["id"], name)):
                         continue  # already answered, e.g. the hub said the machine was offline
-                    if hub.duplicate_of(r) or (not r["human"] and hub.agent_hops(r) >= MAX_AGENT_HOPS):
-                        continue  # a double send, or agents answering agents too deep below the human
+                    if hub.duplicate_of(r) or (not r["human"] and not hub.wakes(r, name)):
+                        continue  # a double send, or another agent only naming this one / chain too deep
                     parent = store.message(r["reply_to"]) if r["reply_to"] else None
                     jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "created": r["created"],
@@ -522,7 +523,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         named = [n.rstrip(".") for n in MENTION_RE.findall((body.text or "").lower())]
         addressed = to or body.re is not None or any(n in known for n in named)
         if not addressed and (body.text or "").strip():
-            to = await route(hub, room.strip().lower().lstrip("#"), body.text) or None
+            to = await route(hub, room.strip().lower().lstrip("#"), body.text, sender=name) or None
         return {"result": hub.post(name, room, body.text, to=to, summary=body.summary,
                                    reply_to=body.re, human=True),
                 "unknown": sorted({n for n in named if n not in known})}  # a typo'd @ otherwise asks nobody

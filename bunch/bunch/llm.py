@@ -30,24 +30,26 @@ class LLM:
         payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
         if user:
             payload["user"] = user  # lets LiteLLM attribute spend per agent
-        text, total, thought = await self._complete(payload)
-        if not text and thought and max_tokens < self.think_max_tokens:
-            # A thinking model (gemma4, qwen3...) spent max_tokens on hidden reasoning and said nothing:
-            # give it room to think and still answer.
-            text, more, thought = await self._complete({**payload, "max_tokens": self.think_max_tokens})
+        text, total, thought, cut = await self._complete(payload)
+        if (not text or cut) and thought and max_tokens < self.think_max_tokens:
+            # A thinking model (gemma4, qwen3...) spent max_tokens on hidden reasoning and said nothing,
+            # or stopped mid-answer: give it room to think and still answer.
+            text, more, thought, cut = await self._complete({**payload, "max_tokens": self.think_max_tokens})
             total += more
         if not text and thought:
             # Still nothing: ask with thinking off. Only as a last resort, since answers get weaker
             # and some providers reject "none".
             try:
-                text, more, _ = await self._complete({**payload, "reasoning_effort": "none"})
+                text, more, _, cut = await self._complete({**payload, "reasoning_effort": "none"})
                 total += more
             except LLMError:
                 pass
+        if text and cut:  # don't pass half an answer off as a whole one
+            text = text.rstrip() + "\n\n…(cut off at the length limit; ask me to continue)"
         return text, total
 
-    async def _complete(self, payload: dict) -> tuple[str, int, bool]:
-        """Returns (text, total_tokens, whether the model produced reasoning)."""
+    async def _complete(self, payload: dict) -> tuple[str, int, bool, bool]:
+        """Returns (text, total_tokens, whether the model produced reasoning, whether it hit max_tokens)."""
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as c:
                 r = await c.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=self._headers())
@@ -57,7 +59,8 @@ class LLM:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
         data = r.json()
         try:
-            msg = data["choices"][0]["message"]
+            choice = data["choices"][0]
+            msg = choice["message"]
             text = msg.get("content") or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError("gateway returned no choices") from e
@@ -65,7 +68,7 @@ class LLM:
         usage = data.get("usage") or {}
         messages = payload["messages"]
         total = usage.get("total_tokens") or (len(text) // 4 + sum(len(m.get("content", "")) for m in messages) // 4)
-        return text, int(total), thought
+        return text, int(total), thought, choice.get("finish_reason") == "length"
 
     async def models(self) -> list[str]:
         try:

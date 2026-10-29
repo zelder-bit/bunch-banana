@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -389,13 +390,105 @@ def test_agents_stop_answering_each_other(env):
     for n in ("aa", "bb"):
         c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
     async def chat(model, messages, max_tokens, user=None):
-        return ("ask @bb" if user == "aa" else "ask @aa"), 10
+        return ("@bb, can you help?" if user == "aa" else "@aa, can you help?"), 10
     llm.chat = chat
     hub.post("human", "r", "@aa hi", human=True)
     for _ in range(6):
         asyncio.run(autoreply_once(hub))
     agent_msgs = [m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if not m["human"]]
     assert len(agent_msgs) == 2  # aa answers the human, bb answers aa, then the chain stops
+
+
+def test_auto_agents_in_a_room_answer_in_turn(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    for n in ("aa", "bb"):
+        c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
+    hub.post("savannah", "r", "@aa @bb how much does a sticker setup cost?", human=True)
+    asyncio.run(autoreply_once(hub))
+    answers = [m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if not m["human"]]
+    assert len(answers) == 2
+    first, second = answers
+    prompt = [cl for cl in llm.calls if cl[3] == second["sender"]][-1][1][-1]["content"]
+    assert f"#{first['id']} {first['sender']}" in prompt  # the second saw the first's answer
+
+
+def test_only_an_explicit_ask_wakes_an_agent():
+    from bunch.hub import addresses
+    assert addresses("@events, can you set up a countdown?", "events")
+    assert addresses("Great plan.\n- **@legal**: please check the listing", "legal")
+    assert addresses("Thanks! @aa and @bb, could you add costs?", "bb")
+    assert not addresses("Check with **@legal** regarding handmade listings", "legal")
+    assert not addresses("let's chat with @events about a sticker drop", "events")
+    assert not addresses("@eventsx, can you", "events")
+
+
+def test_agent_asked_by_the_human_isnt_asked_again(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    for n in ("aa", "bb"):
+        c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
+
+    async def chat(model, messages, max_tokens, user=None):
+        return ("@bb, can you add costs?" if user == "aa" else "costs are $300"), 10
+    llm.chat = chat
+    hub.post("savannah", "r", "@aa @bb go more in depth", human=True)
+    for _ in range(3):
+        asyncio.run(autoreply_once(hub))
+    msgs = c.get("/api/admin/rooms/r/messages", headers=adm()).json()
+    assert len([m for m in msgs if m["sender"] == "bb"]) == 1
+
+
+def test_router_sends_back_references_to_the_last_answer(env):
+    from bunch.router import route
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "local/small"})
+    for n in ("aa", "bb"):
+        c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
+    q = int(hub.post("savannah", "r", "@aa what machine for stickers?", human=True).split("#")[1])
+    hub.post("aa", "r", "a Cricut Maker 3 and an EcoTank printer", reply_to=q)
+    calls = len(llm.calls)
+    assert asyncio.run(route(hub, "r", "can you go more in depth with this, including costs?", sender="savannah")) == ["aa"]
+    assert len(llm.calls) == calls  # no model needed
+    asyncio.run(route(hub, "r", "what is the best camera for product photos?", sender="savannah"))
+    assert "Recent messages:" in llm.calls[-1][1][-1]["content"]
+
+
+def _llm_with(responses, orig):
+    """An LLM whose gateway answers with responses in turn; orig is the real httpx.AsyncClient."""
+    import httpx
+    from bunch.llm import LLM
+    sent = []
+
+    def reply(req):
+        sent.append(json.loads(req.content))
+        return httpx.Response(200, json=responses[min(len(sent), len(responses)) - 1])
+    return LLM("http://gw", "k"), sent, lambda **kw: orig(transport=httpx.MockTransport(reply), **kw)
+
+
+def _choice(content, reason, reasoning=None):
+    return {"choices": [{"message": {"content": content, "reasoning_content": reasoning}, "finish_reason": reason}],
+            "usage": {"total_tokens": 10}}
+
+
+def test_llm_retries_and_marks_cut_off_answers():
+    import httpx
+    orig = httpx.AsyncClient
+    llm, sent, client = _llm_with([_choice("| a | b |\n| 1", "length", "thinking..."),
+                                   _choice("full answer", "stop", "thinking...")], orig)
+    httpx.AsyncClient = client
+    try:
+        assert asyncio.run(llm.chat("m", [{"role": "user", "content": "hi"}], 800))[0] == "full answer"
+        assert sent[-1]["max_tokens"] == llm.think_max_tokens
+        llm2, sent2, client2 = _llm_with([_choice("half an ans", "length")], orig)
+        httpx.AsyncClient = client2
+        text, _ = asyncio.run(llm2.chat("m", [{"role": "user", "content": "hi"}], 800))
+        assert text.startswith("half an ans") and "cut off at the length limit" in text and len(sent2) == 1
+    finally:
+        httpx.AsyncClient = orig
 
 
 def test_summarizer_prompt_names_no_agent():

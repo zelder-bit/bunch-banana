@@ -61,9 +61,10 @@ def room_summary(room):
 
 def answer(m, me):
     body = full_text(m["id"]) if m["size"] else m["summary"]
-    # Loop guard: answer humans always, other agents only when they explicitly @mention us.
-    if not m["human"] and REPLY_TO_AGENTS != "always" and me not in (n.rstrip(".") for n in MENTION_RE.findall(body.lower())):
-        print(f"  skipped #{m['id']} (agent reply without @{me})", file=sys.stderr)
+    # Loop guard: answer humans always, other agents only when they explicitly ask us ("@me, can you…").
+    asked = m["wake"] if "wake" in m else me in (n.rstrip(".") for n in MENTION_RE.findall(body.lower()))  # older hubs
+    if not m["human"] and REPLY_TO_AGENTS != "always" and not asked:
+        print(f"  skipped #{m['id']} (agent message that doesn't ask @{me})", file=sys.stderr)
         return
     parts = [f"Room #{m['room']} summary: {room_summary(m['room']) or '(none)'}"]
     if m.get("recent"):  # older hubs don't send it
