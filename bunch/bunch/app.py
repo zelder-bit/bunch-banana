@@ -97,6 +97,10 @@ class BudgetIn(BaseModel):
     daily_tokens: int | None = None
 
 
+class FirstIn(BaseModel):
+    on: bool = False
+
+
 class ReportIn(BaseModel):
     agent: str
     status: str
@@ -551,6 +555,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         _, admin = viewer(request, authorization)
         await hub.refresh_model_hosts()
         out = []
+        first = store.setting("first_responder")
         for a in store.agents():
             u = store.usage_today(a["name"])
             out.append({"name": a["name"], "kind": a["kind"], "last_seen": a["last_seen"],
@@ -562,7 +567,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "state": hub.worker_state(a), "status_until": a["status_until"],
                         "worker": _worker_view(hub.worker_config(a), admin),
                         "runs_on": hub.model_host(a["model"]) if a["model"] else None,
-                        "machine": hub.agent_machine(a)})
+                        "machine": hub.agent_machine(a), "first_responder": a["name"] == first})
         for system, model in (("_summarizer", s.summary_model), ("_router", s.router_model)):
             u = store.usage_today(system)
             if system == "_summarizer" or u["ask"]:
@@ -732,6 +737,18 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(404, "no such agent")
         store.set_budget(name, body.daily_tokens)
         return {"name": name, "daily_tokens": hub.budget(name)}
+
+    @app.put("/api/admin/agents/{name}/first")
+    async def admin_first(request: Request, name: str, body: FirstIn, authorization: str | None = Header(None)):
+        require_admin(request, authorization)
+        row = store.agent(name)
+        if not row or row["kind"] != "agent":
+            raise HTTPException(404, "no such agent")
+        if body.on:
+            store.set_setting("first_responder", name)
+        elif store.setting("first_responder") == name:
+            store.set_setting("first_responder", "")
+        return {"first_responder": store.setting("first_responder") or None}
 
     @app.delete("/api/admin/agents/{name}")
     async def admin_delete(request: Request, name: str, authorization: str | None = Header(None)):

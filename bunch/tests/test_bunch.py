@@ -715,6 +715,33 @@ def test_router_prefers_cheap_and_skips_cooling_and_offline(env):
     assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == ["alice"]
 
 
+def test_router_first_responder_and_one_auto_agent(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "local/small"})
+    for n in ("llama", "qwen"):
+        c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
+
+    async def both(model, messages, max_tokens, user=None):
+        return "llama, qwen", 10
+    llm.chat = both
+    last = lambda room="r": [m for m in c.get(f"/api/admin/rooms/{room}/messages", headers=adm()).json()
+                             if m["human"]][-1]["to"]  # the auto agents may already have replied
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "what is the capital of peru"}, headers=adm())
+    assert last() == ["llama"]  # never two local models on one question
+    assert c.put("/api/admin/agents/qwen/first", json={"on": True}, headers=adm()).status_code == 200
+    agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
+    assert agents["qwen"]["first_responder"] and not agents["llama"]["first_responder"]
+
+    async def never(*a, **kw):
+        raise AssertionError("router asked despite a first responder")
+    llm.chat = never
+    c.post("/api/admin/rooms/r2/messages", json={"room": "r2", "text": "and the capital of chile"}, headers=adm())
+    assert last("r2") == ["qwen"]
+    c.put("/api/admin/agents/qwen/first", json={"on": False}, headers=adm())
+    assert not any(a.get("first_responder") for a in c.get("/api/admin/agents", headers=adm()).json())
+
+
 def _hosts(app, llm, table):
     async def hosts():
         return table

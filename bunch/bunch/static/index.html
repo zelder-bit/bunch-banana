@@ -466,6 +466,7 @@
     const desc = h("input", { type: "text", value: a.description || "", placeholder: "Good at… (helps routing)" });
     const picker = await wherePicker(a);
     const budget = h("input", { type: "number", min: "0", step: "1000", value: a.budget_set ?? "", placeholder: "server default" });
+    const first = h("input", { type: "checkbox", checked: !!a.first_responder });
     const keyBox = h("div", { class: "key-out", hidden: true });
     const save = async () => {
       const b = budget.value.trim();
@@ -475,6 +476,8 @@
           description: desc.value.trim(), model: p.model, system: p.system }) });
         await api(`/api/admin/agents/${enc(a.name)}/worker`, { method: "PUT", body: JSON.stringify(p.worker) });
         await api(`/api/admin/agents/${enc(a.name)}/budget`, { method: "PUT", body: JSON.stringify({ daily_tokens: b === "" ? null : Math.max(0, Math.round(Number(b))) }) });
+        if (first.checked !== !!a.first_responder)
+          await api(`/api/admin/agents/${enc(a.name)}/first`, { method: "PUT", body: JSON.stringify({ on: first.checked }) });
       }, `${a.name} saved`);
       if (ok) { $("panel").close(); loadAgents(); }
     };
@@ -493,6 +496,7 @@
     openPanel(a.name,
       field("Good at", desc, "The router uses this to pick who answers."),
       ...picker.fields,
+      field("First responder", first, "Answers every message that @mentions nobody, instead of the router picking. Only one agent can be first responder."),
       field("Daily token budget", budget, "Gateway model calls plus CLI runs. Blank = server default, 0 = unlimited."),
       h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn primary", onclick: save }, "Save")),
       h("div", { class: "panel-danger" },

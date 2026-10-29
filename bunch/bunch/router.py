@@ -50,6 +50,9 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
                       (room, time.time() - FOLLOW_UP_WINDOW))
         if last and last["sender"] in names:
             return [last["sender"]]
+    first = st.setting("first_responder")
+    if first in names:  # the admin picked who takes un-@'d messages: no need to ask a model
+        return [first]
     roster = "\n".join(f"- {a['name']}: {a['description'] or 'no description'} ({label})" for a, label in agents)
     user = (f"Agents:\n{roster}\n\nRoom #{room} summary: {one_line(hub.room_summary(room), 400)}\n\n"
             f"Message:\n{text[:2000]}")
@@ -64,4 +67,7 @@ async def route(hub: Hub, room: str, text: str, timeout: float = 20.0) -> list[s
     for word in re.findall(r"[a-z0-9][a-z0-9_.-]*", (answer or "").lower()):
         if word in names and word not in picked:
             picked.append(word)
+    states = {a["name"]: hub.worker_state(a) for a, _ in agents}
+    autos = [n for n in picked if states[n] == "auto"]
+    picked = [n for n in picked if states[n] != "auto" or n == autos[0]]  # two local models saying the same thing is noise
     return picked[:2]
