@@ -203,7 +203,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         raise SystemExit("BUNCH_ADMIN_TOKEN is not set. Put a long random value in .env (see README).")
     store = Store(s.db_path)
     store.ensure_human(s.human_name)
-    llm = llm or LLM(s.litellm_url, s.litellm_key)
+    llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens)
     hub = Hub(store, s, llm)
 
     # SVG is shown too: the viewer only puts files in <img> (no scripts there), and opened directly the

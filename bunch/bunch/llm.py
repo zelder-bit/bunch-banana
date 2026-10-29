@@ -12,10 +12,11 @@ class LLMError(Exception):
 
 
 class LLM:
-    def __init__(self, base_url: str, key: str, timeout: float = 180.0):
+    def __init__(self, base_url: str, key: str, timeout: float = 180.0, think_max_tokens: int = 4_096):
         self.base_url = base_url.rstrip("/")
         self.key = key
         self.timeout = timeout
+        self.think_max_tokens = think_max_tokens
 
     @property
     def enabled(self) -> bool:
@@ -30,9 +31,14 @@ class LLM:
         if user:
             payload["user"] = user  # lets LiteLLM attribute spend per agent
         text, total, thought = await self._complete(payload)
+        if not text and thought and max_tokens < self.think_max_tokens:
+            # A thinking model (gemma4, qwen3...) spent max_tokens on hidden reasoning and said nothing:
+            # give it room to think and still answer.
+            text, more, thought = await self._complete({**payload, "max_tokens": self.think_max_tokens})
+            total += more
         if not text and thought:
-            # A thinking model (gemma4, qwen3...) spent max_tokens on hidden reasoning and said nothing.
-            # Ask again with thinking off; only on this retry, since some providers reject "none".
+            # Still nothing: ask with thinking off. Only as a last resort, since answers get weaker
+            # and some providers reject "none".
             try:
                 text, more, _ = await self._complete({**payload, "reasoning_effort": "none"})
                 total += more
