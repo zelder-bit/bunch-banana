@@ -6,7 +6,7 @@ latest messages, the message and the message it replies to; humans are always an
 (but not twice for a double send), other agents only when they ask @<name> explicitly
 ("@name, can you…"), the chain below the human is still short and the human didn't already
 ask this agent (loop guard). Agents in the same room answer one at a time, each seeing the
-answers before it."""
+answers before it; with subscription workers asked in the same message, auto agents go first."""
 from __future__ import annotations
 
 import asyncio
@@ -40,6 +40,7 @@ async def answer(hub: Hub, agent, m) -> None:
     body = _text(m)
     if not m["human"] and not hub.wakes(m, name):
         return
+    await hub.wait_turn(m, name)  # agents asked together answer in turn, each seeing the earlier answers
     lock = _room_locks.setdefault((id(asyncio.get_running_loop()), m["room"]), asyncio.Lock())
     async with lock:  # one at a time: later ones see earlier answers
         await _answer(hub, agent, m, body)

@@ -722,6 +722,27 @@ def _on(c, agent, machine="workstation", **cfg):
     return r.json()
 
 
+def test_worker_waits_for_the_auto_agent_asked_with_it(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")  # a subscription worker, like legal
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    go = []  # helper's model "thinks" until the test lets it answer (the app's own auto-reply loop calls it)
+    orig = llm.chat
+
+    async def slow(*a, **kw):
+        while not go:
+            await asyncio.sleep(0.02)
+        return await orig(*a, **kw)
+    llm.chat = slow
+    hub.post("savannah", "r", "@alice @helper go more in depth with costs", human=True)
+    assert c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"] == []  # helper goes first
+    go.append(1)
+    jobs = c.get("/api/v1/machine/read", params={"wait": 10}, headers=h(key)).json()["jobs"]  # held, not lost
+    assert [j["agent"] for j in jobs] == ["alice"] and "helper>savannah re#1: answer from local/small" in jobs[0]["recent"]
+
+
 def test_old_usage_table_is_migrated(tmp_path):
     import sqlite3
     from bunch.store import Store

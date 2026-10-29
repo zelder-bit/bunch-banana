@@ -21,6 +21,7 @@ WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long
 RECENT_LINES = 8  # one-line summaries of the latest messages shown with every answer prompt
 DUPLICATE_WINDOW = 600  # the same text from the same human this soon after is a double send
 MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a human message
+TURN_WAIT = 180  # agents addressed together answer in turn; stop waiting on a slow one after this long
 
 FILE_REF = re.compile(r"!\[([^\]]*)\]\(file:(\d+)\)")  # an attached file, see /api/v1/machine/file
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
@@ -80,6 +81,7 @@ class Hub:
         self._event = asyncio.Event()                # wakes long-polling readers
         self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
         self._hosts_at = 0.0
+        self.held: dict[str, dict[int, None]] = {}  # worker agent -> message ids waiting for its turn
 
     # ---------------------------------------------------------------- events
     def broadcast(self, event: dict) -> None:
@@ -311,6 +313,31 @@ class Hub:
         while root and not root["human"]:
             root = self.store.message(root["reply_to"]) if root["reply_to"] else None
         return not (root and agent in _recips(root))
+
+    def turn_blocker(self, m, agent: str) -> str | None:
+        """Agents addressed in the same message answer one after another, local models first (they're
+        quick), so each answer can build on the ones before it. Returns who agent is still waiting for,
+        or None when it's agent's turn. Agents that can't answer now (offline, cooling, manual) are skipped."""
+        if time.time() - m["created"] > TURN_WAIT:
+            return None
+        live = []
+        for n in _recips(m):
+            row = self.store.agent(n)
+            state = self.worker_state(row) if row else ""
+            if state in ("auto", "online", "busy"):
+                live.append((state != "auto", n))
+        order = [n for _, n in sorted(live, key=lambda x: x[0])]  # stable: keeps the addressed order
+        if agent not in order:
+            return None
+        for n in order[:order.index(agent)]:
+            if not self.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], n)):
+                return n
+        return None
+
+    async def wait_turn(self, m, agent: str) -> None:
+        """Waits until turn_blocker lets agent answer m (for auto agents, which answer in-process)."""
+        while self.turn_blocker(m, agent):
+            await self.wait_for_new(5)
 
     def agent_hops(self, m) -> int:
         """Agent messages in m's reply chain since the last human message (m included)."""

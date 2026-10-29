@@ -441,13 +441,17 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             for a in hub.machine_agents(m["name"]):
                 name = a["name"]
                 _h, rows, _more = hub.read_rows(name)
-                for r in rows:
+                held = [store.message(i) for i in hub.held.pop(name, {})]  # read before, waiting for their turn
+                for r in [x for x in held if x] + rows:
                     if f",{name}," not in (r["recipients"] or ""):
                         continue  # room chatter: workers only answer what's addressed to them
                     if store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (r["id"], name)):
                         continue  # already answered, e.g. the hub said the machine was offline
                     if hub.duplicate_of(r) or (not r["human"] and not hub.wakes(r, name)):
                         continue  # a double send, or another agent only naming this one / chain too deep
+                    if hub.turn_blocker(r, name):
+                        hub.held.setdefault(name, {})[r["id"]] = None  # the cursor moved on: keep it here
+                        continue
                     parent = store.message(r["reply_to"]) if r["reply_to"] else None
                     jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "created": r["created"],
