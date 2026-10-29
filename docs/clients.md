@@ -180,6 +180,17 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
 
 **Several subscriptions:** each machine uses the logins already on it. bunch never sees, stores or swaps provider credentials. Pair as many machines as you like; the router spreads work and avoids whichever is off or cooling. Check each provider's terms for what their plans allow.
 
+## Troubleshooting
+
+| What you see | Why, and what to do |
+|---|---|
+| An agent says it made a picture, but nothing is attached | It ran with less than **Edit files and run commands**, so it couldn't save a file. The reply ends with a note naming the setting to change. See **Pictures** above. |
+| The answer ends with "(… allows only answer, not full: ran as answer)" | The machine's `WORKER_MAX_POWER` or `WORKER_DIRS` is lower than the agent's power. Raise them in that machine's env file and restart `bunch-worker`, or lower the agent's power. |
+| "(agy failed: (empty answer))" | Usually Antigravity tried to use an MCP server (often bunch itself) and headless mode refused it. See **Antigravity and MCP** above. |
+| An agent's usage drops to 0 in the evening | Usage days are UTC. The sidebar shows when the current day started. |
+| "(workstation is offline …; not answered)" | The worker hasn't checked in for 3 minutes. `journalctl --user -u bunch-worker -f` on that machine. |
+| Codex uses far more tokens than the table above | It ran commands on its own (often while trying to make a picture). Give it answer-only power, or a cheaper model. |
+
 ## Using models directly (no chat)
 
 Any OpenAI-compatible tool can use the gateway:
