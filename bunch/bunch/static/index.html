@@ -268,7 +268,6 @@
     machines = ms;
     people = list.filter(a => a.kind !== "system");
     const row = (a) => {
-      const active = a.last_seen && Date.now() / 1000 - a.last_seen < 600;
       const stats = [];
       if (a.worker?.mode === "worker") stats.push(CLI_NAMES[a.worker.cli] + (a.worker.model ? " · " + a.worker.model : ""));
       else if (a.model) stats.push(a.model + " · via gateway" + (!a.machine && a.runs_on ? " on " + a.runs_on : ""));
@@ -286,7 +285,7 @@
       return h("div", { class: "agent" + (editable ? " clickable" : ""), ...(editable ? clickable(() => openAgentPanel(a), "Edit " + a.name) : {}) },
         a.kind === "system" ? h("span", { class: "avatar sm" }, h("img", { src: "static/svg/orange-slice.svg", alt: "" })) : avatar(a.name, false, "sm"),
         h("div", { class: "agent-text" },
-          h("div", { class: "agent-name" }, a.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : ""), title: active ? "active in the last 10 min" : "idle" }) : null, a.name, stateTag(a)),
+          h("div", { class: "agent-name" }, a.kind === "agent" ? dot(a) : null, a.name, stateTag(a)),
           a.description ? h("div", { class: "agent-desc" }, a.description) : null,
           h("div", { class: "agent-stats" }, stats.join(" · ")),
           meter));
@@ -312,6 +311,22 @@
     ].filter(Boolean));
     if (!agents.length && !ms.length) $("agents").append(h("p", { class: "muted small" }, "No agents yet."));
   }
+
+  // The dot says whether it would answer now: the hub or a machine answers for an agent while that is up,
+  // an own session only when its client happens to read.
+  function presence(a) {
+    switch (a.state) {
+      case "auto": return { on: true, title: `The hub answers with ${a.model}` };
+      case "online": return { on: true, title: `${a.machine} is online and answers with ${CLI_NAMES[a.worker.cli]}` };
+      case "busy": return { on: true, title: `${a.machine} is answering a message with ${CLI_NAMES[a.worker.cli]}` };
+      case "cooling": return { on: false, title: `Out of ${CLI_NAMES[a.worker.cli]} quota for now` };
+      case "offline": return { on: false, title: `${a.machine} is off, so it can't answer` };
+    }
+    const active = a.last_seen && Date.now() / 1000 - a.last_seen < 600;
+    return { on: active, title: active ? "Own session: its client read in the last 10 min"
+      : "Own session: it sees messages next time its client reads" };
+  }
+  const dot = (a) => { const p = presence(a); return h("span", { class: "dot" + (p.on ? " on" : ""), title: p.title }); };
 
   function stateTag(a) {
     const until = a.status_until ? new Date(a.status_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
@@ -621,7 +636,7 @@
     const kids = [
       h("div", { class: "meta" },
         h("span", { class: "who" }, m.sender),
-        m.to && m.to.length ? h("span", { class: "chip to" }, "→", m.to.map(n => h("span", { class: "to-one", title: person(n)?.kind === "agent" && !person(n).model ? n + " is manual: it sees this next time its client reads" : n },
+        m.to && m.to.length ? h("span", { class: "chip to" }, "→", m.to.map(n => h("span", { class: "to-one", title: person(n)?.kind === "agent" ? n + ": " + presence(person(n)).title : n },
           avatar(n, isHuman(n), "xs"), n))) : null,
         m.reply_to ? h("span", { class: "chip" }, "re #" + m.reply_to) : null,
         h("span", { title: new Date(m.created * 1000).toLocaleString() }, "#" + m.id + " · " + fmtTime(m.created)),
@@ -832,7 +847,6 @@
     const m = before.match(/(?:^|[^\w@])@([a-z0-9_.-]*)$/i);
     if (!m) return acClose();
     const q = m[1].toLowerCase();
-    const now = Date.now() / 1000;
     ac.items = people.filter(p => p.name !== me.name && p.name.startsWith(q))
       .sort((a, b) => (b.kind === "agent") - (a.kind === "agent") || a.name.localeCompare(b.name)).slice(0, 8);
     if (!ac.items.length) return acClose();
@@ -840,13 +854,14 @@
     ac.sel = Math.min(ac.sel, ac.items.length - 1);
     ac.open = true;
     $("mentions").replaceChildren(...ac.items.map((p, i) => {
-      const active = p.last_seen && now - p.last_seen < 600;
       return h("div", { class: "mention-opt" + (i === ac.sel ? " sel" : ""), role: "option", "aria-selected": i === ac.sel ? "true" : "false",
           onmousedown: (e) => { e.preventDefault(); acPick(i); } },
         avatar(p.name, p.kind === "human", "sm"),
         h("div", { class: "agent-text" },
-          h("div", { class: "agent-name" }, p.kind === "agent" ? h("span", { class: "dot" + (active ? " on" : "") }) : null, p.name,
-            p.kind === "human" ? h("span", { class: "tag" }, "person") : h("span", { class: "tag" + (p.model ? " auto" : "") }, p.model ? "auto" : "manual")),
+          h("div", { class: "agent-name" }, p.kind === "agent" ? dot(p) : null, p.name,
+            p.kind === "human" ? h("span", { class: "tag" }, "person")
+              : p.worker?.mode === "worker" ? h("span", { class: "tag worker", title: `${p.machine} answers with ${CLI_NAMES[p.worker.cli]}` }, p.worker.cli)
+              : h("span", { class: "tag" + (p.model ? " auto" : "") }, p.model ? "auto" : "manual")),
           p.description ? h("div", { class: "agent-desc" }, p.description) : null));
     }));
     $("mentions").hidden = false;
