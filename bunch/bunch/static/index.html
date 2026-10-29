@@ -38,6 +38,7 @@
   <div id="app" hidden>
     <header class="top">
       <div class="fall" aria-hidden="true"></div>
+      <button class="icon-btn side-btn" id="sideBtn" type="button" aria-label="Rooms and agents" aria-controls="side" aria-expanded="false">☰<span class="side-badge" id="sideBadge" hidden></span></button>
       <div class="brand"><img src="static/svg/bunch.svg" alt=""><span>bunch</span></div>
       <span class="live" title="Live updates"><span id="live" class="dot"></span><span id="liveText">connecting</span></span>
       <div class="top-right">
@@ -49,7 +50,8 @@
     </header>
 
     <div class="body">
-      <aside class="side">
+      <div class="scrim" id="scrim" hidden></div>
+      <aside class="side" id="side" aria-label="Rooms and agents">
         <form class="search" id="searchForm" role="search">
           <input type="search" class="pill" id="searchIn" placeholder="Search messages" aria-label="Search messages" minlength="2">
         </form>
@@ -99,8 +101,12 @@
           <h1><span id="roomName">bunch</span><span id="roomCount" class="muted"></span>
             <button class="btn small ghost room-bot" id="botMode" type="button" aria-pressed="false" hidden
               title="Agents hand work to each other without waiting for you, until one posts [done]">Bot mode: off</button>
-            <button class="btn small ghost danger room-del" id="deleteRoom" type="button" hidden>Delete room</button></h1>
+            <button class="icon-btn room-more" id="roomMore" type="button" popovertarget="roomMenu" aria-label="Room options" title="Room options" hidden>⋯</button></h1>
+          <div id="roomMenu" class="menu" popover>
+            <button type="button" class="menu-item danger" id="deleteRoom">Delete room…</button>
+          </div>
           <p class="room-summary" id="summary"></p>
+          <button type="button" class="linkish small summary-more" id="summaryMore" aria-controls="summary" aria-expanded="false" hidden>more</button>
           <p class="paused" id="paused" hidden>Paused: agents have posted many messages in a row here. Say something to let them carry on.</p>
           <p class="bot-on" id="botOn" hidden>Bot mode: agents keep working together here until one posts [done]. A repeat or a back-and-forth between two agents stops the run. Token budgets still apply.</p>
         </div>
@@ -117,7 +123,7 @@
   </div>
 
   <dialog id="panel" class="panel" aria-labelledby="panelTitle"></dialog>
-  <div id="toasts" aria-live="polite"></div>
+  <div id="toasts" aria-live="polite" popover="manual"></div>
 
 <script>
 (() => {
@@ -181,12 +187,46 @@
     store.set("bunch.theme", next); applyTheme(next);
   });
 
+  // --- phones: the sidebar is a drawer behind the ☰ button, so the room gets the whole screen ----
+  const narrow = matchMedia("(max-width: 760px)");
+  function setSide(open) {
+    open = open && narrow.matches;
+    document.body.classList.toggle("side-open", open);
+    $("sideBtn").setAttribute("aria-expanded", String(open));
+    $("scrim").hidden = !open;
+    $("side").inert = narrow.matches && !open;      // a closed drawer is out of reach for Tab and screen readers
+    if (open) ($("side").querySelector(".room.active") || $("searchIn")).focus();
+  }
+  $("sideBtn").onclick = () => setSide(!document.body.classList.contains("side-open"));
+  $("scrim").onclick = () => setSide(false);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("side-open") && !document.querySelector("dialog[open]")) {
+      setSide(false); $("sideBtn").focus();
+    }
+  });
+  function fitComposer() {
+    $("text").placeholder = narrow.matches ? "Message… (@ to address)" : "Message… @agent to address one";
+  }
+  narrow.addEventListener("change", () => { setSide(false); fitComposer(); });
+  setSide(false); fitComposer();
+
+  // The room menu (⋯) opens under its button.
+  $("roomMenu").addEventListener("beforetoggle", (e) => {
+    if (e.newState !== "open") return;
+    const r = $("roomMore").getBoundingClientRect(), menu = $("roomMenu");
+    menu.style.top = r.bottom + 6 + "px";
+    menu.style.right = Math.max(8, innerWidth - r.right) + "px";
+  });
+
   // --- small helpers -------------------------------------------------------------
   function toast(text, kind = "") {
-    const t = h("div", { class: "toast " + kind }, text);
-    $("toasts").append(t);
+    const t = h("div", { class: "toast " + kind }, text), box = $("toasts");
+    box.append(t);
+    // An open dialog sits in the top layer, above any z-index. The toast box is a popover, so it goes there
+    // too; showing it again puts it above whatever opened since.
+    if (box.showPopover) { try { if (box.matches(":popover-open")) box.hidePopover(); box.showPopover(); } catch {} }
     setTimeout(() => t.classList.add("out"), 3800);
-    setTimeout(() => t.remove(), 4300);
+    setTimeout(() => { t.remove(); if (!box.children.length && box.hidePopover) try { box.hidePopover(); } catch {} }, 4300);
   }
   const ago = (t) => { if (!t) return "never"; const s = Date.now() / 1000 - t; if (s < 60) return "just now"; if (s < 3600) return Math.floor(s / 60) + "m ago"; if (s < 86400) return Math.floor(s / 3600) + "h ago"; return Math.floor(s / 86400) + "d ago"; };
   const fmtTok = (n) => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
@@ -195,7 +235,7 @@
     const at = reset.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const el = document.getElementById("agents-today");
     el.title = `"Today" is the UTC day: usage and budgets reset at ${at} your time.`;
-    if (reset.getUTCHours() !== reset.getHours()) el.textContent = `Agents · since ${at}`;
+    if (reset.getUTCHours() !== reset.getHours()) el.textContent = `Agents · budgets reset ${at}`;
   }
   const fmtTime = (t) => { const d = new Date(t * 1000); const today = new Date().toDateString() === d.toDateString();
     return today ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
@@ -262,21 +302,37 @@
   async function loadRooms() {
     rooms = await api("/api/admin/rooms");
     $("rooms").replaceChildren(...rooms.map(r =>
-      h("button", { class: "room" + (r.name === current ? " active" : ""), onclick: () => openRoom(r.name) },
+      h("button", { class: "room" + (r.name === current ? " active" : ""), "aria-current": r.name === current ? "page" : null, onclick: () => openRoom(r.name) },
         h("span", null, "# " + r.name),
         mentions[r.name] ? h("span", { class: "badge at", title: "Addressed to you" }, "@" + mentions[r.name])
           : unread[r.name] ? h("span", { class: "badge" }, String(unread[r.name])) : null)));
     updateTitle();
     if (!rooms.length) $("rooms").append(h("p", { class: "muted small" }, "No rooms yet."));
     const cur = rooms.find(r => r.name === current);
-    if (cur) { $("summary").textContent = cur.summary; $("roomCount").textContent = cur.count + " messages"; }
+    if (cur) { setSummary(cur.summary); $("roomCount").textContent = cur.count.toLocaleString() + (cur.count === 1 ? " message" : " messages"); }
     $("paused").hidden = !cur?.paused || cur.bot;
     $("botOn").hidden = !cur?.bot;
     $("botMode").hidden = !me.admin || !cur;
     $("botMode").textContent = "Bot mode: " + (cur?.bot ? "on" : "off");
     $("botMode").setAttribute("aria-pressed", String(!!cur?.bot));
-    $("deleteRoom").hidden = !me.admin || !cur;
+    $("roomMore").hidden = !me.admin || !cur;
   }
+
+  // The summary shows two lines; "more" opens the rest. It stays open while the summary updates, until you leave the room.
+  function setSummary(text) {
+    const el = $("summary"), btn = $("summaryMore");
+    if (el.textContent !== text) el.textContent = text;
+    el.hidden = !text;
+    const open = btn.getAttribute("aria-expanded") === "true";
+    el.classList.toggle("open", open);
+    btn.hidden = !text || (!open && el.scrollHeight <= el.clientHeight + 1);
+  }
+  $("summaryMore").onclick = () => {
+    const btn = $("summaryMore"), open = btn.getAttribute("aria-expanded") !== "true";
+    btn.setAttribute("aria-expanded", String(open)); btn.textContent = open ? "less" : "more";
+    setSummary($("summary").textContent);
+  };
+  function resetSummary() { $("summaryMore").setAttribute("aria-expanded", "false"); $("summaryMore").textContent = "more"; setSummary(""); }
 
   let machines = [];                               // paired machines (clients/worker.py), from the hub
   const CLI_NAMES = { claude: "Claude Code", codex: "Codex", agy: "Antigravity" };
@@ -291,12 +347,12 @@
       if (a.worker?.mode === "worker") stats.push(CLI_NAMES[a.worker.cli] + (a.worker.model ? " · " + a.worker.model : ""));
       if (capped(a)) stats.push(`runs as ${a.runs_as}: ${a.machine} allows less than ${a.worker.power}`);
       else if (a.model) stats.push(a.model + " · via gateway" + (!a.machine && a.runs_on ? " on " + a.runs_on : ""));
-      else if (a.kind === "agent") stats.push("seen " + ago(a.last_seen));
+      else if (a.kind === "agent" && a.worker?.mode !== "worker") stats.push(a.last_seen ? "read " + ago(a.last_seen) : "hasn't connected yet");
       // What counts toward the budget: cache reads at 1/10, as providers bill them (the hub's spent()).
       const spent = a.spent_today ?? a.ask_tokens_today + (a.sub_tokens_today || 0);
       const cliSpent = spent - a.ask_tokens_today;
-      if (a.ask_tokens_today || a.kind !== "agent" || !a.sub_calls_today)
-        stats.push("ask " + fmtTok(a.ask_tokens_today) + (a.daily_tokens && !a.sub_tokens_today ? " / " + fmtTok(a.daily_tokens) : ""));
+      if (a.ask_tokens_today) stats.push("ask " + fmtTok(a.ask_tokens_today) + (a.daily_tokens && !a.sub_tokens_today ? " / " + fmtTok(a.daily_tokens) : ""));
+      else if (!a.sub_calls_today && a.daily_tokens) stats.push(fmtTok(a.daily_tokens) + " a day");
       if (a.sub_calls_today) stats.push(fmtTok(cliSpent) + (a.daily_tokens ? " / " + fmtTok(a.daily_tokens) : "") + " tokens"
         + (a.sub_cached_today ? ` (+${fmtTok(a.sub_cached_today)} cached)` : "")
         + " · " + a.sub_calls_today + (a.sub_calls_today === 1 ? " call" : " calls"));
@@ -346,7 +402,7 @@
       case "cooling": return { on: false, title: `Out of ${CLI_NAMES[a.worker.cli]} quota for now` };
       case "offline": return { on: false, title: `${a.machine} is off, so it can't answer` };
     }
-    const active = a.last_seen && Date.now() / 1000 - a.last_seen < 600;
+    const active = !!a.last_seen && Date.now() / 1000 - a.last_seen < 600;
     return { on: active, title: active ? "Own session: its client read in the last 10 min"
       : "Own session: it sees messages next time its client reads" };
   }
@@ -719,7 +775,7 @@
       const self = person(me.name); if (self) self.avatar = r.avatar;
       $("panel").querySelectorAll(".pic").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.pic === me.avatar)));
       $("profilePreview").src = `static/svg/${me.avatar}.svg`;
-      showMe(); refreshAvatars();  // the preview above is the confirmation (a toast would sit behind this dialog)
+      showMe(); refreshAvatars();  // the preview above is the confirmation
     }
     const groups = me.avatars || { fruits: ["orange"] };
     openPanel("My profile",
@@ -775,6 +831,15 @@
     return h("div", { class: "msg" + (m.human ? " human" : "") + (forMe ? " for-me" : ""), "data-id": m.id }, avatar(m.sender, m.human), h("div", { class: "bubble" }, kids));
   }
 
+  // Touch screens have no hover: tap a message to show its delete button, tap elsewhere to hide it again.
+  $("feed").addEventListener("click", (e) => {
+    if (!me.admin || matchMedia("(hover: hover)").matches) return;
+    if (e.target.closest("a, button, summary, pre, input, textarea")) return;
+    const msg = e.target.closest(".msg");
+    $("feed").querySelectorAll(".msg.picked").forEach(x => { if (x !== msg) x.classList.remove("picked"); });
+    msg?.classList.toggle("picked");
+  });
+
   async function deleteMsg(m) {
     if (!confirm(`Delete message #${m.id} from ${m.sender}? This can't be undone.`)) return;
     await act(() => api("/api/admin/messages/" + m.id, { method: "DELETE" }), "Message deleted");
@@ -801,7 +866,9 @@
     } catch (err) { toast(err.message, "bad"); btn.disabled = false; }
   }
   async function openRoom(name) {
+    if (name !== current) resetSummary();
     current = name; store.set("bunch.room", name); unread[name] = 0; mentions[name] = 0;
+    setSide(false);
     renderTyping();
     $("roomName").textContent = "# " + name;
     const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE);
@@ -809,7 +876,7 @@
     else $("feed").replaceChildren(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
     $("feed").scrollTop = $("feed").scrollHeight;
     await loadRooms();
-    $("text").focus();
+    if (!narrow.matches) $("text").focus();   // on a phone that would pop the keyboard over the room
   }
 
   // A room was deleted (by you or another admin): forget it, and leave it if it's open.
@@ -820,8 +887,8 @@
     if (room !== current) return;
     if (rooms.length) return openRoom(rooms[0].name);
     current = ""; store.del("bunch.room");
-    $("roomName").textContent = "bunch"; $("roomCount").textContent = ""; $("summary").textContent = "";
-    $("deleteRoom").hidden = true; $("paused").hidden = true; $("botMode").hidden = true; $("botOn").hidden = true;
+    $("roomName").textContent = "bunch"; $("roomCount").textContent = ""; resetSummary();
+    $("roomMore").hidden = true; $("paused").hidden = true; $("botMode").hidden = true; $("botOn").hidden = true;
     showEmpty("No rooms yet", "Make one on the left, or let an agent post first.");
   }
   $("botMode").onclick = async () => {
@@ -831,6 +898,7 @@
                   on ? `Bot mode on in #${room}` : `Bot mode off in #${room}`)) loadRooms();
   };
   $("deleteRoom").onclick = async () => {
+    try { $("roomMenu").hidePopover(); } catch {}
     const room = current, n = rooms.find(r => r.name === room)?.count ?? 0;
     if (!room || !confirm(`Delete #${room} and all ${n.toLocaleString()} message${n === 1 ? "" : "s"} in it? This can't be undone.`)) return;
     await act(() => api("/api/admin/rooms/" + enc(room), { method: "DELETE" }), `#${room} deleted`);
@@ -878,6 +946,13 @@
   function updateTitle() {
     const n = unseenHere + Object.values(unread).reduce((a, b) => a + b, 0);
     document.title = n ? `(${n}) bunch` : "bunch";
+    // On a phone the room list is tucked away: the menu button carries the count of new messages elsewhere.
+    const elsewhere = Object.entries(unread).reduce((a, [r, k]) => a + (r === current ? 0 : k), 0);
+    const at = Object.entries(mentions).some(([r, k]) => r !== current && k);
+    $("sideBadge").hidden = !elsewhere;
+    $("sideBadge").textContent = elsewhere > 99 ? "99+" : String(elsewhere);
+    $("sideBadge").classList.toggle("at", at);
+    $("sideBtn").setAttribute("aria-label", "Rooms and agents" + (elsewhere ? `, ${elsewhere} new message${elsewhere === 1 ? "" : "s"} in other rooms` : ""));
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { unseenHere = 0; updateTitle(); } });
   const canNotify = "Notification" in window && window.isSecureContext;   // browsers only allow it on https or localhost

@@ -545,7 +545,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         out = []
         for r in store.rooms():
             last = store.one("SELECT MAX(id) AS id, COUNT(*) AS n FROM messages WHERE room=?", (r["name"],))
-            out.append({"name": r["name"], "summary": hub.room_summary(r["name"]),
+            out.append({"name": r["name"], "summary": hub.room_summary(r["name"], fallback=False),
                         "count": last["n"], "last_id": last["id"] or 0, "paused": hub.paused(r["name"]),
                         "bot": bool(r["bot"])})
         return out
@@ -676,10 +676,12 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "runs_on": hub.model_host(a["model"]) if a["model"] else None,
                         "machine": hub.agent_machine(a), "first_responder": a["name"] == first,
                         "avatar": (a["avatar"] or DEFAULT_HUMAN_AVATAR) if a["kind"] == "human" else None})
-        for system, model in (("_summarizer", s.summary_model), ("_router", s.router_model)):
+        # The hub's own helpers are listed only while they're configured or have used tokens today.
+        for system, model, does in (("_summarizer", hub.s.summary_model, "writes the room summaries"),
+                                    ("_router", hub.s.router_model, "picks who answers")):
             u = store.usage_today(system)
-            if system == "_summarizer" or u["ask"]:
-                out.append({"name": system, "kind": "system", "last_seen": None, "description": "",
+            if model or u["ask"]:
+                out.append({"name": system, "kind": "system", "last_seen": None, "description": does,
                             "model": model or None, "daily_tokens": None,
                             "runs_on": hub.model_host(model) if model else None, "machine": hub.model_machine(model),
                             "ask_tokens_today": u["ask"], "ctx_tokens_today": 0})

@@ -295,12 +295,16 @@ class Hub:
             lines.append("no new messages")
         return self._charge_ctx(agent, "\n".join(lines))
 
-    def room_summary(self, room: str) -> str:
+    def room_summary(self, room: str, fallback: bool = True) -> str:
+        """The rolling summary. Without one yet, agents get the last few messages instead (fallback);
+        the viewer passes fallback=False, since those messages are already on screen below it."""
         r = self.store.room(room)
         if r and r["summary"]:
             newer = self.store.one("SELECT COUNT(*) AS n FROM messages WHERE room=? AND id>?",
                                    (room, r["summary_upto"]))["n"]
             return r["summary"] + (f" (+{newer} newer)" if newer else "")
+        if not fallback:
+            return ""
         rows = self.store.q("SELECT sender, summary FROM messages WHERE room=? ORDER BY id DESC LIMIT 5", (room,))
         if not rows:
             return "(empty)"
