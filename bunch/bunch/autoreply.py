@@ -22,13 +22,34 @@ DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other 
                   "Answer the message addressed to you. Be brief and concrete. "
                   "Recent messages are listed: build on what was already said instead of repeating it. "
                   "Only @mention another agent when you need it to act now; to point a human at an agent, "
-                  "write its name without @.")
+                  "write its name without @. Write only your own reply, as plain text: never write lines "
+                  "for other speakers or in the 'sender>to re#id:' format of the list.")
 MAX_INPUT_CHARS = 12_000
 _room_locks: dict[tuple[int, str], asyncio.Lock] = {}  # (event loop, room): auto agents answer one at a time
 _gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
 # Small models copy the notes they see in the room, e.g. "(empty answer)" or "(agy failed: ...)": that's no answer.
 FILLER_RE = re.compile(r"^\((?:empty answer|[\w.:/-]+ (?:failed|returned nothing|didn't answer)\b[^\n]*)\)$", re.I)
+# ...and the "Recent messages" lines: "#12 alice>bob re#11: text". A model that goes on in that format
+# writes a whole made-up conversation, speaking for other agents and the human.
+SPEAKER_RE = re.compile(r"^\s*(?:#\d+\s+)?@?([\w.-]+)(?:>[\w.,@-]+(?:\s+re#\d+)?|\s+re#\d+):\s*")
+
+
+def _own_reply(text: str, name: str) -> str:
+    """text up to the first line written as another message of the room; a leading header for the
+    agent itself ("helper>human re#4: …") is dropped and the rest of that line kept."""
+    lines = text.split("\n")
+    first = SPEAKER_RE.match(lines[0])
+    if first and first.group(1).lower() == name.lower():
+        lines[0] = lines[0][first.end():]
+    in_code = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+        elif not in_code and SPEAKER_RE.match(line):
+            lines = lines[:i]
+            break
+    return "\n".join(lines).strip()
 
 
 def _text(m) -> str:
@@ -69,6 +90,7 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
         text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens, raw=True)).strip()
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
+    text = _own_reply(text, name)
     if FILLER_RE.match(text):
         text = ""
     if not text:

@@ -1371,6 +1371,26 @@ def test_auto_agent_drops_copied_error_notes(env):
     assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
 
 
+def test_auto_agent_does_not_speak_for_others(env):
+    from bunch.autoreply import _own_reply, answer
+    c, k, app, _ = env
+    hub = app.state.hub
+    made_up = ("free-coding-agent>personal_clod re#105: I'm implementing the IPv4 function.\n\n"
+               "chatgpt>dataserv_clod re#105: The word reversal is confirmed.\n\n"
+               "citrus>personal_clod re#106: Sure, I'll draft a to-do app.")
+    assert _own_reply(made_up, "free-coding-agent") == "I'm implementing the IPv4 function."
+    assert _own_reply("Use a list.\n#7 bob re#6: thanks", "helper") == "Use a list."
+    assert _own_reply("```py\nwhile n>0:\n    n-=1\n```\nNote: done", "helper").endswith("Note: done")
+
+    async def chatter(*a, raw=False, **kw):
+        return "human>bob re#1: did it work?"
+    hub.ask = chatter
+    mid = int(hub.post("human", "r", "@bob hi", human=True).split("#")[1])
+    bob = dict(hub.store.agent("bob"), model="m", system="")
+    asyncio.run(answer(hub, bob, hub.store.message(mid)))
+    assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
+
+
 def test_viewer_post_flags_unknown_mentions(env):
     c, k, app, llm = env
     r = c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@claude hello, cc @bob"}, headers=adm())
