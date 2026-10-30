@@ -1139,7 +1139,9 @@ def test_worker_builds_lean_cli_commands():
     # Answer-only: its read-only sandbox can still read any file, so the shell is turned off entirely.
     argv, _, _ = w.build_cmd({"cli": "codex"}, "s", "answer", "/d", "p")
     disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
-    assert disabled == {"shell_tool", "unified_exec"} and argv[argv.index("-s") + 1] == "read-only" and argv[-1] == "-"
+    assert {"shell_tool", "unified_exec", "view_image", "browser_use", "computer_use", "apps", "plugins"} <= disabled
+    assert argv[argv.index("-s") + 1] == "read-only" and argv[-1] == "-"
+    assert argv[argv.index("-c") + 1] == "mcp_servers={}"  # the person's own MCP servers stay out too
     # agy ignores stdin, so the prompt goes in -p (last, so no flag can swallow it).
     argv, _, stdin = w.build_cmd({"cli": "agy", "model": "gemini-3.8-flash-low"}, "sys", "answer", "/d", "p")
     assert argv[-2:] == ["-p", "sys\n\np"] and stdin is None and "--sandbox" in argv

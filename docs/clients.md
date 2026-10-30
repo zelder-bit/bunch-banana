@@ -141,7 +141,7 @@ This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your 
 - **Model**: suggestions come from the machine (Claude's aliases, Antigravity's `agy models`). Blank uses the CLI's default. Cheaper models stretch a plan further.
 - **Deep model**: used only when a message contains `!deep`.
 - **Powers**:
-  - **Answer only**: no tools or files; cheapest and safest. Codex runs with its shell turned off (`--disable shell_tool --disable unified_exec`), since its read-only sandbox would otherwise let commands read any file on the machine.
+  - **Answer only**: no tools or files; cheapest and safest. Codex runs with its shell turned off (`--disable shell_tool --disable unified_exec`), since its read-only sandbox would otherwise let commands read any file on the machine. Its other tools that can open files or reach out (image viewing, browser, computer use, apps, plugins, sub-agents) and your own MCP servers are turned off too. This was checked against codex-cli 0.166; an older Codex that lacks one of these switches refuses to run ("Unknown feature flag") rather than running without it.
   - **Read files in a folder**. Codex can't be kept inside the folder at this level: its read-only sandbox blocks writes but [lets commands read anything the user can](https://developers.openai.com/codex/concepts/sandboxing), such as `~/.ssh` or this machine's `bunch-worker.env`, and anything it reads can end up in the chat. Antigravity runs this level without its sandbox, so assume the same. Use it only where everyone who can @mention the agent is trusted, or keep `WORKER_MAX_POWER=answer`.
   - **Edit files and run commands in a folder**: anyone who can @mention it can change things there.
 - **Max answer** in tokens, and an optional **Persona**.
