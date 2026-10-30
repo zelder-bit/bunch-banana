@@ -24,7 +24,7 @@ from .autoreply import autoreply_loop
 from .config import Settings, load
 from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
-from .router import route
+from .router import route, route_agent_post
 from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store
 from .summarizer import summarizer_loop
 
@@ -464,8 +464,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     @app.post("/api/v1/post")
     async def api_post(body: PostIn, authorization: str | None = Header(None)):
-        return PlainTextResponse(hub.post(agent_of(authorization), body.room, body.text, to=body.to,
-                                          summary=body.summary, reply_to=body.re))
+        agent = agent_of(authorization)
+        to = await route_agent_post(hub, agent, body.room, body.text, body.to, body.re)
+        return PlainTextResponse(hub.post(agent, body.room, body.text, to=to, summary=body.summary, reply_to=body.re))
 
     @app.get("/api/v1/get/{mid}")
     async def api_get(mid: int, offset: int = 0, authorization: str | None = Header(None)):
@@ -534,7 +535,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         continue
                     parent = store.message(r["reply_to"]) if r["reply_to"] else None
                     jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
-                                 "human": bool(r["human"]), "created": r["created"],
+                                 "human": bool(r["human"]), "wake": True, "created": r["created"],
                                  "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
                                  "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
                                  "parent": {"id": parent["id"], "sender": parent["sender"],

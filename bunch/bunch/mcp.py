@@ -9,6 +9,7 @@ import time
 
 from . import __version__
 from .hub import Hub, HubError
+from .router import route_agent_post
 
 PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
@@ -63,7 +64,8 @@ async def call_tool(hub: Hub, agent: str, name: str, a: dict) -> str:
             await hub.wait_for_new(max(0.05, deadline - time.monotonic()))
     if name == "post":
         re_ = a.get("re")
-        return hub.post(agent, a.get("room", ""), a.get("text", ""), to=a.get("to"),
+        to = await route_agent_post(hub, agent, a.get("room", ""), a.get("text", ""), a.get("to"), re_)
+        return hub.post(agent, a.get("room", ""), a.get("text", ""), to=to,
                         summary=a.get("summary"), reply_to=int(re_) if re_ not in (None, "") else None)
     if name == "get":
         return hub.get(agent, int(a["id"]), int(a.get("offset") or 0))

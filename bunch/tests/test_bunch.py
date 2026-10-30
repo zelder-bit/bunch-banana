@@ -539,6 +539,19 @@ def test_bot_mode_stops_repeats_and_ping_pong(env):
     assert not hub.wakes(m, "alice") and "back and forth" in hub.stall(m)
 
 
+def test_bot_mode_ping_pong_needs_two_agents_taking_turns(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _bot_room(c)
+    _say(hub, "alice", "@bob, can you list three primes above 100?")
+    _say(hub, "bob", "101, 103, 107.\n[done]")
+    c.put("/api/admin/rooms/b/bot", json={"on": True}, headers=adm())
+    for text in ("Next goal: a haiku about rain.", "Also keep it under 20 words.", "And mention puddles."):
+        _say(hub, "alice", text)
+    m = _say(hub, "alice", "@bob what is the capital of Australia?")
+    assert hub.stall(m) is None and hub.wakes(m, "bob")  # one agent asking 5 times out of 6 isn't a back-and-forth
+
+
 def test_bot_mode_lifts_the_chain_pause_and_ends_on_done(env):
     c, k, app, llm = env
     hub = app.state.hub
@@ -553,6 +566,39 @@ def test_bot_mode_lifts_the_chain_pause_and_ends_on_done(env):
     m = _say(hub, "human", "thanks")
     m = _say(hub, "alice", "Anything else?\n@bob, can you double-check?")
     assert hub.wakes(m, "bob") and hub.agent_hops(m) == 1  # back to the normal rules
+
+
+def test_bot_mode_takes_a_line_starting_with_a_mention_as_the_handoff(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _bot_room(c)
+    r = tool(c, k["alice"], "post", room="b", text="@bob what is the capital of Australia?")[0]
+    m = hub.store.message(post_id(r))
+    assert hub.baton(m) == "bob" and hub.wakes(m, "bob") and "didn't ask" not in r
+    m = _say(hub, "alice", "Printer is $300.\n@carol thanks; @bob, can you price vinyl?")
+    assert hub.baton(m) == "carol"  # the first handoff in the text, whichever form it takes
+    m = _say(hub, "bob", "Vinyl is $40; check with @carol about listings.")
+    assert hub.baton(m) is None  # named in passing, not at the start of a line
+
+
+def test_bot_mode_routes_an_agent_message_that_asks_nobody(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "qwen", "model": "local/small"}, headers=adm())
+    c.put("/api/admin/agents/qwen/first", json={"on": True}, headers=adm())
+    llm.chat = lambda *a, **kw: asyncio.sleep(3600)  # keep the auto agent quiet; this is about who is asked
+    c.post("/api/v1/post", json={"room": "n", "text": "Goal: a haiku about rain."}, headers=h(k["alice"]))
+    assert c.get("/api/admin/rooms/n/messages", headers=adm()).json()[-1]["to"] == []  # not bot mode: as before
+    _bot_room(c)
+    goal = "Goal for this room: write a haiku about rain, then [done]."
+    r = c.post("/api/v1/post", json={"room": "b", "text": goal}, headers=h(k["alice"]))
+    m = hub.store.message(post_id(r.text))
+    assert hub.message_json(m)["to"] == ["qwen"] and hub.wakes(m, "qwen")  # a goal from outside starts the run
+    text, _ = tool(c, k["bob"], "post", room="b", text="Another goal: a limerick, then [done].")
+    m = hub.store.message(post_id(text))
+    assert hub.message_json(m)["to"] == ["qwen"] and hub.wakes(m, "qwen")  # the MCP door too
+    m = hub.store.message(post_id(hub.post("carol", "b", "Rain haiku drafted.", reply_to=m["id"])))
+    assert not hub.wakes(m, "bob")  # a reply that asks nobody still ends the run quietly
 
 
 def test_bot_mode_switch_is_admin_only(env):
@@ -1318,6 +1364,29 @@ def test_worker_rechecks_agents_before_dropping_a_job(monkeypatch):
     # Another agent's @gemini-local is not for gemini: no run, no reply.
     worker.handle({**job, "human": False, "sender": "gemini-local", "text": "@gemini-local again"})
     assert hellos == [True] and len(posted) == 1
+
+
+def test_worker_answers_a_bot_mode_goal_the_hub_routed_to_it(env, monkeypatch):
+    import json
+    import subprocess
+    c, k, app, llm = env
+    key = _machine(c)
+    _on(c, "carol")
+    c.put("/api/admin/agents/carol/first", json={"on": True}, headers=adm())
+    _bot_room(c)
+    c.post("/api/v1/post", json={"room": "b", "text": "Goal: one haiku about autumn, then [done]."}, headers=h(k["alice"]))
+    jobs = [j for j in c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"] if j["sender"] == "alice"]
+    assert [(j["agent"], j["wake"]) for j in jobs] == [("carol", True)]  # no @carol in it: the hub routed it
+    w = _load_worker()
+    worker, posted = w.Worker(), []
+    worker.machine, worker.agents = "workstation", {"carol": {"cli": "claude"}}
+    worker.started = jobs[0]["created"]
+    monkeypatch.setattr(w, "report", lambda *a, **kw: "ok")
+    monkeypatch.setattr(worker, "reply", lambda job, text: posted.append(text))
+    monkeypatch.setattr(w.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 0, json.dumps({"result": "Red leaves drift down.\n[done]", "usage": {}}), ""))
+    worker.handle(jobs[0])
+    assert posted == ["Red leaves drift down.\n[done]"]  # the hub's wake decision, not "it didn't @ me"
 
 
 def test_worker_says_when_power_was_lowered(monkeypatch):

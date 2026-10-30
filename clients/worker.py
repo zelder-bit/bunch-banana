@@ -384,8 +384,9 @@ class Worker:
 
     def handle(self, job):
         name = job["agent"]
-        # Loop guard: answer humans always, other agents only when they explicitly @mention us.
-        if not job["human"] and not mentions(job["text"], name):
+        # Loop guard: the hub only hands over messages that should wake us ("wake"); older hubs don't say,
+        # so then answer humans always, other agents only when they explicitly @mention us.
+        if not job["human"] and not job.get("wake", mentions(job["text"], name)):
             return
         if job["created"] < self.started - STALE_AFTER:
             return

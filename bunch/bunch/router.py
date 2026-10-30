@@ -7,7 +7,7 @@ import logging
 import re
 import time
 
-from .hub import Hub, one_line
+from .hub import MENTION_RE, Hub, one_line
 
 log = logging.getLogger("bunch.router")
 
@@ -24,6 +24,17 @@ FOLLOW_UP_WORDS = 3   # "try again", "go on", "thanks": too short for the model 
 FOLLOW_UP_WINDOW = 1800
 # "go more in depth with this", "can you expand on that": longer, but still a follow-up to the last answer
 BACK_REF_RE = re.compile(r"\b(?:this|that|it|those|these|more|again|above|expand|elaborate|in depth|continue)\b", re.I)
+
+
+async def route_agent_post(hub: Hub, sender: str, room: str, text: str, to, reply_to) -> list[str] | None:
+    """Bot mode: a new message from an agent that names no agent (say a goal from an agent outside the
+    run) is routed like a person's, so it starts the run instead of waking nobody. Returns the `to` to post with."""
+    room = (room or "").strip().lower().lstrip("#")
+    known = hub.store.agent_names()
+    if to or reply_to not in (None, "") or not hub.bot(room) or \
+            any(n.rstrip(".") in known for n in MENTION_RE.findall((text or "").lower())):
+        return to
+    return [n for n in await route(hub, room, text, sender=sender) if n != sender] or to
 
 
 async def route(hub: Hub, room: str, text: str, timeout: float = 20.0, sender: str | None = None) -> list[str]:

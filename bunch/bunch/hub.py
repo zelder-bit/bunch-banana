@@ -42,6 +42,8 @@ _AT = r"\**@[a-z0-9][a-z0-9_.-]*\**"
 _GREETING = r"(?:(?:hi|hey|hello|ok|okay|thanks|thank you)[\s,!]+)?"
 ADDRESS_RE = re.compile(r"(?:^|[\n.!?])[\s>*_#-]*" + _GREETING + r"(" + _AT + r"(?:\s*(?:,|and|&)\s*" + _AT + r")*)"
                         r"\s*(?:[,:\u2013\u2014-]|(?:can|could|please|would|will)\b)")
+# Bot mode also takes any line that starts with a mention as a handoff ("@bob what is\u2026"), as BOT_NOTE asks.
+LINE_AT_RE = re.compile(r"^[\s>*_#-]*" + _GREETING + r"(" + _AT + r")(?=[\s,:;!?]|$)", re.M)
 
 
 class HubError(Exception):
@@ -199,19 +201,20 @@ class Hub:
             self._unavailable_notices(mid)
         if not human and sender != HUB_SENDER and self.bot(room):
             self._bot_turn(mid)
-        hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, text)
+        hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, room, text)
         return f"ok #{mid}" + hint
 
-    def _unasked_hint(self, sender: str, text: str) -> str:
+    def _unasked_hint(self, sender: str, room: str, text: str) -> str:
         """An agent that names an auto or machine agent without asking it gets no answer from it, so say so
         in the post result (agents only see "ok #N" otherwise and think they asked). Agents that read for
         themselves (manual) still see the message in their read, so they get no hint."""
+        baton = self._baton(text, sender) if self.bot(room) else None
         named: list[str] = []
         for n in MENTION_RE.findall(text.lower()):
             n = n.rstrip(".")
             row = self.store.agent(n)
             if n != sender and n not in named and row and row["kind"] == "agent" and \
-                    self.worker_state(row) != "manual" and not addresses(text, n):
+                    self.worker_state(row) != "manual" and not addresses(text, n) and n != baton:
                 named.append(n)
         if not named:
             return ""
@@ -376,17 +379,29 @@ class Hub:
         return BOT_NOTE if self.bot(room) else ""
 
     def baton(self, m) -> str | None:
-        """The one agent a bot-mode message hands work to: the first one it explicitly asks."""
-        for group in ADDRESS_RE.findall((m["body"] or m["summary"] or "").lower()):
+        """The one agent a bot-mode message hands work to: the first one it asks or opens a line with."""
+        return self._baton(m["body"] or m["summary"] or "", m["sender"])
+
+    def _baton(self, text: str, sender: str) -> str | None:
+        text = text.lower()
+        groups = sorted([(g.start(1), g.group(1)) for g in ADDRESS_RE.finditer(text)] +
+                        [(g.start(1), g.group(1)) for g in LINE_AT_RE.finditer(text)])
+        for _, group in groups:
             for n in MENTION_RE.findall(group):
                 n = n.rstrip(".")
-                if n != m["sender"] and n != HUB_SENDER and self.store.agent(n):
+                if n != sender and n != HUB_SENDER and self.store.agent(n):
                     return n
         return None
 
+    def routed(self, m) -> bool:
+        """A new bot-mode message from an agent that names no agent: the router picked who it asks."""
+        text = (m["body"] or m["summary"] or "").lower()
+        return not m["human"] and m["reply_to"] is None and self.bot(m["room"]) and \
+            not any(self.store.agent(n.rstrip(".")) for n in MENTION_RE.findall(text))
+
     def stall(self, m) -> str | None:
         """Why a bot-mode handoff in m would be a loop (None when it's fine): it repeats a recent
-        message, or the last PING_PONG agent messages are just two agents going back and forth."""
+        message, or the last PING_PONG agent messages are just two agents taking turns."""
         text = m["body"] or m["summary"]
         for p in self.store.q("SELECT * FROM messages WHERE room=? AND id<? AND sender!=? ORDER BY id DESC LIMIT ?",
                               (m["room"], m["id"], HUB_SENDER, ECHO_LOOKBACK)):
@@ -395,7 +410,8 @@ class Hub:
         last = self.store.q("SELECT sender, human FROM messages WHERE room=? AND id<=? AND sender!=? "
                             "ORDER BY id DESC LIMIT ?", (m["room"], m["id"], HUB_SENDER, PING_PONG))
         senders = {r["sender"] for r in last}
-        if len(last) == PING_PONG and not any(r["human"] for r in last) and len(senders) == 2:
+        turns = all(a["sender"] != b["sender"] for a, b in zip(last, last[1:]))  # not one agent asking again and again
+        if len(last) == PING_PONG and not any(r["human"] for r in last) and len(senders) == 2 and turns:
             a, b = sorted(senders)
             return f"{a} and {b} have passed it back and forth {PING_PONG} times"
         return None
@@ -417,11 +433,13 @@ class Hub:
 
     def wakes(self, m, agent: str) -> bool:
         """Whether agent-written message m should get an answer from agent. In bot mode: agent holds
-        the baton and the handoff isn't a loop. Otherwise: it must ask the agent explicitly, the agent
+        the baton (or was routed a new message that asks nobody, like a goal from an agent outside the
+        run) and the handoff isn't a loop. Otherwise: it must ask the agent explicitly, the agent
         chain below the human must be short, and the agent must not already have been asked by that
         human (it answers the human, not a second time via another agent)."""
         if self.bot(m["room"]):
-            return self.baton(m) == agent and not self.stall(m)
+            asked = self.baton(m) == agent or (self.routed(m) and agent in _recips(m))
+            return asked and not self.stall(m)
         if not addresses(m["body"] or m["summary"], agent) or self.agent_hops(m) >= MAX_AGENT_HOPS:
             return False
         root = m
