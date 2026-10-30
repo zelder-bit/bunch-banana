@@ -545,9 +545,11 @@ class Hub:
         u = self.store.usage_today(agent)
         return u["ask"] + u["sub"] + int(u["cached"] * CACHE_WEIGHT)
 
-    def over_budget(self, agent: str) -> str | None:
-        """Why agent can't spend more tokens today, or None when it can."""
-        budget, used = self.budget(agent), self.spent(agent)
+    def over_budget(self, agent: str, budget: int | None = None, used: int | None = None) -> str | None:
+        """Why agent can't spend more tokens today, or None when it can. Pass budget and used when
+        they're already looked up (two database reads)."""
+        if budget is None or used is None:
+            budget, used = self.budget(agent), self.spent(agent)
         return f"daily token budget used ({used}/{budget}); resets 00:00 UTC" if budget and used >= budget else None
 
     # ---------------------------------------------------------------- worker
@@ -725,7 +727,7 @@ class Hub:
             if not prompt:
                 raise HubError("prompt required")
             budget, used = self.budget(agent), self.spent(agent)
-            why = self.over_budget(agent)
+            why = self.over_budget(agent, budget, used)
             if why:
                 raise HubError(why)
             mt = max(1, min(int(max_tokens or self.s.ask_max_tokens), self.s.ask_max_tokens))

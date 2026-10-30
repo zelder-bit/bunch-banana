@@ -659,9 +659,9 @@ def test_admin_flag_and_last_admin_guard(env):
     assert c.put("/api/admin/users/alice/admin", json={"admin": True}, headers=adm()).status_code == 404
     # ben is now the only admin: signed in, he can't demote or delete himself
     c.post("/api/auth/login", json={"name": "ben", "password": "password two"})
-    r = c.put("/api/admin/users/ben/admin", json={"admin": False})
+    r = c.put("/api/admin/users/ben/admin", json={"admin": False, "my_password": "password two"})
     assert r.status_code == 400 and "last admin" in r.text
-    assert c.delete("/api/admin/users/ben").status_code == 400
+    assert c.request("DELETE", "/api/admin/users/ben", json={"my_password": "password two"}).status_code == 400
     assert c.delete("/api/admin/users/ann").status_code == 200
     # ...but the admin token is never locked out
     assert c.put("/api/admin/users/ben/admin", json={"admin": False}, headers=adm()).status_code == 200
@@ -1672,3 +1672,190 @@ def test_repeated_nudge_after_more_was_said_is_answered(env):
     asyncio.run(autoreply_once(hub))
     helper = [m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if m["sender"] == "helper"]
     assert len(helper) == 2
+
+
+# --- #49: password rules, routing-off fallbacks, profile pictures; plus #47, #50 and #51
+
+def test_wrong_current_passwords_count_toward_the_sign_in_limit(env):
+    c, k, app, _ = env
+    app.state.hub.store.create_user("pat", "first password")
+    assert c.post("/api/auth/login", json={"name": "pat", "password": "first password"}).status_code == 200
+    change = lambda cur: c.put("/api/admin/users/pat/password", json={"password": "second password", "current_password": cur})
+    assert [change("nope").status_code for _ in range(10)] == [403] * 10
+    assert change("nope").status_code == 429
+    assert change("first password").status_code == 429  # even the right one waits now
+    assert c.post("/api/auth/login", json={"name": "pat", "password": "first password"}).status_code == 429
+
+
+def test_right_current_password_clears_earlier_typos(env):
+    c, k, app, _ = env
+    app.state.hub.store.create_user("pat", "first password")
+    c.post("/api/auth/login", json={"name": "pat", "password": "first password"})
+    for _ in range(9):
+        c.put("/api/admin/users/pat/password", json={"password": "second password", "current_password": "nope"})
+    assert c.put("/api/admin/users/pat/password",
+                 json={"password": "second password", "current_password": "first password"}).status_code == 200
+    for _ in range(9):  # the 9 typos above no longer count, so 9 more are still under the limit
+        assert c.put("/api/admin/users/pat/password",
+                     json={"password": "third password", "current_password": "nope"}).status_code == 403
+    assert c.post("/api/auth/login", json={"name": "pat", "password": "second password"}).status_code == 200
+
+
+def test_signed_in_admin_needs_current_password_for_own_password(env):
+    c, k, app, _ = env
+    app.state.hub.store.create_user("ann", "first password", admin=True)
+    c.post("/api/auth/login", json={"name": "ann", "password": "first password"})
+    assert c.put("/api/admin/users/ann/password", json={"password": "second password"}).status_code == 403
+    assert c.put("/api/admin/users/ann/password",
+                 json={"password": "second password", "current_password": "first password"}).status_code == 200
+
+
+def test_admin_token_changes_passwords_without_current_one(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    st.create_user("ann", "first password", admin=True)
+    assert c.put("/api/admin/users/ann/password", json={"password": "second password"}, headers=adm()).status_code == 200
+    assert st.verify_user("ann", "second password")
+    assert c.post("/api/admin/users", json={"name": "zed", "password": "zed password", "admin": True},
+                  headers=adm()).status_code == 200
+    assert c.put("/api/admin/users/zed/admin", json={"admin": False}, headers=adm()).status_code == 200
+
+
+def test_signed_in_admin_proves_own_password_before_lock_out_actions(env):
+    c, k, app, _ = env
+    st = app.state.hub.store
+    st.create_user("owner", "owner password", admin=True)
+    st.create_user("thief", "thief password", admin=True)
+    st.create_user("pat", "pat password")
+    c.post("/api/auth/login", json={"name": "thief", "password": "thief password"})
+    new_admin = {"name": "mole", "password": "mole password", "admin": True}
+    assert c.post("/api/admin/users", json=new_admin).status_code == 403
+    assert c.put("/api/admin/users/owner/password", json={"password": "locked out!"}).status_code == 403
+    assert c.put("/api/admin/users/owner/admin", json={"admin": False}).status_code == 403
+    assert c.put("/api/admin/users/pat/admin", json={"admin": True}).status_code == 403
+    assert c.delete("/api/admin/users/owner").status_code == 403
+    wrong = {"my_password": "owner password"}  # someone else's password doesn't count
+    assert c.put("/api/admin/users/owner/password", json={"password": "locked out!", **wrong}).status_code == 403
+    assert st.verify_user("owner", "owner password") and st.agent("owner")["is_admin"] and not st.agent("mole")
+    # with the acting admin's own password, each works
+    mine = {"my_password": "thief password"}
+    assert c.post("/api/admin/users", json={**new_admin, **mine}).status_code == 200
+    assert c.put("/api/admin/users/pat/password", json={"password": "new pat password", **mine}).status_code == 200
+    assert c.put("/api/admin/users/pat/admin", json={"admin": True, **mine}).status_code == 200
+    assert c.request("DELETE", "/api/admin/users/mole", json=mine).status_code == 200
+    # adding a non-admin or removing a non-admin needs nothing more
+    assert c.post("/api/admin/users", json={"name": "new", "password": "new password"}).status_code == 200
+    assert c.delete("/api/admin/users/new").status_code == 200
+
+
+def test_routing_off_sends_to_the_room_when_the_first_responder_is_offline(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    assert not hub.s.router_model
+    _machine(c)
+    c.post("/api/admin/agents", json={"name": "qwen"}, headers=adm())
+    _on(c, "qwen")
+    c.put("/api/admin/agents/qwen/first", json={"on": True}, headers=adm())
+    hub.store.x("UPDATE machines SET last_seen=0")  # the machine stopped polling
+    assert hub.worker_state(hub.store.agent("qwen")) == "offline"
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "what is the capital of peru"}, headers=adm())
+    assert [m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if m["human"]][-1]["to"] == []
+
+
+def test_routing_off_skips_the_follow_up_rule(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    assert not hub.s.router_model
+    c.post("/api/admin/agents", json={"name": "qwen", "model": "local/small"}, headers=adm())
+    c.put("/api/admin/agents/qwen/first", json={"on": True}, headers=adm())
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@bob make it"}, headers=adm())
+    tool(c, k["bob"], "post", room="r", text="made it")
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "Try again"}, headers=adm())
+    # with routing on this short follow-up would go to bob; off, the first responder takes it
+    assert [m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if m["human"]][-1]["to"] == ["qwen"]
+
+
+def _signed_in(c, app, name="pat"):
+    app.state.hub.store.create_user(name, "pat password")
+    assert c.post("/api/auth/login", json={"name": name, "password": "pat password"}).status_code == 200
+
+
+def test_saving_a_picture_tells_every_viewer(env):
+    c, k, app, _ = env
+    hub = app.state.hub
+    _signed_in(c, app)
+    sent = []
+    hub.broadcast = sent.append
+    assert c.put("/api/auth/me/avatar", json={"avatar": "carrot"}).json()["avatar"] == "carrot"
+    assert {"type": "agents"} in sent
+
+
+def test_saving_the_orange_stores_nothing(env):
+    c, k, app, _ = env
+    _signed_in(c, app)
+    c.put("/api/auth/me/avatar", json={"avatar": "carrot"})
+    assert c.put("/api/auth/me/avatar", json={"avatar": "orange"}).json()["avatar"] == "orange"
+    assert app.state.hub.store.agent("pat")["avatar"] is None
+
+
+@pytest.mark.parametrize("body", [{"avatar": 3}, {"avatar": ["carrot"]}, {"avatar": {"x": 1}}])
+def test_picture_must_be_a_string(env, body):
+    c, k, app, _ = env
+    _signed_in(c, app)
+    assert c.put("/api/auth/me/avatar", json=body).status_code == 422
+
+
+def test_set_avatar_rejects_non_strings():
+    import tempfile
+    from bunch.store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = Store(d + "/a.db")
+        st.create_user("pat", "pat password")
+        for bad in (0, False, 3, ["carrot"]):
+            with pytest.raises(ValueError):
+                st.set_avatar("pat", bad)
+        st.set_avatar("pat", "")
+        assert st.agent("pat")["avatar"] is None
+
+
+def test_unknown_stored_picture_shows_the_orange(env):
+    c, k, app, _ = env
+    _signed_in(c, app)
+    app.state.hub.store.x("UPDATE agents SET avatar='dragonfruit' WHERE name='pat'")  # a picture since removed
+    assert c.get("/api/auth/me").json()["avatar"] == "orange"
+    assert {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}["pat"]["avatar"] == "orange"
+
+
+def test_database_from_before_pictures_gains_the_column(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    st = __import__("bunch.store", fromlist=["Store"]).Store(path)
+    st.db.close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE agents DROP COLUMN avatar")
+    db.commit()
+    assert "avatar" not in [r[1] for r in db.execute("PRAGMA table_info(agents)")]
+    db.close()
+    app = create_app(Settings(db_path=path, admin_token=ADMIN), FakeLLM())
+    cols = [r[1] for r in app.state.hub.store.db.execute("PRAGMA table_info(agents)")]
+    assert "avatar" in cols
+
+
+@pytest.mark.parametrize("kind", ["agent", "human"])
+def test_old_database_with_a_bunch_row_refuses_to_start(tmp_path, kind):
+    from bunch.cli import main
+    from bunch.store import Store
+    path = str(tmp_path / "old.db")
+    st = Store(path)
+    st.x("INSERT INTO agents(name,key_hash,kind,created) VALUES('bunch',NULL,?,0)", (kind,))
+    st.db.close()
+    with pytest.raises(SystemExit) as e:
+        create_app(Settings(db_path=path, admin_token=ADMIN), FakeLLM())
+    assert "named 'bunch'" in str(e.value) and "cli remove bunch" in str(e.value)
+    import os
+    os.environ["BUNCH_DB"] = path
+    try:
+        assert main(["remove", "bunch"]) in (0, None)
+    finally:
+        del os.environ["BUNCH_DB"]
+    create_app(Settings(db_path=path, admin_token=ADMIN), FakeLLM())  # starts now

@@ -20,7 +20,7 @@ import os
 import sys
 
 from .config import load
-from .store import Store
+from .store import RESERVED_NAMES, Store
 
 
 def main(argv=None) -> int:
@@ -87,7 +87,10 @@ def main(argv=None) -> int:
             st.set_budget(args.name, val)
             print("ok")
         elif args.cmd == "remove":
-            print("removed" if st.delete_agent(args.name) else "no such agent")
+            removed = st.delete_agent(args.name)
+            if not removed and args.name in RESERVED_NAMES:  # a person by the hub's own name blocks start-up
+                removed = st.delete_reserved(args.name)
+            print("removed" if removed else "no such agent")
         elif args.cmd == "backup":
             if os.path.abspath(args.path) == os.path.abspath(s.db_path):
                 raise ValueError("backup path is the live database")

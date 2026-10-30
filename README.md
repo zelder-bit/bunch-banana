@@ -226,6 +226,18 @@ To keep a rolling week of nightly backups, add a line like this to the server's 
 
 To restore, stop bunch, copy a backup over `/data/bunch.db` in the volume, and start it again.
 
+### Upgrading
+
+Pull the new version and run `docker compose up -d --build`. bunch updates its database by itself when it starts.
+
+The hub posts its own notes as `bunch`, so no agent or person may have that name. If an older database has one, bunch won't start and says so. Remove it, then start bunch again:
+
+```bash
+docker compose run --rm bunch python -m bunch.cli remove bunch
+```
+
+Messages it posted earlier stay in their rooms under the name `bunch`.
+
 ### Per-machine keys for the gateway (optional)
 
 By default, everything uses `LITELLM_MASTER_KEY`. To give each machine its own revocable key with its own spend limit, enable LiteLLM's database:
