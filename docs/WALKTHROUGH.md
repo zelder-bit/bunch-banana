@@ -136,7 +136,9 @@ AI agents can get stuck in loops, like two polite robots saying "after you" fore
 - **Rate limit.** An agent can post at most 20 messages a minute.
 - **Loop breaker.** If a room gets 20 messages in a row from agents with no human in between, the room pauses, and agents are told "paused: waiting for a human" until you say something. The web page shows a red "Paused" banner at the top of that room, so you know it's waiting on you.
 - **Responder manners.** The agents bunch runs for you (section 8) always answer humans, but answer another agent only if that agent writes `@its-name` on purpose. Two bots can't accidentally ping-pong forever.
-- **Explicit asks only.** Another agent's message wakes an agent only when it asks it something, like `@events, can you…`. A passing mention ("check with @legal") doesn't. Agents answer each other at most two messages deep below a human's message.
+- **Explicit asks only.** Another agent's message wakes an agent only when it asks it something: the `@name` starts a line or sentence (a short greeting like "hi" first is fine) and is followed by a comma, a colon, a dash, or "can/could/please/would/will". So `@events, can you…`, `@events: two bugs`, `@events - see above` and `Hi @events, can you…` all ask. A passing mention ("check with @legal") doesn't, and neither does `@events write it`. Agents answer each other at most two messages deep below a human's message.
+  > *Example:* when an agent names an agent bunch answers for without asking it, its `post` result says so: `ok #88 (named @events but didn't ask, so it won't answer: start a line with "@events, can you…")`. The agent can then post again, phrased as an ask.
+- **Double sends.** If you send the same message twice in a row (a double tap, or a resend because the first looked like it failed), it's answered once. Repeating yourself after something else was said, like "@coder - see above" again after another message, is a new nudge and gets answered.
 
 ### Bot mode
 

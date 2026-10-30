@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from bunch.app import create_app
 from bunch.config import Settings
+from bunch.hub import post_id
 from bunch.summarizer import summarize_once
 
 ADMIN = "test-admin-token"
@@ -503,7 +504,7 @@ def _bot_room(c, room="b"):
 
 
 def _say(hub, sender, text, room="b"):
-    mid = int(hub.post(sender, room, text, human=sender == "human").split("#")[1])
+    mid = post_id(hub.post(sender, room, text, human=sender == "human"))
     return hub.store.message(mid)
 
 
@@ -1621,3 +1622,53 @@ def test_viewer_gets_no_fallback_summary_and_no_idle_helpers(env):
     llm.enabled = True
     hub.s = hub.s.__class__(**{**hub.s.__dict__, "summary_model": ""})
     assert "_summarizer" not in names()                   # summaries off: not listed
+
+
+# --- #53: asks phrased with dashes or a greeting, a hint for unasked agents, nudges vs double sends
+
+@pytest.mark.parametrize("text,asked", [
+    ("@coder, can you write it", True),
+    ("@coder: two bugs", True),
+    ("@coder please fix", True),
+    ("@coder - see above", True),
+    ("@coder — two bugs in it", True),
+    ("@coder – see above", True),
+    ("Hi @coder, can you write it", True),
+    ("thanks! @coder: one more", True),
+    ("@coder write is_valid_ipv4", False),
+    ("check with @coder about it", False),
+    ("ask @coder - it knows", False),
+])
+def test_explicit_ask_phrasings(text, asked):
+    from bunch.hub import addresses
+    assert addresses(text, "coder") is asked
+
+
+def test_post_hints_when_an_agent_is_named_but_not_asked(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    res = hub.post("alice", "r", "@helper write is_valid_ipv4 with asserts")
+    assert res.startswith("ok #") and "named @helper but didn't ask" in res and '"@helper, can you' in res
+    assert post_id(res) == hub.store.room_max_id("r")
+    assert hub.post("alice", "r", "@helper, can you write is_valid_ipv4?") == f"ok #{post_id(res) + 1}"
+    assert hub.post("alice", "r", "@helper - see above").count("named") == 0  # a dash is an ask now
+    assert "named" not in hub.post("alice", "r", "@bob have a look")  # bob reads for itself
+    assert "named" not in hub.post("savannah", "r", "@helper write it", human=True)  # people always wake agents
+    # over REST too: the hint reaches agents that post with /api/v1/post
+    r = c.post("/api/v1/post", json={"room": "r", "text": "fyi @helper wrote this"}, headers=h(k["alice"]))
+    assert "named @helper" in r.text
+
+
+def test_repeated_nudge_after_more_was_said_is_answered(env):
+    from bunch.autoreply import autoreply_once
+    c, k, app, llm = env
+    hub = app.state.hub
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
+    hub.post("savannah", "r", "@helper - see above", human=True)
+    asyncio.run(autoreply_once(hub))
+    hub.post("alice", "r", "fyi @helper, the answer has a bug in it", reply_to=hub.store.room_max_id("r"))
+    hub.post("savannah", "r", "@helper - see above", human=True)  # same text, but not a double send
+    asyncio.run(autoreply_once(hub))
+    helper = [m for m in c.get("/api/admin/rooms/r/messages", headers=adm()).json() if m["sender"] == "helper"]
+    assert len(helper) == 2
