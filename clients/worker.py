@@ -195,6 +195,10 @@ def effective_power(cfg, max_power=MAX_POWER, dirs=DIRS):
     return power, d
 
 
+CODEX_ANSWER_OFF = ("shell_tool", "unified_exec", "view_image", "browser_use", "browser_use_external",
+                    "computer_use", "apps", "plugins", "multi_agent")
+
+
 def build_cmd(cfg, system, power, workdir, prompt, deep=False):
     """One headless run. Returns (argv, cwd, stdin)."""
     cli = cfg["cli"]
@@ -214,8 +218,13 @@ def build_cmd(cfg, system, power, workdir, prompt, deep=False):
     if cli == "codex":
         argv = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--ignore-rules"]
         argv += ["-m", model] if model else []
-        if power == "answer":  # Codex's read-only sandbox still lets commands read any file the user can: no shell
-            argv += ["--disable", "shell_tool", "--disable", "unified_exec"]
+        if power == "answer":  # Codex's read-only sandbox still lets commands read any file the user can: no shell,
+            # nor the other tools that can open files or reach out (checked on codex-cli 0.166), nor the
+            # person's own MCP servers. An older Codex without one of these flags stops with "Unknown feature
+            # flag" instead of running unprotected.
+            argv += ["-c", "mcp_servers={}"]
+            for feature in CODEX_ANSWER_OFF:
+                argv += ["--disable", feature]
         argv += ["-s", "workspace-write" if power == "full" else "read-only", "-C", workdir, "-"]
         return argv, workdir, f"{system}\n\n{prompt}"
     if cli == "agy":  # agy ignores stdin: the prompt rides in -p

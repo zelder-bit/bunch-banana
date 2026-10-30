@@ -93,6 +93,7 @@
             <div class="add-more" id="userMore" hidden>
               <input type="password" id="userPw" placeholder="Password (8+ characters)" minlength="8" autocomplete="new-password" aria-label="Password">
               <label class="check"><input type="checkbox" id="userAdmin"> Admin (manage agents and people)</label>
+              <input type="password" id="userMyPw" placeholder="Your password (to add an admin)" autocomplete="current-password" aria-label="Your password" hidden>
               <button class="btn small primary" type="submit">Add person</button>
             </div>
           </form>
@@ -380,6 +381,9 @@
     const [list, ms] = await Promise.all([api("/api/admin/agents"), api("/api/admin/machines")]);
     machines = ms;
     people = list.filter(a => a.kind !== "system");
+    // Your own picture may have changed on another device: follow it here too, top bar included.
+    const mine = person(me.name)?.avatar;
+    if (mine && mine !== me.avatar) { me.avatar = mine; showMe(); }
     refreshAvatars();
     const row = (a) => {
       const stats = [];
@@ -758,26 +762,38 @@
   function passwordField(label) {
     return h("input", { type: "password", minlength: "8", autocomplete: "new-password", placeholder: "8+ characters", "aria-label": label });
   }
+  // Making or removing an admin and resetting someone's password need your own password when you're signed
+  // in (not with the admin token), so a borrowed or stolen session can't lock the owner out.
+  const myPasswordField = () => token ? null
+    : h("input", { type: "password", autocomplete: "current-password", "aria-label": "Your password" });
+  const myPw = (input) => input ? { my_password: input.value } : {};
   function openUserPanel(u) {
     const self = u.name === me.name;
     const pw = passwordField("New password");
+    const mine = self ? null : myPasswordField();
+    const needMine = () => { if (mine && !mine.value) { toast("Enter your password first", "bad"); mine.focus(); return true; } return false; };
     const adminBox = h("input", { type: "checkbox", disabled: self });
     adminBox.checked = u.admin;
     adminBox.onchange = async () => {
-      const ok = await act(() => api(`/api/admin/users/${enc(u.name)}/admin`, { method: "PUT", body: JSON.stringify({ admin: adminBox.checked }) }),
+      if (needMine()) { adminBox.checked = !adminBox.checked; return; }
+      const ok = await act(() => api(`/api/admin/users/${enc(u.name)}/admin`, { method: "PUT", body: JSON.stringify({ admin: adminBox.checked, ...myPw(mine) }) }),
         adminBox.checked ? `${u.name} is an admin` : `${u.name} is no longer an admin`);
       if (ok) u.admin = adminBox.checked; else adminBox.checked = !adminBox.checked;
       loadUsers();
     };
     const setPw = async () => {
-      if (await act(() => api(`/api/admin/users/${enc(u.name)}/password`, { method: "PUT", body: JSON.stringify({ password: pw.value }) }),
+      if (needMine()) return;
+      if (await act(() => api(`/api/admin/users/${enc(u.name)}/password`, { method: "PUT", body: JSON.stringify({ password: pw.value, ...myPw(mine) }) }),
         `New password set for ${u.name}`)) $("panel").close();
     };
     const remove = async () => {
+      if (u.admin && needMine()) return;
       if (!confirm(`Remove ${u.name}? They can't sign in any more. Their messages stay.`)) return;
-      if (await act(() => api(`/api/admin/users/${enc(u.name)}`, { method: "DELETE" }), `${u.name} removed`)) { $("panel").close(); loadUsers(); loadAgents(); }
+      if (await act(() => api(`/api/admin/users/${enc(u.name)}`, { method: "DELETE", ...(u.admin ? { body: JSON.stringify(myPw(mine)) } : {}) }),
+        `${u.name} removed`)) { $("panel").close(); loadUsers(); loadAgents(); }
     };
     openPanel(u.name,
+      mine ? field("Your password", mine, "Needed to reset their password, change Admin, or remove an admin.") : null,
       ...(self  // your own password needs your current one: use the same panel as clicking your name
         ? [h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn", onclick: openMyPasswordPanel }, "Change my password…"))]
         : [field("Reset password", pw, "Signs them out everywhere."),
@@ -1235,13 +1251,15 @@
   };
 
   $("userName").addEventListener("input", () => { $("userMore").hidden = !$("userName").value.trim(); });
+  $("userAdmin").addEventListener("change", () => { $("userMyPw").hidden = !$("userAdmin").checked || !!token; });
   $("newUser").onsubmit = async (e) => {
     e.preventDefault();
     try {
       const r = await api("/api/admin/users", { method: "POST", body: JSON.stringify({
-        name: $("userName").value.trim().toLowerCase(), password: $("userPw").value, admin: $("userAdmin").checked }) });
-      for (const id of ["userName", "userPw"]) $(id).value = "";
-      $("userAdmin").checked = false; $("userMore").hidden = true;
+        name: $("userName").value.trim().toLowerCase(), password: $("userPw").value, admin: $("userAdmin").checked,
+        ...($("userAdmin").checked && !token ? { my_password: $("userMyPw").value } : {}) }) });
+      for (const id of ["userName", "userPw", "userMyPw"]) $(id).value = "";
+      $("userAdmin").checked = false; $("userMore").hidden = true; $("userMyPw").hidden = true;
       toast(`${r.name} can sign in now`, "good");
       loadUsers(); loadAgents();
     } catch (err) { toast(err.message, "bad"); }

@@ -88,6 +88,7 @@ class UserIn(BaseModel):
     name: str
     password: str
     admin: bool = False
+    my_password: str | None = None  # the acting admin's own password, to create an admin from a session
 
 
 class AvatarIn(BaseModel):
@@ -97,10 +98,16 @@ class AvatarIn(BaseModel):
 class PasswordIn(BaseModel):
     password: str
     current_password: str | None = None  # required when you change your own password from a session
+    my_password: str | None = None  # the acting admin's own password, to reset someone else's from a session
 
 
 class AdminFlagIn(BaseModel):
     admin: bool
+    my_password: str | None = None  # the acting admin's own password (from a session)
+
+
+class MyPasswordIn(BaseModel):
+    my_password: str | None = None
 
 
 class BudgetIn(BaseModel):
@@ -206,6 +213,12 @@ def _pw_mark(pw_hash: str) -> str:
     return hashlib.sha256((pw_hash or "").encode()).hexdigest()[:16]
 
 
+def shown_avatar(avatar: str | None) -> str:
+    """A person's picture as the viewer draws it: the orange when unset, or when the stored picture
+    is no longer one of HUMAN_AVATARS (it would show as a broken image)."""
+    return avatar if avatar and any(avatar in group for group in HUMAN_AVATARS.values()) else DEFAULT_HUMAN_AVATAR
+
+
 def create_app(settings: Settings | None = None, llm: LLM | None = None) -> FastAPI:
     s = settings or load()
     if not s.admin_token:
@@ -213,6 +226,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     if s.human_name in RESERVED_NAMES:
         raise SystemExit(f"BUNCH_HUMAN_NAME can't be '{s.human_name}': the hub posts its own notes under that name.")
     store = Store(s.db_path)
+    for name in RESERVED_NAMES:  # a database from before the name was reserved can still have one
+        row = store.agent(name)
+        if row:
+            store.db.close()
+            raise SystemExit(f"There is {'a person' if row['kind'] == 'human' else 'an agent'} named '{name}', but the hub "
+                             f"posts its own notes under that name. Remove it, then start again:\n"
+                             f"  docker compose run --rm bunch python -m bunch.cli remove {name}")
     store.ensure_human(s.human_name)
     llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens)
     hub = Hub(store, s, llm)
@@ -339,6 +359,24 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         failed_logins[request.client.host if request.client else "?"] = recent + [time.time()]
         await asyncio.sleep(0.5)
 
+    async def prove_password(request: Request, name: str, password: str | None, wrong: str) -> None:
+        """A session proves it's really name by its password, at the sign-in page's rate. Right: earlier
+        typos from this address stop counting. Wrong: 403, not 401 (that would sign the viewer out)."""
+        recent = check_login_rate(request)
+        if not store.verify_user(name, password or ""):
+            await failed_login(request, recent)
+            raise HTTPException(403, wrong)
+        failed_logins.pop(request.client.host if request.client else "?", None)
+
+    async def admin_proves_it(request: Request, authorization: str | None, password: str | None) -> str:
+        """Admin actions that could lock the owner out (making or removing an admin, resetting someone
+        else's password) need the acting admin's own password from a session, so a borrowed or stolen
+        session can't do them. The admin token needs nothing more."""
+        who = require_admin(request, authorization)
+        if not is_admin(_bearer(authorization)):
+            await prove_password(request, who, password, "your password is wrong")
+        return who
+
     @app.post("/api/auth/login")
     async def login(body: LoginIn, request: Request):
         recent = check_login_rate(request)
@@ -361,7 +399,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def me(request: Request, authorization: str | None = Header(None)):
         name, admin = viewer(request, authorization)
         row = store.agent(name)
-        return {"name": name, "admin": admin, "avatar": (row["avatar"] if row else None) or DEFAULT_HUMAN_AVATAR,
+        return {"name": name, "admin": admin, "avatar": shown_avatar(row["avatar"] if row else None),
                 "avatars": HUMAN_AVATARS}
 
     @app.put("/api/auth/me/avatar")
@@ -675,7 +713,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         "runs_as": hub.runs_as(a),
                         "runs_on": hub.model_host(a["model"]) if a["model"] else None,
                         "machine": hub.agent_machine(a), "first_responder": a["name"] == first,
-                        "avatar": (a["avatar"] or DEFAULT_HUMAN_AVATAR) if a["kind"] == "human" else None})
+                        "avatar": shown_avatar(a["avatar"]) if a["kind"] == "human" else None})
         # The hub's own helpers are listed only while they can run (a model set and the gateway on, as in
         # lifespan() and router.route()) or have used tokens today.
         for system, model, does in (("_summarizer", hub.s.summary_model, "writes the room summaries"),
@@ -901,7 +939,10 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     @app.post("/api/admin/users")
     async def admin_add_user(request: Request, body: UserIn, authorization: str | None = Header(None)):
-        require_admin(request, authorization)
+        if body.admin:
+            await admin_proves_it(request, authorization, body.my_password)
+        else:
+            require_admin(request, authorization)
         name = body.name.strip().lower()
         try:
             store.create_user(name, body.password, body.admin)
@@ -917,10 +958,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(403, "admins only")
         if who == name and not is_admin(_bearer(authorization)):
             # Your own password from a session: prove it's you, so a borrowed or stolen session can't lock you out.
-            recent = check_login_rate(request)
-            if not store.verify_user(name, body.current_password or ""):
-                await failed_login(request, recent)
-                raise HTTPException(403, "current password is wrong")  # not 401: that would sign the viewer out
+            await prove_password(request, name, body.current_password, "current password is wrong")
+        elif who != name:
+            await admin_proves_it(request, authorization, body.my_password)
         try:
             store.set_password(name, body.password)
         except ValueError as e:
@@ -932,7 +972,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @app.put("/api/admin/users/{name}/admin")
     async def admin_user_flag(request: Request, name: str, body: AdminFlagIn,
                               authorization: str | None = Header(None)):
-        require_admin(request, authorization)
+        await admin_proves_it(request, authorization, body.my_password)
         try:
             # signed-in admins can't demote the last admin; the admin token can never be locked out
             store.set_admin(name, body.admin, keep_one=not is_admin(_bearer(authorization)))
@@ -943,8 +983,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         return {"name": name, "admin": body.admin}
 
     @app.delete("/api/admin/users/{name}")
-    async def admin_delete_user(request: Request, name: str, authorization: str | None = Header(None)):
-        require_admin(request, authorization)
+    async def admin_delete_user(request: Request, name: str, body: MyPasswordIn | None = None,
+                                authorization: str | None = Header(None)):
+        row = store.agent(name)
+        if row and row["is_admin"]:  # removing an admin could be removing the owner
+            await admin_proves_it(request, authorization, body.my_password if body else None)
+        else:
+            require_admin(request, authorization)
         try:
             deleted = store.delete_user(name, keep_one=not is_admin(_bearer(authorization)))
         except ValueError as e:

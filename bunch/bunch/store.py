@@ -306,6 +306,8 @@ class Store:
         row = self.agent(name)
         if not row or row["kind"] != "human":
             raise LookupError("no such person")
+        if avatar is not None and not isinstance(avatar, str):
+            raise ValueError("pick one of the pictures shown")
         if avatar and not any(avatar in group for group in HUMAN_AVATARS.values()):
             raise ValueError("pick one of the pictures shown")
         self.x("UPDATE agents SET avatar=? WHERE name=?", (None if avatar in (None, "", DEFAULT_HUMAN_AVATAR) else avatar, name))
@@ -329,6 +331,14 @@ class Store:
 
     def delete_agent(self, name: str) -> bool:
         cur = self.x("DELETE FROM agents WHERE name=? AND kind='agent'", (name,))
+        self.x("DELETE FROM cursors WHERE agent=?", (name,))
+        return cur.rowcount > 0
+
+    def delete_reserved(self, name: str) -> bool:
+        """Removes an agent or person that has a name the hub reserves (from before it was reserved)."""
+        if name not in RESERVED_NAMES:
+            raise ValueError(f"'{name}' is not a reserved name")
+        cur = self.x("DELETE FROM agents WHERE name=?", (name,))
         self.x("DELETE FROM cursors WHERE agent=?", (name,))
         return cur.rowcount > 0
 

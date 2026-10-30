@@ -37,9 +37,11 @@ BOT_NOTE = ("Bot mode is on in this room: you and the other agents work on the p
 FILE_REF = re.compile(r"!\[([^\]]*)\]\(file:(\d+)\)")  # an attached file, see /api/v1/machine/file
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")
 # "@events, can you…" / "- **@legal**: please…": mentions that open a line or sentence and then ask.
+# Also "@events - see above", "@events — two bugs", and a short greeting first: "hi @events, can you…".
 _AT = r"\**@[a-z0-9][a-z0-9_.-]*\**"
-ADDRESS_RE = re.compile(r"(?:^|[\n.!?])[\s>*_#-]*(" + _AT + r"(?:\s*(?:,|and|&)\s*" + _AT + r")*)"
-                        r"\s*(?:[,:]|(?:can|could|please|would|will)\b)")
+_GREETING = r"(?:(?:hi|hey|hello|ok|okay|thanks|thank you)[\s,!]+)?"
+ADDRESS_RE = re.compile(r"(?:^|[\n.!?])[\s>*_#-]*" + _GREETING + r"(" + _AT + r"(?:\s*(?:,|and|&)\s*" + _AT + r")*)"
+                        r"\s*(?:[,:\u2013\u2014-]|(?:can|could|please|would|will)\b)")
 
 
 class HubError(Exception):
@@ -65,6 +67,11 @@ def _snippet(text: str, q: str, width: int = 160) -> str:
     start = max(0, i - width // 3) if i >= 0 else 0
     piece = " ".join(text[start:start + width].split())
     return ("…" if start else "") + piece + ("…" if start + width < len(text) else "")
+
+
+def post_id(result: str) -> int:
+    """The message id in a post result ("ok #12", maybe followed by a hint)."""
+    return int(re.search(r"#(\d+)", result)[1])
 
 
 def mentions(text: str, name: str) -> bool:
@@ -192,7 +199,25 @@ class Hub:
             self._unavailable_notices(mid)
         if not human and sender != HUB_SENDER and self.bot(room):
             self._bot_turn(mid)
-        return f"ok #{mid}"
+        hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, text)
+        return f"ok #{mid}" + hint
+
+    def _unasked_hint(self, sender: str, text: str) -> str:
+        """An agent that names an auto or machine agent without asking it gets no answer from it, so say so
+        in the post result (agents only see "ok #N" otherwise and think they asked). Agents that read for
+        themselves (manual) still see the message in their read, so they get no hint."""
+        named: list[str] = []
+        for n in MENTION_RE.findall(text.lower()):
+            n = n.rstrip(".")
+            row = self.store.agent(n)
+            if n != sender and n not in named and row and row["kind"] == "agent" and \
+                    self.worker_state(row) != "manual" and not addresses(text, n):
+                named.append(n)
+        if not named:
+            return ""
+        who = ", ".join(f"@{n}" for n in named)
+        return (f" (named {who} but didn't ask, so {'it' if len(named) == 1 else 'they'} won't answer: "
+                f"start a line with \"@{named[0]}, can you…\")")
 
     def _check_rate(self, sender: str) -> None:
         if self.s.posts_per_min <= 0:
@@ -333,7 +358,12 @@ class Hub:
                               "ORDER BY id DESC LIMIT 5", (m["room"], m["sender"], m["id"], m["created"] - DUPLICATE_WINDOW)):
             if " ".join((p["body"] or p["summary"] or "").split()) == text and \
                     self.store.one("SELECT 1 FROM messages WHERE reply_to=?", (p["id"],)):
-                return p["id"]
+                # Only the answer to the first copy in between: a double send (or a resend after a send that
+                # looked failed). Anything else posted in between makes it a deliberate nudge ("see above"
+                # again after more was said), which gets answered.
+                between = self.store.one("SELECT 1 FROM messages WHERE room=? AND id>? AND id<? AND sender!=? "
+                                         "AND reply_to IS NOT ? LIMIT 1", (m["room"], p["id"], m["id"], m["sender"], p["id"]))
+                return None if between else p["id"]
         return None
 
     # ------------------------------------------------------------- bot mode
@@ -515,9 +545,11 @@ class Hub:
         u = self.store.usage_today(agent)
         return u["ask"] + u["sub"] + int(u["cached"] * CACHE_WEIGHT)
 
-    def over_budget(self, agent: str) -> str | None:
-        """Why agent can't spend more tokens today, or None when it can."""
-        budget, used = self.budget(agent), self.spent(agent)
+    def over_budget(self, agent: str, budget: int | None = None, used: int | None = None) -> str | None:
+        """Why agent can't spend more tokens today, or None when it can. Pass budget and used when
+        they're already looked up (two database reads)."""
+        if budget is None or used is None:
+            budget, used = self.budget(agent), self.spent(agent)
         return f"daily token budget used ({used}/{budget}); resets 00:00 UTC" if budget and used >= budget else None
 
     # ---------------------------------------------------------------- worker
@@ -695,7 +727,7 @@ class Hub:
             if not prompt:
                 raise HubError("prompt required")
             budget, used = self.budget(agent), self.spent(agent)
-            why = self.over_budget(agent)
+            why = self.over_budget(agent, budget, used)
             if why:
                 raise HubError(why)
             mt = max(1, min(int(max_tokens or self.s.ask_max_tokens), self.s.ask_max_tokens))
@@ -710,6 +742,6 @@ class Hub:
         note = f"\n[budget {used}/{budget} today]" if budget and used > 0.8 * budget else ""
         if room:  # put the answer in a room for visibility; hand back only the short line
             res = self.post(agent, room, text or "(empty answer)")
-            mid = int(res.split("#")[1])
+            mid = post_id(res)
             return self._charge_ctx(agent, f"posted {self.fmt_line(self.store.message(mid), agent, True)}{note}")
         return self._charge_ctx(agent, (text or "(empty answer)") + note)
