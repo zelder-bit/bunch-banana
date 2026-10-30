@@ -449,6 +449,12 @@
     return { on: active, title: active ? "Own session: its client read in the last 10 min"
       : "Own session: it sees messages next time its client reads" };
   }
+  const POWER_LABELS = { answer: "Answer only: no tools, no files (cheapest)", read: "Read files in a folder",
+                         full: "Edit files and run commands in a folder" };
+  // The machine has the last word on powers: say how to give it more, since a fresh pairing allows answer only.
+  const raisePowerHow = (m) => `${m.name} allows ${m.max_power === "read" ? "reading files" : "answer only"}. For more, on ${m.name} `
+    + `set WORKER_MAX_POWER=${m.max_power === "read" ? "full" : "read (or full)"} and WORKER_DIRS=<folder> in ~/.config/bunch/bunch-worker.env, `
+    + `then run: systemctl --user restart bunch-worker`;
   // The machine's own limits (WORKER_MAX_POWER, WORKER_DIRS) can lower what the viewer asked for.
   const capped = (a) => a.runs_as && a.worker?.power && a.runs_as !== a.worker.power;
   const dot = (a) => { const p = presence(a); return h("span", { class: "dot" + (p.on ? " on" : ""), title: p.title }); };
@@ -534,8 +540,7 @@
     const suggestions = h("datalist", { id: listId });
     const cliModel = h("input", { type: "text", list: listId, value: w.model || "", placeholder: "CLI default" });
     const deep = h("input", { type: "text", list: listId, value: w.deep_model || "", placeholder: "same as model" });
-    const power = h("select", null, opt("answer", "Answer only: no tools, no files (cheapest)"),
-      opt("read", "Read files in a folder"), opt("full", "Edit files and run commands in a folder"));
+    const power = h("select", null, ...Object.entries(POWER_LABELS).map(([v, label]) => opt(v, label)));
     power.value = w.power || "answer";
     const dir = h("input", { type: "text", value: w.dir || "", placeholder: "~/code/project" });
     const maxOut = h("input", { type: "number", min: "50", max: "8000", step: "50", value: w.max_output || 800 });
@@ -566,13 +571,17 @@
       const c = m?.clis.find(x => x.cli === p.cli);
       suggestions.replaceChildren(...(c?.models || []).map(x => h("option", { value: x })));
       const rank = ["answer", "read", "full"];
-      const capped = m && rank.indexOf(power.value) > rank.indexOf(m.max_power || "answer");
-      for (const o of power.options)  // the machine would run these as less anyway; keep a saved one visible
-        o.disabled = !!m && o.value !== power.value && rank.indexOf(o.value) > rank.indexOf(m.max_power || "answer");
+      const allowed = m ? rank.indexOf(m.max_power || "answer") : 2;
+      const capped = m && rank.indexOf(power.value) > allowed;
+      for (const o of power.options) {  // the machine would run these as less anyway; keep a saved one visible
+        o.disabled = !!m && o.value !== power.value && rank.indexOf(o.value) > allowed;
+        o.textContent = POWER_LABELS[o.value] + (m && rank.indexOf(o.value) > allowed ? ` (${m.name} doesn't allow it yet)` : "");
+      }
       const d = dir.value.trim().replace(/\/+$/, "");
       const outside = m && power.value !== "answer" && !capped && (!(m.dirs || []).length
         || (d.startsWith("/") && !m.dirs.some(x => d === x || d.startsWith(x + "/"))));
       powerHint.textContent = (capped ? `${m.name} only allows "${m.max_power}" (WORKER_MAX_POWER there), so it will run as that. ` : "")
+        + (m && allowed < 2 ? raisePowerHow(m) + ". " : "")
         + (outside ? `That folder isn't in ${m.name}'s WORKER_DIRS (${(m.dirs || []).join(", ") || "none"}), so it will run as answer only. ` : "")
         + (power.value !== "full" ? "Pictures need \"Edit files and run commands\". " : "")
         + (power.value === "full" ? "Anyone who can @mention this agent can make it change files and run commands there."
@@ -643,6 +652,8 @@
     const cmd = `python3 worker.py install --hub ${location.origin} --key ${key}`;
     return [h("strong", null, `Pair ${name}`), h("span", { class: "muted" }, ": run this on it, as the user logged in to Claude Code, Codex or Antigravity (worker.py is in the bunch repo's clients/ folder). Shown once."),
       h("code", null, cmd),
+      h("span", { class: "muted small" }, "Its agents can only answer until you allow more. To let them read a folder, add --max-power read --dirs ~/code/app "
+        + "(or --max-power full to edit files and run commands there). You can change this later in that machine's ~/.config/bunch/bunch-worker.env."),
       h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
         try { await navigator.clipboard.writeText(cmd); toast("Command copied", "good"); } catch { toast("Select the command and copy it", "bad"); } } }, "Copy")];
   }
@@ -669,6 +680,7 @@
     };
     openPanel(m.name,
       h("dl", { class: "facts" }, ...facts.flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)])),
+      m.max_power !== "full" ? h("p", { class: "muted small" }, raisePowerHow(m) + ". It reports the new limit when it starts.") : null,
       h("div", { class: "panel-danger" },
         h("button", { type: "button", class: "btn small", onclick: rotate }, "New key"),
         h("button", { type: "button", class: "btn small danger", onclick: remove }, "Remove machine")),

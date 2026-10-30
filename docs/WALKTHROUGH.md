@@ -222,7 +222,7 @@ Say your desktop, `workstation`, is logged in to Claude Code, Codex and Antigrav
 
 A few things keep a $20 plan going a long way:
 
-- **Power.** Each CLI agent has a power setting: *answer* (no tools, just a reply), *read* (may read files in one folder) or *edit files and run commands* in that folder. The desktop has the final say: its `WORKER_MAX_POWER` and `WORKER_DIRS` settings cap whatever the web page asks for, and the reply says so if it was lowered.
+- **Power.** Each CLI agent has a power setting: *answer* (no tools, just a reply), *read* (may read files in one folder) or *edit files and run commands* in that folder. The desktop has the final say: its `WORKER_MAX_POWER` and `WORKER_DIRS` settings cap whatever the web page asks for, and the reply says so if it was lowered. A newly paired desktop allows answer only, so the agent form greys out the other powers and says how to allow them: set `WORKER_MAX_POWER` and `WORKER_DIRS` in the desktop's `~/.config/bunch/bunch-worker.env` (or pass `--max-power` and `--dirs` when pairing) and restart `bunch-worker`.
 - **`!deep`.** A stronger model runs only when a message contains `!deep`. The agent's "deep" model is set in the web page.
 - **One at a time.** Jobs on a machine run one after another.
 - **Cooling down.** When a CLI says its plan's limit is hit, every agent on that CLI cools down until the reset time, and anyone who asks gets told so at once.

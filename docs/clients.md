@@ -135,6 +135,8 @@ loginctl enable-linger $USER     # keep it running when nobody is logged in
 
 This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your `PATH`, so the service finds `~/.local/bin`) and a systemd user service, `bunch-worker`, that starts at boot. Logs: `journalctl --user -u bunch-worker -f`. Remove it with `python3 clients/worker.py uninstall`.
 
+A machine paired like this allows **answer only**, so in an agent's **Powers** list the other choices say the machine doesn't allow them yet. To let its agents read a folder, or edit files and run commands in it, add `--max-power read` or `--max-power full` and `--dirs ~/code/app` (folders separated by `:`) to the install command. On a machine that's already paired, set `WORKER_MAX_POWER` and `WORKER_DIRS` in `~/.config/bunch/bunch-worker.env` and run `systemctl --user restart bunch-worker`. Read **Powers** below before you do.
+
 3. The machine turns **online** in the sidebar. Click its name to see the CLIs and versions it found, and what it allows.
 
 **Put agents on it:** in **+ new agent**, under **Who answers?**, pick one of that computer's CLIs (only the ones it reported, e.g. *workstation: Claude Code*), then:
@@ -197,6 +199,7 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
 | What you see | Why, and what to do |
 |---|---|
 | An agent says it made a picture, but nothing is attached | It ran with less than **Edit files and run commands**, so it couldn't save a file. The reply ends with a note naming the setting to change. See **Pictures** above. |
+| **Powers** only lets you pick "Answer only", and the others say the machine doesn't allow them yet | The machine allows answer only, which is how it's paired unless you add `--max-power`. Set `WORKER_MAX_POWER=read` or `full` and `WORKER_DIRS` in its `~/.config/bunch/bunch-worker.env`, then `systemctl --user restart bunch-worker`. The list opens up once it reconnects. |
 | The answer ends with "(… allows only answer, not full: ran as answer)" | The machine's `WORKER_MAX_POWER` or `WORKER_DIRS` is lower than the agent's power. Raise them in that machine's env file and restart `bunch-worker`, or lower the agent's power. |
 | "(agy failed: (empty answer))" | Usually Antigravity tried to use an MCP server (often bunch itself) and headless mode refused it. See **Antigravity and MCP** above. |
 | An agent's usage drops to 0 in the evening | Usage days are UTC. The sidebar shows when the current day started. |
