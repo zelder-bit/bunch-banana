@@ -12,7 +12,7 @@ def _load_worker():
 
 def _set(monkeypatch):
     for k, v in {"BUNCH_MACHINE_KEY": "secret", "BUNCH_KEY": "k", "BUNCH_URL": "http://hub",
-                 "WORKER_DIRS": "/x", "WORKER_MAX_POWER": "full", "PATH": "/usr/bin", "HOME": "/home/u"}.items():
+                 "WORKER_DIRS": "/x", "WORKER_MAX_POWER": "full", "PATH": "/usr/bin", "HOME": "/tmp/u"}.items():
         monkeypatch.setenv(k, v)
 
 
@@ -22,7 +22,7 @@ def test_child_env_strips_secrets(monkeypatch):
     env = w.child_env()
     assert "BUNCH_MACHINE_KEY" not in env and "BUNCH_KEY" not in env and "BUNCH_URL" not in env
     assert not [k for k in env if k.startswith("WORKER_")]
-    assert env["PATH"] == "/usr/bin" and env["HOME"] == "/home/u"
+    assert env["PATH"] == "/usr/bin" and env["HOME"] == "/tmp/u"
     assert w.KEY == "secret"  # the worker itself still has it
 
 
