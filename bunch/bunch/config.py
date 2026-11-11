@@ -10,6 +10,11 @@ def _int(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    return float(raw) if raw else default
+
+
 @dataclass(frozen=True)
 class Settings:
     db_path: str = "/data/bunch.db"
@@ -19,6 +24,7 @@ class Settings:
     litellm_key: str = ""
     summary_model: str = ""        # cheap model for rolling summaries; blank = no LLM summaries
     router_model: str = ""         # cheap model that addresses un-@'d human messages; blank = off
+    router_timeout: float = 8.0    # seconds the router model gets before the message goes room-wide
     session_secret: str = ""       # signs login cookies; blank = a random one kept in the database
     secure_cookies: bool = False   # login cookie only sent over HTTPS (set when behind TLS)
     summary_max: int = 160         # max chars of a one-line message summary
@@ -47,6 +53,7 @@ def load(**overrides) -> Settings:
         litellm_key=env("LITELLM_KEY", "").strip(),
         summary_model=env("BUNCH_SUMMARY_MODEL", "").strip(),
         router_model=env("BUNCH_ROUTER_MODEL", "").strip(),
+        router_timeout=_float("BUNCH_ROUTER_TIMEOUT", 8.0),
         session_secret=env("BUNCH_SESSION_SECRET", "").strip(),
         secure_cookies=env("BUNCH_SECURE_COOKIES", "").strip().lower() in ("1", "true", "yes"),
         summary_max=_int("BUNCH_SUMMARY_MAX", 160),

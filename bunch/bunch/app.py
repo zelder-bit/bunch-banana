@@ -642,6 +642,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         return {"machine": m["name"],
                 "agents": [{"name": a["name"], **hub.worker_config(a)} for a in hub.machine_agents(m["name"])]}
 
+    @app.get("/api/v1/machine/ping")
+    async def machine_ping(authorization: str | None = Header(None)):
+        """Cheapest way to say "still here": the worker calls it while a long CLI run blocks its poll loop,
+        so the hub doesn't mark the machine offline. machine_of already refreshes last_seen."""
+        machine_of(authorization)
+        return {"ok": True}
+
     @app.get("/api/v1/machine/read")
     async def machine_read(request: Request, wait: float = 0, authorization: str | None = Header(None)):
         """New messages for this machine's agents, each with what answering it needs."""

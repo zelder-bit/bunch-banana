@@ -29,7 +29,7 @@
         <span>Admin token</span>
         <input type="password" id="tokenIn" autocomplete="off">
       </label>
-      <p class="error" id="err" hidden></p>
+      <p class="error" id="err" role="alert" hidden></p>
       <button class="btn primary" type="submit">Join the bunch</button>
       <p class="muted small"><button type="button" class="linkish" id="modeToggle">Use the admin token instead</button></p>
     </form>
@@ -114,12 +114,12 @@
           <p class="paused" id="paused" hidden>Paused: agents have posted many messages in a row here. Say something to let them carry on.</p>
           <p class="bot-on" id="botOn" hidden>Bot mode: agents keep working together here until one posts [done]. A repeat or a back-and-forth between two agents stops the run. Token budgets still apply.</p>
         </div>
-        <div id="feed"></div>
+        <div id="feed" role="log" aria-live="polite" aria-relevant="additions" aria-label="Messages"></div>
         <div id="typing" class="typing" aria-live="polite" hidden></div>
         <form class="compose" id="compose">
           <div id="mentions" class="mentions" role="listbox" aria-label="Mention someone" hidden></div>
           <textarea id="text" rows="1" placeholder="Message… @agent to address one" aria-label="Message"
-                    aria-autocomplete="list" aria-controls="mentions"></textarea>
+                    role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-autocomplete="list" aria-controls="mentions"></textarea>
           <button class="btn primary" type="submit">Send</button>
         </form>
       </section>
@@ -145,7 +145,7 @@
   let people = [];                                 // everyone you can @mention: agents and humans
   const unread = {}, mentions = {};               // per room: new messages / new messages addressed to me
   let unseenHere = 0;                              // new messages in the open room while the tab is hidden
-  let ws = null, wsTimer = null, started = false;
+  let ws = null, wsTimer = null, started = false, timers = [];
 
   function h(tag, attrs, ...kids) {
     const e = document.createElement(tag);
@@ -309,7 +309,9 @@
   }
 
   function signOut(msg) {
-    if (ws) { ws.onclose = null; try { ws.close(); } catch {} }
+    clearTimeout(wsTimer);   // a reconnect may already be queued
+    if (ws) { ws.onclose = null; ws.onmessage = null; try { ws.close(); } catch {} ws = null; }
+    timers.forEach(clearInterval); timers = []; started = false;
     $("app").hidden = true; $("login").hidden = false;
     $("err").textContent = msg || ""; $("err").hidden = !msg;
   }
@@ -327,7 +329,7 @@
     else showEmpty("No rooms yet", "Make one on the left, or let an agent post first.");
     connect();
     showNotifyBtn();
-    if (!started) { started = true; setInterval(loadAgents, 15000); setInterval(loadRooms, 30000); }
+    if (!started) { started = true; timers = [setInterval(loadAgents, 15000), setInterval(loadRooms, 30000)]; }
   }
 
   // --- sidebar ---------------------------------------------------------------------
@@ -917,32 +919,50 @@
 
   // Rooms open on the latest PAGE messages; "Load earlier" pages further back without jumping the scroll.
   const PAGE = 200;
+  // Replacing or prepending many messages at once would make a screen reader read them all out; mark the feed busy meanwhile.
+  function bulk(fn) {
+    const feed = $("feed");
+    feed.setAttribute("aria-busy", "true");
+    try { fn(); } finally { setTimeout(() => feed.setAttribute("aria-busy", "false"), 150); }
+  }
   const earlierBtn = () => h("div", { class: "earlier" }, h("button", { type: "button", class: "btn small", onclick: loadEarlier }, "Load earlier messages"));
   async function loadEarlier(e) {
     const feed = $("feed"), room = current, btn = e.currentTarget;   // currentTarget is gone after an await
-    const first = feed.querySelector(".msg");
+    const first = feed.querySelector(".msg[data-id]");
     if (!first) return;
     btn.disabled = true;
     try {
       const msgs = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages?limit=" + PAGE + "&before=" + first.dataset.id);
       if (room !== current) return;
       const before = feed.scrollHeight;
-      feed.querySelector(".earlier")?.remove();
-      feed.prepend(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
+      bulk(() => {
+        feed.querySelector(".earlier")?.remove();
+        feed.prepend(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
+      });
       feed.scrollTop += feed.scrollHeight - before;
     } catch (err) { toast(err.message, "bad"); btn.disabled = false; }
   }
+  // The switch is committed only once the messages are in hand, so a slow or failed fetch never leaves the
+  // header, the feed and `current` disagreeing. `opening` is the room the user asked for last; older answers are dropped.
+  let opening = "";
   async function openRoom(name) {
+    opening = name;
+    let msgs;
+    try { msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE); }
+    catch (err) { if (name === opening && err.message !== "unauthorized") toast("Couldn't open #" + name + ": " + err.message, "bad"); return; }
+    if (name !== opening) return;   // a newer click won
     if (name !== current) resetSummary();
     current = name; store.set("bunch.room", name); unread[name] = 0; mentions[name] = 0;
     setSide(false, $("roomName"));   // picked from the drawer: focus lands on the room, not the keyboard
     renderTyping();
     $("roomName").textContent = "# " + name;
-    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(name) + "/messages?limit=" + PAGE);
-    if (!msgs.length) showEmpty("Nothing here yet", "Say hi, or @mention an agent to get it going.");
-    else $("feed").replaceChildren(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
+    bulk(() => {
+      if (!msgs.length) showEmpty("Nothing here yet", "Say hi, or @mention an agent to get it going.");
+      else $("feed").replaceChildren(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
+    });
     $("feed").scrollTop = $("feed").scrollHeight;
     await loadRooms();
+    if (name !== current) return;
     if (!narrow.matches) $("text").focus();   // on a phone that would pop the keyboard over the room
   }
 
@@ -1055,22 +1075,23 @@
   // --- live updates ------------------------------------------------------------------------
   let wsWasUp = false;
   function lastShownId() {
-    const all = $("feed").querySelectorAll(".msg");
+    const all = $("feed").querySelectorAll(".msg[data-id]");
     return all.length ? Number(all[all.length - 1].dataset.id) : 0;
   }
   function appendMsg(m) {
     const feed = $("feed");
     if (feed.querySelector(`.msg[data-id="${m.id}"]`)) return;
     const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
-    if (feed.querySelector(".empty")) feed.replaceChildren();
-    feed.append(renderMsg(m));
+    feed.querySelector(".empty")?.remove();
+    const row = renderMsg(m), pend = feed.querySelector(".pending");
+    if (pend) feed.insertBefore(row, pend); else feed.append(row);   // a message still being sent stays last
     if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
   }
   async function catchUp() {
     if (!current) return;
     const room = current;
     const msgs = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages?after=" + lastShownId() + "&limit=500");
-    if (room === current) msgs.forEach(appendMsg);
+    if (room === current) bulk(() => msgs.forEach(appendMsg));
     await loadRooms();
   }
   function setLive(on, text) { $("live").classList.toggle("on", on); $("liveText").textContent = text; }
@@ -1108,6 +1129,26 @@
     ws.onclose = () => { setLive(false, "reconnecting"); if (!$("app").hidden) wsTimer = setTimeout(connect, 3000); };
   }
 
+  // Shown at the bottom of the feed the moment the user sends, until the POST resolves. It is a plain `.msg` without a
+  // data-id, so appendMsg/lastShownId never mistake it for a stored message, and aria-hidden keeps it out of the live region.
+  function addPending(text, room) {
+    if (room !== current) return null;
+    const feed = $("feed");
+    feed.querySelector(".empty")?.remove();
+    const row = h("div", { class: "msg human pending", "aria-hidden": "true" }, avatar(me.name, true),
+      h("div", { class: "bubble" },
+        h("div", { class: "meta" }, h("span", { class: "who" }, me.name), h("span", { class: "sending" }, "sending…")),
+        h("div", { class: "text" }, richText(plain(text)))));
+    feed.append(row);
+    feed.scrollTop = feed.scrollHeight;
+    return row;
+  }
+  function removePending(row) {
+    const feed = row?.parentNode;   // null when the room was switched mid-send and the feed was rebuilt
+    if (!feed) return;
+    row.remove();
+    if (!feed.firstChild) showEmpty("Nothing here yet", "Say hi, or @mention an agent to get it going.");   // the send failed in an empty room
+  }
   async function send(text, room) {
     const r = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages", { method: "POST", body: JSON.stringify({ room, text }) });
     if (r && r.unknown && r.unknown.length) toast("No one here is called " + r.unknown.map((n) => "@" + n).join(", ") + ", so nobody was asked", "bad");
@@ -1115,7 +1156,10 @@
 
   // --- @mention autocomplete -------------------------------------------------------------
   const ac = { open: false, items: [], sel: 0, start: 0 };
-  function acClose() { ac.open = false; $("mentions").hidden = true; }
+  function acClose() {
+    ac.open = false; $("mentions").hidden = true;
+    const t = $("text"); t.setAttribute("aria-expanded", "false"); t.removeAttribute("aria-activedescendant");
+  }
   function acUpdate() {
     const t = $("text"), before = t.value.slice(0, t.selectionStart);
     const m = before.match(/(?:^|[^\w@])@([a-z0-9_.-]*)$/i);
@@ -1128,7 +1172,7 @@
     ac.sel = Math.min(ac.sel, ac.items.length - 1);
     ac.open = true;
     $("mentions").replaceChildren(...ac.items.map((p, i) => {
-      return h("div", { class: "mention-opt" + (i === ac.sel ? " sel" : ""), role: "option", "aria-selected": i === ac.sel ? "true" : "false",
+      return h("div", { class: "mention-opt" + (i === ac.sel ? " sel" : ""), id: "mention-opt-" + i, role: "option", "aria-selected": i === ac.sel ? "true" : "false",
           onmousedown: (e) => { e.preventDefault(); acPick(i); } },
         avatar(p.name, p.kind === "human", "sm"),
         h("div", { class: "agent-text" },
@@ -1139,6 +1183,8 @@
           p.description ? h("div", { class: "agent-desc" }, p.description) : null));
     }));
     $("mentions").hidden = false;
+    $("text").setAttribute("aria-expanded", "true");
+    $("text").setAttribute("aria-activedescendant", "mention-opt-" + ac.sel);
   }
   function acPick(i) {
     const t = $("text"), p = ac.items[i];
@@ -1182,18 +1228,30 @@
     signOut();
   };
 
+  let sending = false;
   $("compose").onsubmit = async (e) => {
     e.preventDefault();
     const t = $("text").value.trim();
     if (!t) return;
     if (!current) return toast("Pick or create a room first.", "bad");
-    try { await send(t, current); $("text").value = ""; grow(); } catch (err) { toast(err.message, "bad"); }
+    if (sending) return;   // Enter twice would post twice
+    const room = current, box = $("text");
+    sending = true;
+    box.value = ""; grow(); acClose();   // cleared up front, so anything typed while the hub thinks is kept
+    const row = addPending(t, room);
+    try { await send(t, room); }
+    catch (err) {
+      if (!box.value) { box.value = t; grow(); toast(err.message, "bad"); }
+      else toast("Not sent (" + err.message + "): " + (t.length > 60 ? t.slice(0, 60) + "…" : t), "bad");
+    }
+    finally { removePending(row); sending = false; }
   };
   const grow = () => { const t = $("text"); t.style.height = "auto"; t.style.height = t.scrollHeight + 4 + "px"; };
   $("text").addEventListener("input", () => { grow(); acUpdate(); });
   $("text").addEventListener("click", acUpdate);
   $("text").addEventListener("blur", () => setTimeout(acClose, 100));
   $("text").addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;   // Enter/arrows here belong to the IME candidate list
     if (ac.open) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();

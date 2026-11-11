@@ -102,48 +102,130 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))
 
 
-async def serve_agent(hub: Hub, agent) -> None:
+def _note(hub: Hub, agent, m, why: str) -> None:
+    """Tells a person their message to an auto agent wasn't answered (once). Can't raise: a rate limit or a
+    paused room just means no note."""
     name = agent["name"]
-    _header, rows, _more = hub.read_rows(name, None, False)
-    offline = hub.worker_state(agent) == "offline"  # its model's machine is off: the hub already said so
-    for m in rows:
-        if f",{name}," not in (m["recipients"] or "") or m["created"] < time.time() - STALE_AFTER or offline:
-            continue
-        if (name, m["id"]) in _gave_up:
-            continue
+    try:
         if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
-            continue  # already answered, e.g. with an "offline" note
-        if hub.duplicate_of(m):
-            continue  # a double send: the first copy is answered
+            return  # already answered or noted
+        hub.post(name, m["room"], f"({name} didn't answer: {why}; ask again)", reply_to=m["id"])
+    except Exception as e:
+        log.warning("%s: no note for #%s: %s", name, m["id"], e)
+
+
+def _state(hub: Hub) -> dict:
+    """Per hub: the task answering for each agent, and the messages waiting for it."""
+    return hub.__dict__.setdefault("_autoreply", {"tasks": {}, "queue": {}})
+
+
+def read_new(hub: Hub, agent) -> list:
+    """The agent's new messages that are worth answering. Cheap and synchronous; the cursor moves here.
+    Staleness is decided now, once: a message that merely waits in the agent's queue behind a slow
+    answer must not count as stale later."""
+    name, st = agent["name"], hub.store
+    had = set(st.joined_rooms(name))  # rooms it was already serving, before this read adds the rest
+    _header, rows, _more = hub.read_rows(name, None, False)
+    if hub.worker_state(agent) == "offline":  # its model's machine is off: the hub already said so
+        return []
+    cutoff, out = time.time() - STALE_AFTER, []
+    for m in rows:
+        if f",{name}," not in (m["recipients"] or ""):
+            continue
+        if m["created"] < cutoff:
+            # Old because the hub was down or busy: say so. Not when the agent is new to auto or to the room
+            # (no earlier room cursor, or it never answered anything before this message): that's backlog.
+            if m["human"] and m["room"] in had and agent["last_seen"] and m["created"] > agent["last_seen"]:
+                _note(hub, agent, m, "it was too old by the time I looked")
+            continue
+        out.append(m)
+    return out
+
+
+async def serve_message(hub: Hub, agent, m) -> None:
+    name = agent["name"]
+    if (name, m["id"]) in _gave_up:
+        return
+    if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
+        return  # already answered, e.g. with an "offline" note
+    if hub.duplicate_of(m):
+        return  # a double send: the first copy is answered
+    try:
+        await answer(hub, agent, m)
+    except HubError as e:  # gateway down, budget used: say so once, don't retry forever
+        log.warning("%s could not answer #%s: %s", name, m["id"], e)
         try:
-            await answer(hub, agent, m)
-        except HubError as e:  # gateway down, budget used: say so once, don't retry forever
-            log.warning("%s could not answer #%s: %s", name, m["id"], e)
-            try:
-                hub.post(name, m["room"], f"({agent['model']} didn't answer: {str(e)[:160]})", reply_to=m["id"])
-            except HubError:
-                pass  # room paused / rate limit: nothing more to do
+            hub.post(name, m["room"], f"({agent['model']} didn't answer: {str(e)[:160]})", reply_to=m["id"])
+        except HubError:
+            pass  # room paused / rate limit: nothing more to do
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # a bug or an odd gateway reply: the person should see something, the queue goes on
+        log.exception("%s failed on #%s", name, m["id"])
+        if m["human"]:
+            _note(hub, agent, m, f"unexpected error ({type(e).__name__})")
 
 
-async def autoreply_once(hub: Hub) -> None:
+async def _drain(hub: Hub, name: str) -> None:
+    """Answers one agent's queue, one message at a time. One task per agent, so a slow model only holds
+    up its own agent."""
+    state = _state(hub)
+    try:
+        while state["queue"].get(name):
+            m = state["queue"][name].pop(0)
+            agent = hub.store.agent(name)  # fresh: it may have been edited or deleted while waiting
+            if not agent or not agent["model"]:
+                state["queue"].pop(name, None)
+                return
+            await serve_message(hub, agent, m)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # serve_message handles its own; this is the last net so the task never dies silently
+        log.exception("auto agent %s: task failed", name)
+    finally:
+        if state["tasks"].get(name) is asyncio.current_task():
+            del state["tasks"][name]
+
+
+async def autoreply_once(hub: Hub, wait: bool = True) -> None:
+    """One pass: reads every auto agent's new messages and hands them to that agent's task. wait=False
+    (the loop) returns at once; the tasks go on in the background and the next pass can queue more."""
     cutoff = time.time() - STALE_AFTER  # older messages are skipped anyway: forget them
     for k in [k for k, created in _gave_up.items() if created < cutoff]:
         del _gave_up[k]
     await hub.refresh_model_hosts()
-    await asyncio.gather(*(serve_agent(hub, a) for a in hub.store.auto_agents()))
+    state = _state(hub)
+    for a in hub.store.auto_agents():
+        name = a["name"]
+        if rows := read_new(hub, a):
+            state["queue"].setdefault(name, []).extend(rows)  # kept even while its task is busy
+        if state["queue"].get(name) and name not in state["tasks"]:
+            state["tasks"][name] = asyncio.create_task(_drain(hub, name))
+    if wait and state["tasks"]:
+        await asyncio.gather(*state["tasks"].values(), return_exceptions=True)
+
+
+async def _stop_tasks(hub: Hub) -> None:
+    tasks = list(_state(hub)["tasks"].values())
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def autoreply_loop(hub: Hub) -> None:
     log.info("auto agents on")
-    while True:
-        woke = hub._event  # grab before the pass so a message posted mid-pass isn't missed
-        try:
-            await autoreply_once(hub)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.warning("auto-reply pass failed: %s", e)
-        try:
-            await asyncio.wait_for(woke.wait(), 30)
-        except asyncio.TimeoutError:
-            pass
+    try:
+        while True:
+            woke = hub._event  # grab before the pass so a message posted mid-pass isn't missed
+            try:
+                await autoreply_once(hub, wait=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("auto-reply pass failed: %s", e)
+            try:
+                await asyncio.wait_for(woke.wait(), 30)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        await _stop_tasks(hub)  # shutdown: don't leave answers running

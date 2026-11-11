@@ -1,0 +1,249 @@
+"""Reliability fixes: worker heartbeat (#62), independent auto agents and honest notes (#64), router timeout (#76)."""
+import asyncio
+import dataclasses
+import time
+
+import pytest
+
+from bunch import autoreply
+from bunch.autoreply import autoreply_once
+from bunch.router import route
+
+from .test_bunch import _load_worker, _machine, adm, env, h  # noqa: F401  (env is a fixture)
+
+
+def _auto(c, *names):
+    for n in names:
+        assert c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm()).status_code == 200
+
+
+def _from(c, room, sender):
+    return [m for m in c.get(f"/api/admin/rooms/{room}/messages", headers=adm()).json() if m["sender"] == sender]
+
+
+# ------------------------------------------------------------------ #62 heartbeat
+def test_heartbeat_pings_while_running_and_stops_after():
+    w = _load_worker()
+    calls = []
+    with w.heartbeat(0.02, lambda: calls.append(1)):
+        time.sleep(0.3)
+    n = len(calls)
+    assert n >= 3
+    time.sleep(0.15)
+    assert len(calls) == n
+
+
+def test_heartbeat_survives_failing_pings_and_stops_on_exceptions():
+    w = _load_worker()
+    calls = []
+
+    def down():
+        calls.append(1)
+        raise OSError("hub unreachable")
+    with pytest.raises(RuntimeError):
+        with w.heartbeat(0.02, down) as hb:
+            time.sleep(0.2)
+            assert hb.thread.is_alive()
+            raise RuntimeError("the run blew up")
+    assert len(calls) >= 3  # kept trying after each failure
+    assert not hb.thread.is_alive()  # and stopped on the exception path
+
+
+def test_worker_pings_during_a_cli_run(env, monkeypatch):
+    c, k, app, llm = env
+    w = _load_worker()
+    pings = []
+    monkeypatch.setattr(w, "ping", lambda: pings.append(1))
+    monkeypatch.setattr(w.heartbeat.__init__, "__defaults__", (0.02, w.ping))  # fast beat, same fake ping
+    monkeypatch.setattr(w, "report", lambda *a, **kw: "")
+    monkeypatch.setattr(w, "parse_output", lambda *a: ("hi", 1, 0, None))
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **kw: (time.sleep(0.3), type("P", (), {
+        "stdout": "", "stderr": "", "returncode": 0})())[1])
+    wk = w.Worker()
+    wk.agents = {"bob": {"cli": "claude", "power": "answer"}}
+    wk.reply = lambda job, text: None
+    wk.handle({"agent": "bob", "id": 1, "room": "r", "sender": "human", "human": True, "text": "hi",
+               "created": time.time()})
+    n = len(pings)
+    assert n >= 3
+    time.sleep(0.1)
+    assert len(pings) == n
+
+
+def test_ping_route_refreshes_last_seen_and_rejects_bad_keys(env):
+    c, k, app, llm = env
+    key = _machine(c)
+    store = app.state.hub.store
+    store.x("UPDATE machines SET last_seen=? WHERE name='workstation'", (time.time() - 600,))
+    assert not app.state.hub.machine_online(store.machine("workstation"))
+    r = c.get("/api/v1/machine/ping", headers=h(key))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert app.state.hub.machine_online(store.machine("workstation"))
+    assert c.get("/api/v1/machine/ping", headers=h("bunchm_nope")).status_code == 401
+    assert c.get("/api/v1/machine/ping").status_code == 401
+
+
+# ------------------------------------------------------------------ #64 auto agents
+def test_a_slow_agent_does_not_hold_up_another(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _auto(c, "aa", "bb")
+    gate = None
+
+    async def chat(model, messages, max_tokens, user=None):
+        if user == "aa":
+            await gate.wait()
+        return f"{user} says hi", 10
+    llm.chat = chat
+
+    async def scenario():
+        nonlocal gate
+        gate = asyncio.Event()
+        hub.post("human", "r1", "@aa slow one", human=True)
+        await autoreply_once(hub, wait=False)
+        hub.post("human", "r2", "@bb quick one", human=True)  # other room: the room lock isn't shared
+        await autoreply_once(hub, wait=False)
+        for _ in range(100):
+            if _from(c, "r2", "bb"):
+                break
+            await asyncio.sleep(0.01)
+        assert _from(c, "r2", "bb") and not _from(c, "r1", "aa")  # bb answered while aa is still busy
+        gate.set()
+        await autoreply_once(hub)  # waits for the rest
+        assert _from(c, "r1", "aa")
+    asyncio.run(scenario())
+
+
+def test_queued_message_is_answered_even_if_it_gets_old_while_waiting(env, monkeypatch):
+    c, k, app, llm = env
+    hub = app.state.hub
+    monkeypatch.setattr(autoreply, "STALE_AFTER", 1)
+    _auto(c, "aa")
+    gate, calls = None, []
+
+    async def chat(model, messages, max_tokens, user=None):
+        calls.append(1)
+        if len(calls) == 1:
+            await gate.wait()
+        return "done", 10
+    llm.chat = chat
+
+    async def scenario():
+        nonlocal gate
+        gate = asyncio.Event()
+        hub.post("human", "r", "@aa first", human=True)
+        await autoreply_once(hub, wait=False)
+        hub.post("human", "r", "@aa second, different text", human=True)
+        await autoreply_once(hub, wait=False)  # read now, while fresh; queued behind the slow first answer
+        await asyncio.sleep(1.3)  # now older than STALE_AFTER
+        gate.set()
+        await autoreply_once(hub)
+    asyncio.run(scenario())
+    assert len(_from(c, "r", "aa")) == 2 and all(m["summary"] == "done" for m in _from(c, "r", "aa"))
+
+
+def test_an_unexpected_error_gives_one_note(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _auto(c, "helper")
+
+    async def boom(*a, **kw):
+        raise RuntimeError("kaboom")
+    llm.chat = boom
+    hub.post("human", "r", "@helper hi", human=True)
+    asyncio.run(autoreply_once(hub))
+    asyncio.run(autoreply_once(hub))
+    notes = _from(c, "r", "helper")
+    assert len(notes) == 1 and "helper didn't answer: unexpected error" in notes[0]["summary"]
+    assert "ask again" in notes[0]["summary"]
+    # and the agent still works afterwards
+    async def ok(*a, **kw):
+        return "back", 5
+    llm.chat = ok
+    hub.post("human", "r", "@helper again?", human=True)
+    asyncio.run(autoreply_once(hub))
+    assert _from(c, "r", "helper")[-1]["summary"] == "back"
+
+
+def test_loop_cancel_stops_running_answers(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _auto(c, "aa")
+    cancelled = []
+
+    async def chat(model, messages, max_tokens, user=None):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.append(1)
+            raise
+    llm.chat = chat
+
+    async def scenario():
+        hub._event = asyncio.Event()
+        hub.post("human", "r", "@aa hi", human=True)
+        t = asyncio.create_task(autoreply.autoreply_loop(hub))
+        await asyncio.sleep(0.3)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        assert not autoreply._state(hub)["tasks"]
+    asyncio.run(scenario())
+    assert cancelled
+
+
+def _old(hub, mid, age):
+    hub.store.x("UPDATE messages SET created=? WHERE id=?", (time.time() - age, mid))
+
+
+def test_stale_human_message_to_a_working_agent_gets_a_note(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    _auto(c, "helper")
+    hub.post("human", "r", "@helper warm up", human=True)
+    asyncio.run(autoreply_once(hub))  # it now has a cursor in r and has answered before
+    hub.store.x("UPDATE agents SET last_seen=? WHERE name='helper'", (time.time() - 5000,))
+    from bunch.hub import post_id
+    mid = post_id(hub.post("human", "r", "@helper are you there?", human=True))
+    _old(hub, mid, 2000)  # the hub was down when it was sent
+    asyncio.run(autoreply_once(hub))
+    asyncio.run(autoreply_once(hub))
+    last = _from(c, "r", "helper")[-1]
+    assert last["summary"].startswith("(helper didn't answer:") and "ask again" in last["summary"]
+    assert len(_from(c, "r", "helper")) == 2  # warm-up answer + exactly one note
+
+
+def test_backlog_for_a_fresh_auto_agent_gets_no_note(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    from bunch.hub import post_id
+    mid = post_id(hub.post("human", "old", "@newbie what's up?", human=True))  # agent doesn't exist yet
+    _old(hub, mid, 2000)
+    _auto(c, "newbie")
+    asyncio.run(autoreply_once(hub))
+    assert _from(c, "old", "newbie") == []
+
+
+# ------------------------------------------------------------------ #76 router timeout
+def test_router_returns_within_the_timeout_and_the_message_goes_room_wide(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.s = dataclasses.replace(hub.s, router_model="local/small", router_timeout=0.2)
+
+    async def hang(*a, **kw):
+        await asyncio.sleep(30)
+    llm.chat = hang
+    t = time.monotonic()
+    assert asyncio.run(route(hub, "r", "what is the best camera for product photos?", sender="savannah")) == []
+    assert time.monotonic() - t < 2
+    t = time.monotonic()
+    r = c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "anyone know about cameras?"}, headers=adm())
+    assert r.status_code == 200 and time.monotonic() - t < 2
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]["to"] == []  # room-wide
+
+
+def test_router_timeout_setting_reads_the_environment(monkeypatch):
+    from bunch.config import load
+    assert load().router_timeout == 8.0
+    monkeypatch.setenv("BUNCH_ROUTER_TIMEOUT", "3.5")
+    assert load().router_timeout == 3.5
