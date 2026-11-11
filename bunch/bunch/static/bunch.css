@@ -14,7 +14,8 @@
   --surface: #FFFFFF;
   --surface-2: #FFF1DA;
   --ink: #3B2A1A;
-  --muted: #8A7560;
+  --muted: #76624E;
+  --focus: #B34700;   /* focus ring: 4.9:1 or better on every light surface */
   --line: #F1DFC4;
   --shadow: 0 1px 2px rgb(59 42 26 / 6%), 0 6px 20px rgb(59 42 26 / 8%);
   --radius: 18px;
@@ -36,14 +37,14 @@
 /* "Night grove": same fruit, darker orchard. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --orange: #FF9419; --orange-deep: #FF9F33; --peel: #FFBE5C; --banana: #FFE54D; --leaf: #5EB84B; --berry: #FF6B72;
+    --orange: #FF9419; --orange-deep: #FF9F33; --peel: #FFBE5C; --banana: #FFE54D; --leaf: #5EB84B; --berry: #FF6B72; --focus: #FFE54D;
     --bg: #161311; --surface: #231E1A; --surface-2: #2D2620; --ink: #F7EFE6; --muted: #A89888; --line: #3A312A;
     --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 35%);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --orange: #FF9419; --orange-deep: #FF9F33; --peel: #FFBE5C; --banana: #FFE54D; --leaf: #5EB84B; --berry: #FF6B72;
+  --orange: #FF9419; --orange-deep: #FF9F33; --peel: #FFBE5C; --banana: #FFE54D; --leaf: #5EB84B; --berry: #FF6B72; --focus: #FFE54D;
   --bg: #161311; --surface: #231E1A; --surface-2: #2D2620; --ink: #F7EFE6; --muted: #A89888; --line: #3A312A;
   --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 35%);
   color-scheme: dark;
@@ -86,14 +87,14 @@ img { max-width: 100%; }
   width: 38px; height: 38px; border-radius: 50%; font-size: 1.1rem; display: inline-grid; place-items: center;
 }
 .icon-btn:hover { background: var(--surface-2); }
-:focus-visible { outline: 3px solid var(--banana); outline-offset: 2px; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 .field { display: grid; gap: .3em; text-align: left; font-weight: 600; font-size: .9rem; }
 input[type="text"], input[type="password"], input[type="number"], textarea {
   font: inherit; color: var(--ink); background: var(--surface);
   border: 2px solid var(--line); border-radius: 12px; padding: .55em .8em; width: 100%;
 }
-input:focus, textarea:focus { outline: none; border-color: var(--orange); }
+input:focus, textarea:focus { outline: 3px solid var(--focus); outline-offset: 1px; border-color: var(--orange); }
 input.pill { border-radius: 999px; }
 
 /* --- login ---------------------------------------------------------------- */
@@ -139,7 +140,7 @@ input.pill { border-radius: 999px; }
 .side-top .search { flex: 1; margin-bottom: 0; }
 .side-close { display: none; }
 input[type="search"] { font: inherit; color: var(--ink); background: var(--surface); border: 2px solid var(--line); padding: .45em .9em; width: 100%; }
-input[type="search"]:focus { outline: none; border-color: var(--orange); }
+input[type="search"]:focus { outline: 3px solid var(--focus); outline-offset: 1px; border-color: var(--orange); }
 
 .room {
   display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%;
@@ -439,6 +440,10 @@ dialog.panel::after, .login-card::after {  /* left and right */
   display: grid; place-items: center; cursor: pointer; transition: transform .12s ease, border-color .12s ease; }
 .pic img { width: 70%; pointer-events: none; }
 .pic:hover { transform: scale(1.08); border-color: var(--peel); }
-.pic:focus-visible { outline: 3px solid var(--banana); outline-offset: 2px; }
+.pic:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .pic[aria-pressed="true"] { border-color: var(--orange); background: var(--surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 25%, transparent); }
 #whoami .avatar.xs { vertical-align: -3px; }
+
+/* A message that was sent and is waiting for the hub to store it. */
+.msg.pending { opacity: .6; }
+.msg.pending .sending { font-style: italic; }

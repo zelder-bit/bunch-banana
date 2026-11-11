@@ -30,6 +30,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -65,6 +66,40 @@ def req(method, path, body=None, params=None, timeout=120):
         raw = resp.read().decode()
         is_json = resp.headers.get("Content-Type", "").startswith("application/json")
     return json.loads(raw) if is_json else raw
+
+
+HEARTBEAT = 60  # seconds between pings while a CLI runs; the hub calls a machine offline after 180 s of silence
+
+
+def ping():
+    req("GET", "/api/v1/machine/ping", timeout=10)
+
+
+class heartbeat:
+    """While a CLI run blocks this thread, a daemon thread pings the hub so the machine stays online
+    (the hub marks it offline after 3 quiet minutes, and runs can take 10). Ping only: it consumes no
+    jobs, changes no agent status and touches none of the worker's state. A failed ping (hub down, an
+    older hub without /ping) is ignored: the run must not die for it. Stops when the `with` block ends,
+    however it ends."""
+
+    def __init__(self, interval=HEARTBEAT, send=ping):
+        self.interval, self.send, self.stop = interval, send, threading.Event()
+        self.thread = threading.Thread(target=self._beat, daemon=True)
+
+    def _beat(self):
+        while not self.stop.wait(self.interval):
+            try:
+                self.send()
+            except Exception as e:  # never raise out of the thread
+                print(f"heartbeat failed: {e}", file=sys.stderr)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        self.thread.join(1)  # it's waiting on the event, so this is instant unless a ping is in flight
 
 
 OUT_DIR = "bunch-out"  # in a project folder: where the CLI leaves pictures for the room
@@ -427,7 +462,8 @@ class Worker:
         report(name, "busy", room=job["room"])
         started_at = time.time() - 1
         try:
-            p = subprocess.run(argv, input=stdin, cwd=cwd, env=child_env(), capture_output=True, text=True, timeout=TIMEOUT)
+            with heartbeat():
+                p = subprocess.run(argv, input=stdin, cwd=cwd, env=child_env(), capture_output=True, text=True, timeout=TIMEOUT)
             text, tokens, cached, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
         except FileNotFoundError:
             text, tokens, cached, error = "", 0, 0, f"{cli} is not installed on {self.machine}"

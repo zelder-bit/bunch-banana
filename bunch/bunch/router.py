@@ -37,10 +37,11 @@ async def route_agent_post(hub: Hub, sender: str, room: str, text: str, to, repl
     return [n for n in await route(hub, room, text, sender=sender) if n != sender] or to
 
 
-async def route(hub: Hub, room: str, text: str, timeout: float = 20.0, sender: str | None = None) -> list[str]:
+async def route(hub: Hub, room: str, text: str, timeout: float | None = None, sender: str | None = None) -> list[str]:
     """Returns agent names to address; [] when nobody is picked. The first responder needs no model, so it
     takes un-@'d messages even with routing off; the follow-up rules and the model pick need routing on."""
     st, s = hub.store, hub.s
+    timeout = s.router_timeout if timeout is None else timeout  # the person waits for this: keep it short
     routing = bool(s.router_model and hub.llm.enabled)
     first = st.setting("first_responder")
     if not routing and not first:
