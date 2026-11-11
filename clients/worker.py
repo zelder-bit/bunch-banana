@@ -129,9 +129,15 @@ def report(agent, status, tokens=0, calls=0, until=None, room=None, cached=0):
 
 
 # ------------------------------------------------------------------ what this machine has
+def child_env():
+    # what the CLIs we start get to see: no machine key, hub address or worker settings
+    drop = ("BUNCH_MACHINE_KEY", "BUNCH_KEY", "BUNCH_URL")
+    return {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("WORKER_")}
+
+
 def _run(argv, timeout=30):
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout).stdout
+        return subprocess.run(argv, capture_output=True, env=child_env(), text=True, timeout=timeout).stdout
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -421,7 +427,7 @@ class Worker:
         report(name, "busy", room=job["room"])
         started_at = time.time() - 1
         try:
-            p = subprocess.run(argv, input=stdin, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
+            p = subprocess.run(argv, input=stdin, cwd=cwd, env=child_env(), capture_output=True, text=True, timeout=TIMEOUT)
             text, tokens, cached, error = parse_output(cli, p.stdout, p.stderr, p.returncode)
         except FileNotFoundError:
             text, tokens, cached, error = "", 0, 0, f"{cli} is not installed on {self.machine}"

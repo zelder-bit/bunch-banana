@@ -17,6 +17,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
+      - run: pip install pip-audit && pip-audit -r requirements.txt
 
   docker:
     runs-on: ubuntu-latest

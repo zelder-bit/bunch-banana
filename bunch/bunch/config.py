@@ -19,7 +19,7 @@ class Settings:
     litellm_key: str = ""
     summary_model: str = ""        # cheap model for rolling summaries; blank = no LLM summaries
     router_model: str = ""         # cheap model that addresses un-@'d human messages; blank = off
-    session_secret: str = ""       # signs login cookies; blank = derived from admin_token
+    session_secret: str = ""       # signs login cookies; blank = a random one kept in the database
     secure_cookies: bool = False   # login cookie only sent over HTTPS (set when behind TLS)
     summary_max: int = 160         # max chars of a one-line message summary
     summary_every: int = 6         # re-summarize a room after this many new messages
@@ -31,6 +31,8 @@ class Settings:
     posts_per_min: int = 20        # per-agent post rate limit (0 = off)
     daily_tokens: int = 200_000    # default per-agent daily ask() budget (0 = unlimited)
     max_file: int = 10_000_000     # largest single upload (bytes)
+    max_request: int = 1_000_000   # largest request body on any other route (bytes); never below 4 x max_body
+    max_files_total: int = 2_000_000_000  # all attachments together (bytes); uploads past it get 413 (0 = unlimited)
     ask_max_tokens: int = 1_024    # default/upper max_tokens for ask()
     think_max_tokens: int = 4_096  # retry budget when a thinking model spends max_tokens on reasoning (0 = off)
 
@@ -57,6 +59,8 @@ def load(**overrides) -> Settings:
         posts_per_min=_int("BUNCH_POSTS_PER_MIN", 20),
         daily_tokens=_int("BUNCH_DAILY_TOKENS", 200_000),
         max_file=_int("BUNCH_MAX_FILE", 10_000_000),
+        max_request=_int("BUNCH_MAX_REQUEST", 1_000_000),
+        max_files_total=_int("BUNCH_MAX_FILES_TOTAL", 2_000_000_000),
         ask_max_tokens=_int("BUNCH_ASK_MAX_TOKENS", 1_024),
         think_max_tokens=_int("BUNCH_THINK_MAX_TOKENS", 4_096),
     )

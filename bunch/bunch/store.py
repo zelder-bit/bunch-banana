@@ -467,6 +467,10 @@ class Store:
     def file(self, fid: int):
         return self.one("SELECT * FROM files WHERE id=?", (fid,))
 
+    def files_total(self) -> int:
+        """Bytes of all attachments together."""
+        return self.one("SELECT COALESCE(SUM(size),0) AS n FROM files")["n"]
+
     def file_path(self, fid: int) -> str:
         return os.path.join(self.files_dir, str(int(fid)))
 
