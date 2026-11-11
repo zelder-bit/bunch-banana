@@ -137,7 +137,8 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch {} },
     del(k) { try { localStorage.removeItem(k); } catch {} },
   };
-  let token = store.get("bunch.token") || "";   // only set when signing in with the admin token
+  const oldToken = store.get("bunch.token") || "";   // from an older version; used once below, then deleted
+  store.del("bunch.token");                          // the admin token is never kept in the page or storage now
   let current = store.get("bunch.room") || "";
   let rooms = [];
   let me = { name: "human", admin: false };
@@ -297,7 +298,6 @@
 
   async function api(path, opts = {}) {
     const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
-    if (token) headers.Authorization = "Bearer " + token;
     const r = await fetch(path, { ...opts, credentials: "same-origin", headers });
     if (r.status === 401) { signOut(started ? "Signed out. Sign in again." : ""); throw new Error("unauthorized"); }
     if (!r.ok) {
@@ -309,7 +309,6 @@
   }
 
   function signOut(msg) {
-    token = ""; store.del("bunch.token");
     if (ws) { ws.onclose = null; try { ws.close(); } catch {} }
     $("app").hidden = true; $("login").hidden = false;
     $("err").textContent = msg || ""; $("err").hidden = !msg;
@@ -776,7 +775,7 @@
   }
   // Making or removing an admin and resetting someone's password need your own password when you're signed
   // in (not with the admin token), so a borrowed or stolen session can't lock the owner out.
-  const myPasswordField = () => token ? null
+  const myPasswordField = () => me.token ? null
     : h("input", { type: "password", autocomplete: "current-password", "aria-label": "Your password" });
   const myPw = (input) => input ? { my_password: input.value } : {};
   function openUserPanel(u) {
@@ -850,7 +849,7 @@
       h("div", { class: "profile-head" }, h("span", { class: "avatar lg" }, h("img", { id: "profilePreview", src: `static/svg/${me.avatar || "orange"}.svg`, alt: "" })),
         h("div", null, h("strong", null, me.name), h("div", { class: "muted small" }, "Pick your picture. Everyone sees it next to your messages."))),
       grid("Fruits", groups.fruits || []), grid("Vegetables", groups.vegetables || []),
-      token ? h("p", { class: "muted small" }, "You're signed in with the admin token, which has no password to change.")
+      me.token ? h("p", { class: "muted small" }, "You're signed in with the admin token, which has no password to change.")
         : h("div", { class: "panel-actions" }, h("button", { type: "button", class: "btn", onclick: openMyPasswordPanel }, "Change my password…")));
     $("panel").querySelector('.pic[aria-pressed="true"]')?.focus();
   }
@@ -1079,7 +1078,7 @@
     clearTimeout(wsTimer);
     const proto = location.protocol === "https:" ? "wss://" : "ws://";
     ws = new WebSocket(proto + location.host + "/ws");
-    ws.onopen = () => ws.send(JSON.stringify({ token }));   // empty token = use the login cookie
+    ws.onopen = () => ws.send(JSON.stringify({}));   // the login cookie says who we are
     ws.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
       if (e.type === "ready") {
@@ -1166,9 +1165,8 @@
     $("err").hidden = true;
     try {
       if (tokenMode) {
-        token = $("tokenIn").value.trim();
-        await api("/api/auth/me");
-        store.set("bunch.token", token);
+        await api("/api/auth/token", { method: "POST", body: JSON.stringify({ token: $("tokenIn").value.trim() }) });
+        $("tokenIn").value = "";
       } else {
         await api("/api/auth/login", { method: "POST", body: JSON.stringify({ name: $("nameIn").value.trim().toLowerCase(), password: $("pwIn").value }) });
         $("pwIn").value = "";
@@ -1263,13 +1261,13 @@
   };
 
   $("userName").addEventListener("input", () => { $("userMore").hidden = !$("userName").value.trim(); });
-  $("userAdmin").addEventListener("change", () => { $("userMyPw").hidden = !$("userAdmin").checked || !!token; });
+  $("userAdmin").addEventListener("change", () => { $("userMyPw").hidden = !$("userAdmin").checked || !!me.token; });
   $("newUser").onsubmit = async (e) => {
     e.preventDefault();
     try {
       const r = await api("/api/admin/users", { method: "POST", body: JSON.stringify({
         name: $("userName").value.trim().toLowerCase(), password: $("userPw").value, admin: $("userAdmin").checked,
-        ...($("userAdmin").checked && !token ? { my_password: $("userMyPw").value } : {}) }) });
+        ...($("userAdmin").checked && !me.token ? { my_password: $("userMyPw").value } : {}) }) });
       for (const id of ["userName", "userPw", "userMyPw"]) $(id).value = "";
       $("userAdmin").checked = false; $("userMore").hidden = true; $("userMyPw").hidden = true;
       toast(`${r.name} can sign in now`, "good");
@@ -1277,8 +1275,14 @@
     } catch (err) { toast(err.message, "bad"); }
   };
 
-  // A login cookie or a saved admin token gets you straight in.
-  start().catch(() => { $("app").hidden = true; $("login").hidden = false; });
+  // A login cookie gets you straight in. A token saved by an older version is traded once for a cookie.
+  (async () => {
+    if (oldToken) {
+      try { await fetch("/api/auth/token", { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: oldToken }) }); } catch {}
+    }
+    await start();
+  })().catch(() => { $("app").hidden = true; $("login").hidden = false; });
 })();
 </script>
 </body>

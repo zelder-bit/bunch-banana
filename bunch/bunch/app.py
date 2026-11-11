@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import re
+import secrets
 import time
 from urllib.parse import quote
 from contextlib import asynccontextmanager
@@ -29,6 +30,14 @@ from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store
 from .summarizer import summarizer_loop
 
 log = logging.getLogger("bunch")
+# The page is one file with an inline script and style, so those stay allowed; everything else is same-origin
+# only (the fonts and pictures are ours, the rules use data: images). No framing, no plugins, no <base>.
+PAGE_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                               "img-src 'self' data: blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; "
+                               "base-uri 'none'; object-src 'none'; form-action 'self'",
+    "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
+}
 STATIC = Path(__file__).parent / "static"
 
 
@@ -82,6 +91,10 @@ class AgentInfoIn(BaseModel):
 class LoginIn(BaseModel):
     name: str
     password: str
+
+
+class TokenIn(BaseModel):
+    token: str
 
 
 class UserIn(BaseModel):
@@ -213,6 +226,67 @@ def _pw_mark(pw_hash: str) -> str:
     return hashlib.sha256((pw_hash or "").encode()).hexdigest()[:16]
 
 
+def _name_key(name: str) -> str:
+    """How sign-in failures are filed per account: trimmed, lower-cased, and short so a huge name can't bloat the dict."""
+    return (name or "").strip().lower()[:64]
+
+
+class BodyLimit:
+    """Refuses oversized HTTP requests with 413 before the app buffers them. Plain ASGI (not BaseHTTPMiddleware)
+    so it works with any Starlette version and sees the body as it arrives. Checks Content-Length up front and
+    also counts bytes for chunked bodies that don't send one."""
+
+    def __init__(self, app, limit_for):
+        self.app, self.limit_for = app, limit_for
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # WebSockets and lifespan pass through
+            return await self.app(scope, receive, send)
+        limit = self.limit_for(scope.get("path", ""))
+        declared = dict(scope.get("headers") or []).get(b"content-length", b"")
+        too_big = {"seen": 0, "hit": False, "started": False}
+        if declared.isdigit() and int(declared) > limit:
+            too_big["hit"] = True
+            return await self._reject(send, too_big)
+
+        async def counted_receive():
+            msg = await receive()
+            if msg["type"] == "http.request":
+                too_big["seen"] += len(msg.get("body", b""))
+                if too_big["seen"] > limit:
+                    too_big["hit"] = True
+                    return {"type": "http.disconnect"}  # stop the app reading; we answer 413 below
+            return msg
+
+        async def guarded_send(msg):
+            if too_big["hit"]:  # whatever the app made of the cut-off body (a 400, say), the answer is 413
+                if msg["type"] == "http.response.start":
+                    await self._reject(send, too_big)
+                return
+            if msg["type"] == "http.response.start":
+                too_big["started"] = True
+            await send(msg)
+
+        try:
+            await self.app(scope, counted_receive, guarded_send)
+        except Exception:
+            if not too_big["hit"]:
+                raise
+        if too_big["hit"] and not too_big["started"]:
+            await self._reject(send, too_big)
+
+    @staticmethod
+    async def _reject(send, state) -> None:
+        if state["started"]:
+            return
+        state["started"] = True
+        body = b'{"detail":"request body too large"}'
+        await send({"type": "http.response.start", "status": 413, "headers": [
+            (b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+            (b"connection", b"close")]})
+        await send({"type": "http.response.body", "body": body})
+
+
 def shown_avatar(avatar: str | None) -> str:
     """A person's picture as the viewer draws it: the orange when unset, or when the stored picture
     is no longer one of HUMAN_AVATARS (it would show as a broken image)."""
@@ -223,6 +297,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     s = settings or load()
     if not s.admin_token:
         raise SystemExit("BUNCH_ADMIN_TOKEN is not set. Put a long random value in .env (see README).")
+    if len(s.admin_token) < 16:  # not fatal (tests and CI use short ones), but it guards everything
+        log.warning("BUNCH_ADMIN_TOKEN is only %d characters: use a long random one (openssl rand -hex 32)",
+                    len(s.admin_token))
     if s.human_name in RESERVED_NAMES:
         raise SystemExit(f"BUNCH_HUMAN_NAME can't be '{s.human_name}': the hub posts its own notes under that name.")
     store = Store(s.db_path)
@@ -277,10 +354,19 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     app = FastAPI(title="bunch", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.hub = hub
-    secret = s.session_secret or hmac.new(s.admin_token.encode(), b"bunch-session", hashlib.sha256).hexdigest()
+    # Cookie-signing key: the configured one, else a random one made once and kept in the database. It is
+    # never derived from the admin token, or a captured cookie would let anyone guess a weak token offline.
+    secret = s.session_secret or store.setting("session_secret")
+    if not secret:
+        secret = secrets.token_hex(32)
+        store.set_setting("session_secret", secret)
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="bunch_session",
                        max_age=30 * 86400, same_site="lax", https_only=s.secure_cookies)
-    failed_logins: dict[str, list[float]] = {}
+    failed_logins: dict[str, list[float]] = {}   # per client address: recent failed sign-ins and bad admin tokens
+    failed_names: dict[str, list[float]] = {}    # per account name: recent failed passwords, from any address
+    app.add_middleware(BodyLimit, limit_for=lambda path: (
+        s.max_file + 4096 if path == "/api/v1/machine/file"
+        else max(s.max_request, s.max_body * 4 + 10_000)))  # a max_body message can be 4 bytes a char, as JSON
 
     # ---------------------------------------------------------------- auth
     def agent_of(authorization: str | None) -> str:
@@ -312,9 +398,35 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             return row["name"], bool(row["is_admin"])
         return None
 
+    def token_mark() -> str:
+        """Fingerprint of the admin token for the session. Keyed with the cookie secret: the cookie is signed
+        but readable, so a bare hash of the token in it could be guessed offline. A new token signs these out."""
+        return hmac.new(secret.encode(), b"token-admin:" + s.admin_token.encode(), hashlib.sha256).hexdigest()[:16]
+
+    def token_session(session) -> bool:
+        mark = session.get("token_admin")
+        return isinstance(mark, str) and hmac.compare_digest(mark.encode(), token_mark().encode())
+
+    def token_auth(request: Request, authorization: str | None) -> bool:
+        """Has the admin token's authority: the token itself in the header, or a session made from it.
+        (A signed-in admin who isn't the token doesn't.) Use this, not is_admin, for the extra-trust checks."""
+        return is_admin(_bearer(authorization)) or token_session(request.session)
+
+    def bearer_attempt(conn, token: str) -> bool:
+        """Is this presented Bearer/first-frame value the admin token? Counted per address like a failed
+        sign-in, and 429 once over the limit, before the value is looked at. Sync: no delay added here."""
+        recent = check_login_rate(conn)
+        if is_admin(token):
+            return True
+        failed_logins[conn.client.host if conn.client else "?"] = recent + [time.time()]
+        return False
+
     def viewer(request: Request, authorization: str | None) -> tuple[str, bool]:
         """(name, is_admin) of the human using the web viewer: a signed-in user or the admin token."""
-        if is_admin(_bearer(authorization)):
+        bearer = _bearer(authorization)
+        if bearer and bearer_attempt(request, bearer):
+            return s.human_name, True
+        if token_session(request.session):
             return s.human_name, True
         who = session_user(request.session)
         if not who:
@@ -338,57 +450,84 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     @app.get("/", include_in_schema=False)
     async def index():
-        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache", **PAGE_HEADERS})
 
     # Theme assets (CSS, fonts, fruit artwork), shared look with fruit-fs.
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     # ---------------------------------------------------------------- login
-    def check_login_rate(request: Request) -> list[float]:
-        """Recent failed password checks from this address; 429 after 10 in 5 minutes."""
-        ip = request.client.host if request.client else "?"
+    def check_login_rate(conn, name: str | None = None) -> list[float]:
+        """Recent failed password or admin-token checks from this address; 429 after 10 in 5 minutes. With a
+        name, also 429 after 10 failures for that account within 5 minutes, from any address."""
+        ip = conn.client.host if conn.client else "?"
         now = time.time()
-        for old in [k for k, ts in failed_logins.items() if ts[-1] < now - 300]:  # keep the dict small
-            del failed_logins[old]
+        for table in (failed_logins, failed_names):
+            for old in [k for k, ts in table.items() if ts[-1] < now - 300]:  # keep the dicts small
+                del table[old]
         recent = [t for t in failed_logins.get(ip, []) if t > now - 300]
         if len(recent) >= 10:
             raise HTTPException(429, "too many failed sign-ins; try again in a few minutes")
+        if name is not None and len([t for t in failed_names.get(_name_key(name), []) if t > now - 300]) >= 10:
+            raise HTTPException(429, "too many failed sign-ins for that account; try again in a few minutes")
         return recent
 
-    async def failed_login(request: Request, recent: list[float]) -> None:
-        failed_logins[request.client.host if request.client else "?"] = recent + [time.time()]
+    async def failed_login(request: Request, recent: list[float], name: str | None = None) -> None:
+        now = time.time()
+        failed_logins[request.client.host if request.client else "?"] = recent + [now]
+        if name is not None:
+            key = _name_key(name)
+            failed_names[key] = [t for t in failed_names.get(key, []) if t > now - 300] + [now]
         await asyncio.sleep(0.5)
+
+    def clear_failures(request: Request, name: str | None = None) -> None:
+        failed_logins.pop(request.client.host if request.client else "?", None)
+        if name is not None:
+            failed_names.pop(_name_key(name), None)
 
     async def prove_password(request: Request, name: str, password: str | None, wrong: str) -> None:
         """A session proves it's really name by its password, at the sign-in page's rate. Right: earlier
         typos from this address stop counting. Wrong: 403, not 401 (that would sign the viewer out)."""
-        recent = check_login_rate(request)
+        recent = check_login_rate(request, name)
         if not store.verify_user(name, password or ""):
-            await failed_login(request, recent)
+            await failed_login(request, recent, name)
             raise HTTPException(403, wrong)
-        failed_logins.pop(request.client.host if request.client else "?", None)
+        clear_failures(request, name)
 
     async def admin_proves_it(request: Request, authorization: str | None, password: str | None) -> str:
         """Admin actions that could lock the owner out (making or removing an admin, resetting someone
         else's password) need the acting admin's own password from a session, so a borrowed or stolen
-        session can't do them. The admin token needs nothing more."""
+        session can't do them. The admin token (or a session made from it) needs nothing more."""
         who = require_admin(request, authorization)
-        if not is_admin(_bearer(authorization)):
+        if not token_auth(request, authorization):
             await prove_password(request, who, password, "your password is wrong")
         return who
 
     @app.post("/api/auth/login")
     async def login(body: LoginIn, request: Request):
-        recent = check_login_rate(request)
+        recent = check_login_rate(request, body.name)
         row = store.verify_user(body.name, body.password)
         if not row:
-            await failed_login(request, recent)
+            await failed_login(request, recent, body.name)
             raise HTTPException(401, "wrong name or password")
-        failed_logins.pop(request.client.host if request.client else "?", None)
+        clear_failures(request, body.name)
         row = store.agent(row["name"])  # verify_user may have re-hashed the password
+        request.session.pop("token_admin", None)  # one kind of sign-in at a time
         request.session["user"] = row["name"]
         request.session["pw"] = _pw_mark(row["pw_hash"])
         return {"name": row["name"], "admin": bool(row["is_admin"])}
+
+    @app.post("/api/auth/token")
+    async def token_login(body: TokenIn, request: Request):
+        """Sign in to the viewer with the admin token. It becomes a signed cookie, so the page never keeps
+        the token and attachments (plain URLs, no header) load. Same failure limit as the password sign-in."""
+        recent = check_login_rate(request)
+        if not is_admin(body.token.strip()):
+            await failed_login(request, recent)
+            raise HTTPException(401, "wrong token")
+        clear_failures(request)
+        request.session.clear()
+        request.session["token_admin"] = token_mark()
+        return {"name": s.human_name, "admin": True}
 
     @app.post("/api/auth/logout")
     async def logout(request: Request):
@@ -400,7 +539,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         name, admin = viewer(request, authorization)
         row = store.agent(name)
         return {"name": name, "admin": admin, "avatar": shown_avatar(row["avatar"] if row else None),
-                "avatars": HUMAN_AVATARS}
+                "avatars": HUMAN_AVATARS, "token": token_auth(request, authorization)}
 
     @app.put("/api/auth/me/avatar")
     async def set_my_avatar(body: AvatarIn, request: Request, authorization: str | None = Header(None)):
@@ -560,6 +699,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         data = await request.body()
         if not data or len(data) > s.max_file:
             raise HTTPException(413, f"file must be 1..{s.max_file} bytes")
+        if s.max_files_total and store.files_total() + len(data) > s.max_files_total:
+            raise HTTPException(413, "attachment storage is full; an admin can free space under Files")
         mime = (request.headers.get("content-type") or "application/octet-stream").split(";")[0].strip().lower()
         name = "".join(c for c in name if c.isprintable() and c not in '/\\')[:80] or "file"
         fid = store.add_file(room, name, mime, data, a["name"])
@@ -957,7 +1098,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         who, admin = viewer(request, authorization)
         if who != name and not admin:
             raise HTTPException(403, "admins only")
-        if who == name and not is_admin(_bearer(authorization)):
+        if who == name and not token_auth(request, authorization):
             # Your own password from a session: prove it's you, so a borrowed or stolen session can't lock you out.
             await prove_password(request, name, body.current_password, "current password is wrong")
         elif who != name:
@@ -966,7 +1107,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_password(name, body.password)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        if who == name and not is_admin(_bearer(authorization)):  # keep the person who changed it signed in
+        if who == name and not token_auth(request, authorization):  # keep the person who changed it signed in
             request.session["pw"] = _pw_mark(store.agent(name)["pw_hash"])
         return {"name": name}
 
@@ -976,7 +1117,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         await admin_proves_it(request, authorization, body.my_password)
         try:
             # signed-in admins can't demote the last admin; the admin token can never be locked out
-            store.set_admin(name, body.admin, keep_one=not is_admin(_bearer(authorization)))
+            store.set_admin(name, body.admin, keep_one=not token_auth(request, authorization))
         except LookupError as e:
             raise HTTPException(404, str(e))
         except ValueError as e:
@@ -992,7 +1133,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         else:
             require_admin(request, authorization)
         try:
-            deleted = store.delete_user(name, keep_one=not is_admin(_bearer(authorization)))
+            deleted = store.delete_user(name, keep_one=not token_auth(request, authorization))
         except ValueError as e:
             raise HTTPException(400, str(e))
         if not deleted:
@@ -1044,7 +1185,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             return
         origin = socket.headers.get("origin", "")
         same_origin = not origin or origin.split("://", 1)[-1] == socket.headers.get("host", "")
-        if not (is_admin(str(hello.get("token", ""))) or (same_origin and session_user(socket.session))):
+        presented = str(hello.get("token", "")).strip() if isinstance(hello, dict) else ""
+        try:
+            by_token = bool(presented) and bearer_attempt(socket, presented)
+        except HTTPException:  # over the failure limit: don't even look at the token
+            await socket.close(code=1008)
+            return
+        if not (by_token or (same_origin and (session_user(socket.session) or token_session(socket.session)))):
             await socket.close(code=4401)
             return
         q: asyncio.Queue = asyncio.Queue(maxsize=1000)

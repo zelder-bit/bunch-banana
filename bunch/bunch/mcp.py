@@ -113,8 +113,13 @@ async def handle_one(hub: Hub, agent: str, msg) -> dict | None:
     return _err(mid, -32601, f"method not found: {method}")
 
 
+MAX_BATCH = 50  # entries run one after another, so an unbounded array is an unbounded job
+
+
 async def handle(hub: Hub, agent: str, payload):
     if isinstance(payload, list):
+        if len(payload) > MAX_BATCH:
+            return _err(None, -32600, f"batch too long (max {MAX_BATCH})")
         out = [r for r in [await handle_one(hub, agent, p) for p in payload] if r is not None]
         return out or None
     return await handle_one(hub, agent, payload)
