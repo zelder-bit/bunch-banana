@@ -1258,6 +1258,11 @@
       if (e.type === "rooms") return loadRooms();
       if (e.type === "folder") { if (filesOpen === e.room && $("panel").open) openFiles(e.room, true); return; }
       if (e.type === "deleted") { $("feed").querySelector(`.msg[data-id="${e.id}"]`)?.remove(); return loadRooms(); }
+      if (e.type === "routed") {  // who answers was chosen after the message appeared: redraw it with its recipients
+        const old = e.message.room === current && $("feed").querySelector(`.msg[data-id="${e.message.id}"]`);
+        if (old) old.replaceWith(renderMsg(e.message));
+        return;
+      }
       if (e.type !== "message") return;
       const m = e.message;
       if (typing[m.sender]) setTyping(m.sender, m.room, false);

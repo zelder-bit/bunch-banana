@@ -325,3 +325,77 @@ def test_worker_reports_a_job_that_blows_up_and_carries_on(env, monkeypatch):
         wk.run()
     assert handled == [1, 2]
     assert len(said) == 1 and said[0][0] == 1 and "failed on" in said[0][1] and "KeyError" in said[0][1]
+
+
+# --------------------------------------------------------------- #76: show the message first, pick who answers after
+def _slow_router(app, llm, go):
+    hub = app.state.hub
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "local/small"})
+    hub.store.set_agent_info("bob", description="knows databases")
+
+    async def pick_bob(model, messages, max_tokens, user=None, **kw):
+        while not go:
+            await asyncio.sleep(0.01)
+        return "bob", 10
+    llm.chat = pick_bob
+
+
+def _last(c):
+    return c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]
+
+
+def test_unaddressed_message_appears_before_the_router_answers(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.post("alice", "r", "room exists")
+    c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"]))  # bob joins the room
+    c.get("/api/v1/read", params={"room": "r"}, headers=h(k["carol"]))
+    go = []
+    _slow_router(app, llm, go)
+    r = c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "why is the db slow?"}, headers=adm())
+    assert r.status_code == 200  # came back while the router is still thinking
+    shown = _last(c)
+    assert shown["summary"] == "why is the db slow?" and shown["to"] == []
+    # agents don't read it, or anything after it in the room, until its recipients are known
+    hub.post("alice", "r", "@carol unrelated")
+    assert c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"])).text == "no new messages"
+    assert c.get("/api/v1/read", params={"room": "r"}, headers=h(k["carol"])).text == "no new messages"
+    go.append(1)
+    for _ in range(200):
+        if c.get(f"/api/admin/rooms/r/messages", headers=adm()).json()[-2]["to"] == ["bob"]:
+            break
+    assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-2]["to"] == ["bob"]
+    assert not hub.routing
+    assert "why is the db slow" in c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"])).text
+    assert "unrelated" in c.get("/api/v1/read", params={"room": "r"}, headers=h(k["carol"])).text
+
+
+def test_a_message_nobody_is_picked_for_stays_for_the_room(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.post("savannah", "r", "room exists", human=True)  # no agent has spoken: no follow-up rule
+    c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"]))
+    hub.s = hub.s.__class__(**{**hub.s.__dict__, "router_model": "local/small"})
+
+    async def nobody(model, messages, max_tokens, user=None, **kw):
+        raise RuntimeError("router model is down")
+    llm.chat = nobody
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "anyone around?"}, headers=adm())
+    for _ in range(200):
+        if not hub.routing:
+            break
+        c.get("/healthz")
+    assert not hub.routing and _last(c)["to"] == []
+    assert "anyone around" in c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"])).text
+
+
+def test_stale_routing_mark_does_not_block_the_room(env):
+    """If the router task is lost (hub code error, shutdown), reads must not wait for ever."""
+    c, k, app, llm = env
+    hub = app.state.hub
+    hub.post("alice", "r", "room exists")
+    c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"]))
+    mid = int(hub.post("savannah", "r", "hello all", human=True, routing=True).split("#")[1].split()[0])
+    assert c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"])).text == "no new messages"
+    hub.routing[mid] = ("r", time.time() - 61)
+    assert "hello all" in c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"])).text

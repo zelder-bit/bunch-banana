@@ -119,6 +119,7 @@ class Hub:
         self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
         self._hosts_at = 0.0
         self.held: dict[str, dict[int, None]] = {}  # unused since #63 (see unanswered); kept for callers
+        self.routing: dict[int, tuple[str, float]] = {}  # message id -> (room, since): shown, recipients still being chosen
         self.offered: dict[tuple[str, int], int] = {}  # (worker agent, message id) -> times handed to its worker
 
     # ---------------------------------------------------------------- events
@@ -155,7 +156,9 @@ class Hub:
 
     # ------------------------------------------------------------------ post
     def post(self, sender: str, room: str, text: str, to=None, summary: str | None = None,
-             reply_to: int | None = None, human: bool = False) -> str:
+             reply_to: int | None = None, human: bool = False, routing: bool = False) -> str:
+        """routing: the caller is still choosing who answers and will call finish_routing(). People see the
+        message at once; agents don't read it, or anything after it in the room, until then."""
         room = (room or "").strip().lower().lstrip("#")
         if not valid_name(room):
             raise HubError("bad room name (lowercase a-z 0-9 _ . -)")
@@ -199,6 +202,8 @@ class Hub:
         if self.store.cursor(sender, room) is None:          # posting joins you, skipping old backlog
             self.store.set_cursor(sender, room, self.store.room_max_id(room))
         mid = self.store.add_message(room, sender, human, recips, summ, body, reply_to, auto)
+        if routing and not recips:
+            self.routing[mid] = (room, time.time())  # before anyone is woken
         self._notify(mid)
         if recips:
             self._unavailable_notices(mid)
@@ -206,6 +211,32 @@ class Hub:
             self._bot_turn(mid)
         hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, room, text)
         return f"ok #{mid}" + hint
+
+    def finish_routing(self, mid: int, to: list[str] | None) -> None:
+        """Attaches the recipients chosen for a message posted with routing=True and lets agents read it.
+        With nobody chosen it stays a message for the whole room."""
+        self.routing.pop(mid, None)
+        m = self.store.message(mid)
+        if m:
+            known = self.store.agent_names()
+            recips = [n for n in dict.fromkeys(to or []) if n in known and n != m["sender"]]
+            if recips:
+                self.store.x("UPDATE messages SET recipients=? WHERE id=?", ("," + ",".join(recips) + ",", mid))
+                self.broadcast({"type": "routed", "message": self.message_json(self.store.message(mid))})
+                self._unavailable_notices(mid)
+        self._event.set()             # wake readers: the message can be read now
+        self._event = asyncio.Event()  # (a set event must be replaced, as in _notify, or waiters spin)
+
+    def _routing_holds(self) -> dict[str, int]:
+        """Room -> the first message there whose recipients are still being chosen. An entry older than a
+        minute is dropped: its router task is gone, and the message stays one for the whole room."""
+        hold: dict[str, int] = {}
+        for mid, (room, since) in list(self.routing.items()):
+            if time.time() - since > 60:
+                del self.routing[mid]
+            else:
+                hold[room] = min(hold.get(room, mid), mid)
+        return hold
 
     def _unasked_hint(self, sender: str, room: str, text: str) -> str:
         """An agent that names an auto or machine agent without asking it gets no answer from it, so say so
@@ -252,6 +283,15 @@ class Hub:
         st, limit = self.store, self.s.read_limit
         me_like = f",{agent},"  # exact match (LIKE would treat _ as a wildcard)
         header: list[str] = []
+        # A message whose recipients are still being chosen (#76) is not read yet, and the cursor stops
+        # before it, so whoever is picked finds it as new.
+        hold = self._routing_holds()
+
+        def upto(rm: str, mid: int) -> int:
+            return min(mid, hold[rm] - 1) if rm in hold else mid
+
+        def ready(found: list) -> list:
+            return [r for r in found if r["id"] < hold.get(r["room"], r["id"] + 1)] if hold else found
 
         if room:
             room = room.strip().lower().lstrip("#")
@@ -269,13 +309,14 @@ class Hub:
                     header.append(f"joined {room} ({total} msgs; latest below)")
                 rows = st.q(f"SELECT * FROM messages WHERE room=? AND sender!=? AND {relevant} "
                             f"ORDER BY id DESC LIMIT ?", (room, agent, *args, self.s.join_tail))[::-1]
-                st.set_cursor(agent, room, st.room_max_id(room))
-                return header, rows, False
+                st.set_cursor(agent, room, upto(room, st.room_max_id(room)))
+                return header, ready(rows), False
             rows = st.q(f"SELECT * FROM messages WHERE room=? AND id>? AND sender!=? AND {relevant} "
                         f"ORDER BY id LIMIT ?", (room, cur, agent, *args, limit + 1))
+            rows = ready(rows)
             more = len(rows) > limit
             rows = rows[:limit]
-            st.set_cursor(agent, room, rows[-1]["id"] if more else st.room_max_id(room))
+            st.set_cursor(agent, room, rows[-1]["id"] if more else upto(room, st.room_max_id(room)))
             return header, rows, more
 
         # All rooms: joined rooms (room-wide + addressed to me) and anywhere I'm @mentioned.
@@ -288,6 +329,7 @@ class Hub:
             ") ORDER BY m.id LIMIT ?",
             (agent, agent, *args, me_like, limit + 1),
         )
+        rows = ready(rows)
         more = len(rows) > limit
         rows = rows[:limit]
         if more:
@@ -299,7 +341,7 @@ class Hub:
         else:
             touched = set(st.joined_rooms(agent)) | {r["room"] for r in rows}
             for rm in touched:
-                st.set_cursor(agent, rm, st.room_max_id(rm))
+                st.set_cursor(agent, rm, upto(rm, st.room_max_id(rm)))
         return header, rows, more
 
     def fmt_line(self, m, agent: str, show_room: bool) -> str:

@@ -37,7 +37,8 @@ async def route_agent_post(hub: Hub, sender: str, room: str, text: str, to, repl
     return [n for n in await route(hub, room, text, sender=sender) if n != sender] or to
 
 
-async def route(hub: Hub, room: str, text: str, timeout: float | None = None, sender: str | None = None) -> list[str]:
+async def route(hub: Hub, room: str, text: str, timeout: float | None = None, sender: str | None = None,
+                skip: int = 0) -> list[str]:
     """Returns agent names to address; [] when nobody is picked. The first responder needs no model, so it
     takes un-@'d messages even with routing off; the follow-up rules and the model pick need routing on."""
     st, s = hub.store, hub.s
@@ -79,7 +80,7 @@ async def route(hub: Hub, room: str, text: str, timeout: float | None = None, se
     if not routing:  # first responder is offline or cooling: the message goes to the whole room
         return []
     roster = "\n".join(f"- {a['name']}: {a['description'] or 'no description'} ({label})" for a, label in agents)
-    recent = hub.recent_lines(room, 0, 6)
+    recent = hub.recent_lines(room, skip, 6)  # skip: the message itself, when it is already stored
     user = (f"Agents:\n{roster}\n\nRoom #{room} summary: {one_line(hub.room_summary(room), 400)}\n\n"
             + (f"Recent messages:\n{recent}\n\n" if recent else "") + f"Message:\n{text[:2000]}")
     try:
