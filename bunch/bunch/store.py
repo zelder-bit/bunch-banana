@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS files(
   created REAL NOT NULL                     -- the bytes live on disk as <files dir>/<id>
 );
 CREATE INDEX IF NOT EXISTS files_room ON files(room, created);
+CREATE TABLE IF NOT EXISTS folders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room TEXT NOT NULL UNIQUE,                -- one shared folder per room (#84)
+  kind TEXT NOT NULL,                       -- git | plain; the data lives in <folders dir>/<id>[.git]
+  creator TEXT NOT NULL,
+  created REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS usage(
   agent TEXT NOT NULL, day TEXT NOT NULL,
@@ -154,6 +161,9 @@ class Store:
         self.files_dir = os.path.join(os.path.dirname(os.path.abspath(path)), "files") if path != ":memory:" \
             else tempfile.mkdtemp(prefix="bunch-files-")
         os.makedirs(self.files_dir, exist_ok=True)
+        self.folders_dir = os.path.join(os.path.dirname(os.path.abspath(path)), "folders") if path != ":memory:" \
+            else tempfile.mkdtemp(prefix="bunch-folders-")
+        os.makedirs(self.folders_dir, exist_ok=True)
         with self.lock:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
@@ -191,6 +201,10 @@ class Store:
         for f in os.listdir(self.files_dir):
             if f.isdigit() and not os.path.exists(os.path.join(files, f)):
                 shutil.copy2(os.path.join(self.files_dir, f), files)
+        # Room folders go to <path>.folders/ (restore as folders/ next to the database). Copied whole each time.
+        folders = path + ".folders"
+        shutil.rmtree(folders, ignore_errors=True)
+        shutil.copytree(self.folders_dir, folders, symlinks=True)
 
     # -- low level -------------------------------------------------------
     def q(self, sql: str, args=()) -> list[sqlite3.Row]:
@@ -435,6 +449,7 @@ class Store:
         if not self.room(room):
             return None
         self.delete_files(room=room)
+        self.delete_folder(room)
         with self.lock:  # all or nothing
             self.db.execute("BEGIN")
             try:
@@ -446,6 +461,24 @@ class Store:
                 self.db.execute("ROLLBACK")
                 raise
         return n
+
+    # -- room folders (see folders.py) ------------------------------------
+    def folder(self, room: str):
+        return self.one("SELECT * FROM folders WHERE room=?", (room,))
+
+    def add_folder(self, room: str, kind: str, creator: str):
+        self.x("INSERT INTO folders(room,kind,creator,created) VALUES(?,?,?,?)", (room, kind, creator, time.time()))
+        return self.folder(room)
+
+    def delete_folder(self, room: str) -> None:
+        """Forgets the room's folder and removes its data from disk."""
+        row = self.folder(room)
+        if not row:
+            return
+        self.x("DELETE FROM folders WHERE room=?", (room,))
+        base = os.path.join(self.folders_dir, str(int(row["id"])))
+        shutil.rmtree(base + ".git", ignore_errors=True)
+        shutil.rmtree(base, ignore_errors=True)
 
     # -- files (images etc. that agents and people attach to a room) ------
     def add_file(self, room: str, name: str, mime: str, data: bytes, uploader: str) -> int:

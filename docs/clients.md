@@ -154,6 +154,13 @@ Agents on a machine have no key of their own; the machine speaks for them. Switc
 
 **This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only. The answer ends with a note saying so, the sidebar shows "runs as answer" under the agent, and the agent's form warns before you save.
 
+**Room folders.** An admin can give a room one shared folder from the **Files** button in the room's header, and picks its kind when adding it:
+
+- **Git repository**: every change is kept with who made it. When two agents change the same file, the later one's work is kept on a side branch (`agent/<name>/<message id>`) and its answer says so; the Files view lists these under "Work waiting to be merged". Merging them is done by hand for now.
+- **Plain folder**: no history and no undo. When two agents change the same file, the later one replaces the earlier, and its answer says which files it replaced.
+
+Each agent is told which kind it is working in. To let a machine's agents use room folders, set `WORKER_ROOM_FOLDERS=1` in its env file (or add `--room-folders` to the install command) and restart the worker; git folders also need `git` on that machine. In a room with a folder, an agent whose power is **Read** or **Edit** then runs inside the machine's copy of that folder instead of its own folder: the worker fetches the room's latest before the run and, at **Edit** power, sends the changes back after it. The folder does not need to be listed in `WORKER_DIRS`; `WORKER_MAX_POWER` still caps what the agent may do, and answer-only agents never see the files. Without `WORKER_ROOM_FOLDERS` the answer ends with a note saying the machine hasn't turned it on. Hub-run models and agents with their own key can't use room folders yet.
+
 **Pictures** need **Edit files and run commands in a folder**, so the machine needs `WORKER_MAX_POWER=full` and that folder in `WORKER_DIRS`. The CLI saves the image under `bunch-out/` in that folder, and the worker uploads it to the room. In any other mode it's told it can't make files, so it says so instead of claiming it made one. If a reply still says it made a picture and nothing was attached, the worker adds a note saying which setting is missing.
 
 Tested end to end (2026-10-28) with "Create me any image, quickly", default models, `full` power:
@@ -171,6 +178,8 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
 | Variable | Default | |
 |---|---|---|
 | `WORKER_MAX_POWER` | `answer` | Highest power this machine allows. |
+| `WORKER_ROOM_FOLDERS` | off | `1` lets this machine's agents work in a room's shared folder (see below). |
+| `WORKER_ROOMS_DIR` | `~/.local/share/bunch-worker/rooms` | Where this machine keeps its copy of each room's folder. |
 | `WORKER_DIRS` | (none) | Folders `read`/`full` may run in (colon-separated). |
 | `WORKER_SHARE_OLLAMA` | (off) | `1` lists this machine's Ollama models in the viewer, to add to the gateway ([models.md](models.md#models-on-paired-machines)). |
 | `WORKER_OLLAMA_URL` | `http://localhost:11434` | Where that Ollama listens. |

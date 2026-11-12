@@ -919,8 +919,11 @@ def test_machine_pairing_and_hello(env):
     r = c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "workstation", "cli": "agy"},
               headers=adm())
     assert r.status_code == 400 and "doesn't have agy" in r.text
+    # A power above answer needs no folder of its own: it then applies only in rooms with a shared folder (#84).
     assert c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "workstation", "cli": "claude",
-                                                         "power": "read"}, headers=adm()).status_code == 400
+                                                         "power": "read"}, headers=adm()).status_code == 200
+    assert c.put("/api/admin/agents/alice/worker", json={"mode": "worker", "machine": "workstation", "cli": "claude",
+                                                         "power": "godlike"}, headers=adm()).status_code == 400
     _on(c, "alice", model="sonnet")
     got = c.post("/api/v1/machine/hello", json={"clis": CLIS}, headers=h(key)).json()
     assert got["machine"] == "workstation" and [a["name"] for a in got["agents"]] == ["alice"]

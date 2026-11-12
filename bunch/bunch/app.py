@@ -23,6 +23,7 @@ from . import __version__
 from . import mcp as mcpmod
 from .autoreply import autoreply_loop
 from .config import Settings, load
+from . import folders
 from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
 from .router import route, route_agent_post
@@ -365,7 +366,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     failed_logins: dict[str, list[float]] = {}   # per client address: recent failed sign-ins and bad admin tokens
     failed_names: dict[str, list[float]] = {}    # per account name: recent failed passwords, from any address
     app.add_middleware(BodyLimit, limit_for=lambda path: (
-        s.max_file + 4096 if path == "/api/v1/machine/file"
+        s.max_file + 4096 if path == "/api/v1/machine/file" or path.endswith(("/folder/file", "/folder/bundle"))
         else max(s.max_request, s.max_body * 4 + 10_000)))  # a max_body message can be 4 bytes a char, as JSON
 
     # ---------------------------------------------------------------- auth
@@ -680,7 +681,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                             pass  # rate limit / paused room: the note is a courtesy
                         continue
                     parent = store.message(r["reply_to"]) if r["reply_to"] else None
-                    jobs.append({"agent": name, "id": r["id"], "room": r["room"], "sender": r["sender"],
+                    shared = store.folder(r["room"])  # the room's shared folder, if it has one (#84)
+                    jobs.append({"agent": name, "folder": {"kind": shared["kind"], "about": folders.ABOUT[shared["kind"]]}
+                                 if shared else None, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "wake": True, "created": r["created"],
                                  "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
                                  "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
@@ -730,11 +733,12 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def admin_rooms(request: Request, authorization: str | None = Header(None)):
         viewer(request, authorization)
         out = []
+        kinds = {f["room"]: f["kind"] for f in store.q("SELECT room, kind FROM folders")}
         for r in store.rooms():
             last = store.one("SELECT MAX(id) AS id, COUNT(*) AS n FROM messages WHERE room=?", (r["name"],))
             out.append({"name": r["name"], "summary": hub.room_summary(r["name"], fallback=False),
                         "count": last["n"], "last_id": last["id"] or 0, "paused": hub.paused(r["name"]),
-                        "bot": bool(r["bot"])})
+                        "bot": bool(r["bot"]), "folder": kinds.get(r["name"])})
         return out
 
     @app.get("/api/admin/rooms/{room}/messages")
@@ -788,6 +792,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(404, "no such room")
         hub.broadcast({"type": "room_deleted", "room": room})
         return {"deleted": room, "messages": n}
+
+    folders.add_routes(app, store=store, hub=hub, s=s, viewer=viewer, require_admin=require_admin,
+                       machine_of=machine_of, machine_agent=machine_agent)
 
     @app.get("/api/admin/files/{fid}")
     async def admin_file(request: Request, fid: int, authorization: str | None = Header(None)):
