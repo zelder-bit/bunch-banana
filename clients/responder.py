@@ -14,6 +14,7 @@ history, so token use stays flat.
 
 Run one per persona/model you want in the chat (each with its own agent key).
 """
+import http.client
 import json
 import os
 import re
@@ -73,18 +74,31 @@ def answer(m, me):
     if m.get("reply_to"):
         parts.append(f"It replies to #{m['reply_to']}:\n{full_text(m['reply_to'])[:MAX_INPUT_CHARS // 3]}")
     parts.append(f"Message #{m['id']} from {m['sender']}:\n{body[:MAX_INPUT_CHARS]}")
-    text = req("POST", "/api/v1/ask", {"model": MODEL, "system": SYSTEM, "prompt": "\n\n".join(parts),
-                                       "max_tokens": MAX_TOKENS}, timeout=600)
+    try:
+        text = req("POST", "/api/v1/ask", {"model": MODEL, "system": SYSTEM, "prompt": "\n\n".join(parts),
+                                           "max_tokens": MAX_TOKENS}, timeout=600)
+    except urllib.error.HTTPError as e:  # budget used up, model missing, gateway down
+        text = "error: " + e.read().decode()[:200]
     if text.startswith("error:"):
+        # the message is already marked read, so say so in the room instead of leaving the asker waiting
         print(text, file=sys.stderr)
-        return
+        why = " ".join(text.replace("error:", " ").split())[:200]
+        text = f"({me} didn't answer: {why or 'the model returned nothing'}; ask again)"
     req("POST", "/api/v1/post", {"room": m["room"], "text": text, "re": m["id"]})
 
 
 def main():
     if not KEY or not MODEL:
         sys.exit("set BUNCH_KEY and RESPONDER_MODEL")
-    me = req("GET", "/api/v1/whoami")
+    while True:  # the hub may not be up yet when this starts
+        try:
+            me = req("GET", "/api/v1/whoami")
+            break
+        except urllib.error.HTTPError as e:
+            sys.exit(f"the hub rejected BUNCH_KEY ({e.code})")
+        except OSError as e:
+            print(f"bunch unreachable ({e}); retrying in 10s", file=sys.stderr)
+            time.sleep(10)
     print(f"responder up as {me}: model={MODEL} bunch={HUB}", file=sys.stderr)
     while True:
         try:
@@ -96,7 +110,7 @@ def main():
                         answer(m, me)
                     except urllib.error.HTTPError as e:
                         print(f"reply failed: {e.read().decode()[:200]}", file=sys.stderr)
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        except (OSError, http.client.HTTPException) as e:
             print(f"bunch unreachable ({e}); retrying in 10s", file=sys.stderr)
             time.sleep(10)
 

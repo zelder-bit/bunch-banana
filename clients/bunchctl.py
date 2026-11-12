@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import sys
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,6 +37,8 @@ def call(method, path, body=None, params=None, timeout=90):
         sys.exit(e.read().decode() or str(e))
     except urllib.error.URLError as e:
         sys.exit(f"cannot reach bunch: {e.reason}")
+    except (OSError, http.client.HTTPException) as e:  # read timeout, connection reset mid-answer
+        sys.exit(f"cannot reach bunch: {e or type(e).__name__}")
 
 
 def main():
