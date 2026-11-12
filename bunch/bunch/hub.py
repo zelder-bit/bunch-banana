@@ -125,7 +125,11 @@ class Hub:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                pass
+                # A viewer too slow to keep up would silently miss messages. Drop its backlog and tell its
+                # socket to close instead: the viewer reconnects and catches up from the API.
+                while not q.empty():
+                    q.get_nowait()
+                q.put_nowait({"type": "lagged"})
 
     def _notify(self, mid: int) -> None:
         self.broadcast({"type": "message", "message": self.message_json(self.store.message(mid))})

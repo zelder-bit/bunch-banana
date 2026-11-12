@@ -294,6 +294,10 @@ def shown_avatar(avatar: str | None) -> str:
     return avatar if avatar and any(avatar in group for group in HUMAN_AVATARS.values()) else DEFAULT_HUMAN_AVATAR
 
 
+WS_PING = 25.0    # seconds: idle sockets get a ping, and every socket's access is re-checked this often
+WS_QUEUE = 1000   # events a viewer may fall behind before its socket is closed to make it catch up
+
+
 def create_app(settings: Settings | None = None, llm: LLM | None = None) -> FastAPI:
     s = settings or load()
     if not s.admin_token:
@@ -1208,19 +1212,46 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         if not (by_token or (same_origin and (session_user(socket.session) or token_session(socket.session)))):
             await socket.close(code=4401)
             return
-        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        def still_allowed() -> bool:
+            # The admin token can't change while the hub runs; a session can end (user deleted, password
+            # changed on another device), and an open socket must not outlive it.
+            return by_token or bool(session_user(socket.session) or token_session(socket.session))
+
+        async def until_closed() -> None:
+            try:  # the viewer sends nothing after the first frame, so anything read here is the close
+                while (await socket.receive())["type"] != "websocket.disconnect":
+                    pass
+            except Exception:
+                pass
+
+        q: asyncio.Queue = asyncio.Queue(maxsize=WS_QUEUE)
         hub.listeners.add(q)
+        gone = asyncio.create_task(until_closed())
+        checked = time.monotonic()
         try:
             await socket.send_json({"type": "ready"})
             while True:
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=25)
-                except asyncio.TimeoutError:
-                    event = {"type": "ping"}
+                get = asyncio.create_task(q.get())
+                done, _ = await asyncio.wait({get, gone}, timeout=WS_PING, return_when=asyncio.FIRST_COMPLETED)
+                if get not in done:
+                    get.cancel()
+                if gone in done:
+                    break
+                # done() without cancelled(): the event arrived just as the wait timed out; don't lose it
+                event = get.result() if get.done() and not get.cancelled() else {"type": "ping"}
+                if time.monotonic() - checked >= WS_PING:
+                    checked = time.monotonic()
+                    if not still_allowed():
+                        await socket.close(code=4401)
+                        break
+                if event.get("type") == "lagged":
+                    await socket.close(code=4408)  # fell too far behind: reconnect and catch up
+                    break
                 await socket.send_json(event)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
+            gone.cancel()
             hub.listeners.discard(q)
 
     return app
