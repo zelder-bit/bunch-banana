@@ -759,27 +759,108 @@ WantedBy=default.target
 """
 
 
+def merged_env(old, given, defaults=None):
+    """Merge old env text with given and default key-value pairs, returning updated text and list of kept keys."""
+    old_lines = [line for line in old.splitlines() if line and not line.startswith('#')]
+    old_dict = dict(line.split('=', 1) for line in old_lines if '=' in line)
+    kept = []
+    result = []
+    seen = set()
+
+    for key, value in old_dict.items():
+        if key in given:
+            result.append(f"{key}={given[key]}")
+            seen.add(key)
+        else:
+            result.append(f"{key}={value}")
+            kept.append(key)
+            seen.add(key)
+
+    for key, value in given.items():
+        if key not in seen:
+            result.append(f"{key}={value}")
+            seen.add(key)
+
+    if defaults:
+        for key, value in defaults.items():
+            if key not in seen:
+                result.append(f"{key}={value}")
+                seen.add(key)
+
+    return '\n'.join(result) + '\n', kept
+
+
+def write_env(path, text):
+    """The env file holds the machine key: owner-only, also when it already existed with looser permissions."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def read_env(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def rotate_key(args):
+    """Swap the machine key and nothing else, then restart the service."""
+    opts = dict(zip(args[::2], args[1::2]))
+    unit, key = opts.get("--name", "bunch-worker"), opts.get("--key", "")
+    env = os.path.expanduser(f"~/.config/bunch/{unit}.env")
+    if not key or not os.path.exists(env):
+        sys.exit(f"usage: worker.py rotate-key --key MACHINE_KEY [--name UNIT]   (needs an installed worker: {env})")
+    text, kept = merged_env(read_env(env), {"BUNCH_MACHINE_KEY": key})
+    write_env(env, text)
+    if subprocess.run(["systemctl", "--user", "restart", unit]).returncode:
+        sys.exit(f"key saved, but systemctl --user restart {unit} failed")
+    print(f"new key saved for {unit}; kept {', '.join(kept)}")
+
+
 def install(args):
-    flags = [a for a in args if a == "--share-ollama"]
+    flags = [a for a in args if a == "--share-ollama" or a == "--room-folders"]
     opts = dict(zip(*[iter([a for a in args if a not in flags])] * 2))
     hub, key = opts.get("--hub", "").rstrip("/"), opts.get("--key", "")
     unit = opts.get("--name", "bunch-worker")
     if not hub or not key:
         sys.exit("usage: worker.py install --hub URL --key MACHINE_KEY [--max-power answer|read|full] "
-                 "[--dirs DIR:DIR] [--share-ollama] [--name UNIT]")
+                 "[--dirs DIR:DIR] [--share-ollama] [--room-folders] [--name UNIT]")
     cfg = os.path.expanduser("~/.config/bunch")
     units = os.path.expanduser("~/.config/systemd/user")
     os.makedirs(cfg, exist_ok=True)
     os.makedirs(units, exist_ok=True)
     env = os.path.join(cfg, unit + ".env")
-    fd = os.open(env, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(f"BUNCH_URL={hub}\nBUNCH_MACHINE_KEY={key}\n"
-                f"WORKER_MAX_POWER={opts.get('--max-power', MAX_POWER)}\n"
-                f"WORKER_DIRS={opts.get('--dirs', os.environ.get('WORKER_DIRS', ''))}\n"
-                f"WORKER_SHARE_OLLAMA={'1' if '--share-ollama' in args or SHARE_OLLAMA else ''}\n"
-                f"WORKER_ROOM_FOLDERS={'1' if '--room-folders' in args or ROOM_FOLDERS else ''}\n"
-                f"PATH={os.environ.get('PATH', '/usr/bin:/bin')}\n")  # services don't get ~/.local/bin otherwise
+
+    given = {
+        "BUNCH_URL": hub,
+        "BUNCH_MACHINE_KEY": key,
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),  # services don't get ~/.local/bin otherwise
+    }
+    if "--max-power" in opts:
+        given["WORKER_MAX_POWER"] = opts["--max-power"]
+    if "--dirs" in opts:
+        given["WORKER_DIRS"] = opts["--dirs"]
+    if "--share-ollama" in args:
+        given["WORKER_SHARE_OLLAMA"] = "1"
+    if "--room-folders" in args:
+        given["WORKER_ROOM_FOLDERS"] = "1"
+
+    defaults = {
+        "WORKER_MAX_POWER": MAX_POWER,
+        "WORKER_DIRS": os.environ.get("WORKER_DIRS", ""),
+        "WORKER_SHARE_OLLAMA": "1" if SHARE_OLLAMA else "",
+        "WORKER_ROOM_FOLDERS": "1" if ROOM_FOLDERS else "",
+    }
+
+    old = read_env(env)
+    text, kept = merged_env(old, given, defaults)
+    write_env(env, text)
+    if kept:
+        print(f"kept from the existing {env}: {', '.join(kept)}")
+
     with open(os.path.join(units, unit + ".service"), "w") as f:
         f.write(UNIT.format(env=env, python=sys.executable, script=os.path.realpath(__file__)))
     for cmd in (["daemon-reload"], ["enable", "--now", unit]):
@@ -804,6 +885,8 @@ def uninstall(args):
 def main():
     if sys.argv[1:2] == ["install"]:
         return install(sys.argv[2:])
+    if sys.argv[1:2] == ["rotate-key"]:
+        return rotate_key(sys.argv[2:])
     if sys.argv[1:2] == ["uninstall"]:
         return uninstall(sys.argv[2:])
     if not KEY:
