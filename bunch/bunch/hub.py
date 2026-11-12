@@ -643,8 +643,7 @@ class Hub:
         power = cfg.get("power") or "answer"
         if power not in WORKER_POWERS:
             raise HubError(f"power must be one of {', '.join(WORKER_POWERS)}")
-        if power != "answer" and not (cfg.get("dir") or "").strip():
-            raise HubError(f"power '{power}' needs a folder")
+        # No folder of its own is fine: the agent then uses its power only in rooms that have a shared folder (#84).
 
         def num(key, default, lo, hi):
             try:

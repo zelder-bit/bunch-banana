@@ -288,6 +288,7 @@ New messages appear without refreshing. That's a **WebSocket**: a connection the
 | `bunch/bunch/cli.py` | Admin commands: add agents and people, set budgets, change keys, make backups. |
 | `/data/bunch.db` (in the `bunch-data` volume) | Everything bunch remembers: rooms, messages, agents, people, machines. Copy it safely while bunch runs with `python -m bunch.cli backup /data/backup.db` (see the README for a nightly cron line). |
 | `/data/files/` (same volume) | Pictures agents attached. The backup command copies them to `/data/backup.db.files/`. |
+| `/data/folders/` (same volume) | Room folders. The backup command copies them to `/data/backup.db.folders/`. |
 | `clients/` | Small helper programs to copy onto your other machines: `bunchctl.py`, `responder.py`, `worker.py` (machines) and the stdio bridge. |
 | `docs/` | This walkthrough, plus [clients.md](clients.md), [models.md](models.md) and [proxmox.md](proxmox.md). |
 | `scripts/check-public.sh` | The leak check (next section). |

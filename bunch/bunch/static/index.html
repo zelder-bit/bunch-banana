@@ -105,6 +105,7 @@
           <h1><span id="roomName" tabindex="-1">bunch</span><span id="roomCount" class="muted"></span>
             <button class="btn small ghost room-bot" id="botMode" type="button" aria-pressed="false" hidden
               title="Agents hand work to each other without waiting for you, until one posts [done]">Bot mode: off</button>
+            <button class="btn small ghost room-files" id="filesBtn" type="button" hidden>Files</button>
             <button class="icon-btn room-more" id="roomMore" type="button" popovertarget="roomMenu" aria-label="Room options" title="Room options" hidden>⋯</button></h1>
           <div id="roomMenu" class="menu" popover>
             <button type="button" class="menu-item danger" id="deleteRoom">Delete room…</button>
@@ -159,25 +160,26 @@
     return e;
   }
 
-  {
-    const fall = document.querySelector(".top .fall");
-    const fruits = ["apple", "banana", "coconut", "grapes", "kiwi", "lemon", "orange-slice", "orange", "peach", "strawberry", "watermelon"];
-    if (fall) {
-      for (let i = 0; i < 10; i++) {
-        const fruit = fruits[Math.floor(Math.random() * fruits.length)];
-        const left = (i * 10 + 2 + Math.random() * 6).toFixed(1);
-        const size = (16 + Math.random() * 6).toFixed(1);
-        const dur = (6 + Math.random() * 6).toFixed(2);
-        const delay = (-Math.random() * 12).toFixed(2);
-        const sway = ((Math.random() < 0.5 ? -1 : 1) * (6 + Math.random() * 10)).toFixed(1);
-        fall.append(h("img", {
-          src: `static/svg/${fruit}.svg`,
-          alt: "",
-          style: `--left:${left}%;--size:${size}px;--dur:${dur}s;--delay:${delay}s;--sway:${sway}px`,
-        }));
-      }
+  // Falling fruit: the header's strip, and the top of the Files view.
+  const FALL_FRUITS = ["apple", "banana", "coconut", "grapes", "kiwi", "lemon", "orange-slice", "orange", "peach", "strawberry", "watermelon"];
+  function rain(fall, n = 10) {
+    if (!fall) return fall;
+    for (let i = 0; i < n; i++) {
+      const fruit = FALL_FRUITS[Math.floor(Math.random() * FALL_FRUITS.length)];
+      const left = (i * (100 / n) + 2 + Math.random() * 6).toFixed(1);
+      const size = (16 + Math.random() * 6).toFixed(1);
+      const dur = (6 + Math.random() * 6).toFixed(2);
+      const delay = (-Math.random() * 12).toFixed(2);
+      const sway = ((Math.random() < 0.5 ? -1 : 1) * (6 + Math.random() * 10)).toFixed(1);
+      fall.append(h("img", {
+        src: `static/svg/${fruit}.svg`,
+        alt: "",
+        style: `--left:${left}%;--size:${size}px;--dur:${dur}s;--delay:${delay}s;--sway:${sway}px`,
+      }));
     }
+    return fall;
   }
+  rain(document.querySelector(".top .fall"));
 
   // --- theme (same behaviour as fruit-fs) --------------------------------------
   function applyTheme(t) {
@@ -350,6 +352,9 @@
     $("botMode").textContent = "Bot mode: " + (cur?.bot ? "on" : "off");
     $("botMode").setAttribute("aria-pressed", String(!!cur?.bot));
     $("roomMore").hidden = !me.admin || !cur;
+    $("filesBtn").hidden = !cur || (!cur.folder && !me.admin);   // admins can add a folder; everyone can open one
+    $("filesBtn").replaceChildren("Files", ...(cur?.folder ? [h("span", { class: "chip " + cur.folder }, cur.folder === "git" ? "git" : "plain")] : []));
+    $("filesBtn").title = cur?.folder ? "This room's shared folder" : "Give this room a shared folder";
   }
 
   // The summary shows two lines; "more" opens the rest. It stays open while the summary updates, until you leave the room.
@@ -547,7 +552,7 @@
     const maxOut = h("input", { type: "number", min: "50", max: "8000", step: "50", value: w.max_output || 800 });
     const persona = h("textarea", { rows: 2, placeholder: "Persona (optional)" }, a?.system || "");
     const powerHint = h("span", { class: "muted small hint" });
-    const dirField = field("Folder", dir, "Must also be in WORKER_DIRS on that computer.");
+    const dirField = field("Folder", dir, "Its own folder; must also be in WORKER_DIRS on that computer. Leave blank to work only in rooms that have a shared folder (Files).");
     const cliBox = h("div", { class: "field-group" },
       field("Model", cliModel, "Blank = the CLI's default. A cheaper model stretches the plan."), suggestions,
       field("Deep model", deep, "Used only when a message contains !deep."),
@@ -984,6 +989,146 @@
     if (await act(() => api("/api/admin/rooms/" + enc(room) + "/bot", { method: "PUT", body: JSON.stringify({ on }) }),
                   on ? `Bot mode on in #${room}` : `Bot mode off in #${room}`)) loadRooms();
   };
+  // --- the room's shared folder ----------------------------------------------------------
+  let filesOpen = "", filesShown = "";   // the room whose Files view is open; the file being looked at
+  const folderUrl = (room, tail = "", path) => "/api/admin/rooms/" + encodeURIComponent(room) + "/folder" + tail + (path != null ? "?path=" + encodeURIComponent(path) : "");
+  const fmtSize = (n) => n < 1000 ? n + " B" : n < 1e6 ? (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + " kB" : n < 1e9 ? (n / 1e6).toFixed(1) + " MB" : (n / 1e9).toFixed(1) + " GB";
+  // A fruit per kind of file: the same artwork as everywhere else, so the list is easy to scan.
+  const FILE_ART = { md: "lemon", txt: "lemon", py: "kiwi", js: "banana", ts: "banana", json: "grapes", yml: "grapes", yaml: "grapes", toml: "grapes",
+    html: "orange", css: "peach", png: "watermelon", jpg: "watermelon", jpeg: "watermelon", gif: "watermelon", webp: "watermelon", svg: "watermelon",
+    sh: "pepper", go: "pear", rs: "tomato", c: "corn", h: "corn", cpp: "corn", java: "coconut", sql: "eggplant", pdf: "cherries" };
+  const fileArt = (path) => FILE_ART[(path.split(".").pop() || "").toLowerCase()] || "apple";
+  const KIND_NAME = { git: "Git repository", plain: "Plain folder" }, KIND_ART = { git: "grapes", plain: "orange" };
+  const IMG_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+
+  async function openFiles(room, keep) {
+    let data;
+    try { data = await api(folderUrl(room)); } catch (err) { if (err.message !== "unauthorized") toast(err.message, "bad"); return; }
+    if (keep && (filesOpen !== room || !$("panel").open)) return;
+    const scroll = keep ? $("panel").querySelector(".panel-body")?.scrollTop : 0;
+    filesOpen = room;
+    if (!keep) filesShown = "";
+    const f = data.folder;
+    const hero = h("div", { class: "files-hero" }, rain(h("div", { class: "fall", "aria-hidden": "true" }), 12));
+    const body = [hero];
+    if (!f) {
+      hero.append(h("h3", null, "No folder yet"),
+        h("p", { class: "muted" }, me.admin ? "Give #" + room + " one shared folder. Agents on your machines work inside it, and everyone in the room sees the same files."
+          : "An admin can give this room a shared folder."));
+      if (me.admin) body.push(h("div", { class: "kind-pick" }, ...["git", "plain"].map((kind) =>
+        h("button", { type: "button", class: "kind-card", onclick: async () => {
+            if (await act(() => api(folderUrl(room), { method: "POST", body: JSON.stringify({ kind }) }), KIND_NAME[kind] + " added to #" + room)) { loadRooms(); openFiles(room); }
+          } },
+          h("img", { src: `static/svg/${KIND_ART[kind]}.svg`, alt: "" }), h("strong", null, KIND_NAME[kind]),
+          h("span", { class: "muted small" }, data.kinds[kind].replace(/^a [a-z ]+: /, "").replace(/^./, (c) => c.toUpperCase()) + ".")))),
+        h("p", { class: "muted small" }, "You can't switch kinds later without removing the folder. Files in a room go to whichever model answers there, paid ones included."));
+    } else {
+      hero.append(
+        h("h3", null, h("img", { src: `static/svg/${KIND_ART[f.kind]}.svg`, alt: "", width: 28, height: 28 }), KIND_NAME[f.kind], h("span", { class: "chip " + f.kind }, f.files.length + (f.files.length === 1 ? " file" : " files"))),
+        h("p", { class: "muted small" }, "This is " + f.about + "."),
+        f.max ? h("div", { class: "meter", role: "img", "aria-label": `${fmtSize(f.size)} of ${fmtSize(f.max)} used`, title: `${fmtSize(f.size)} of ${fmtSize(f.max)} used` },
+          h("span", { style: `width:${Math.min(100, Math.max(1, f.size / f.max * 100)).toFixed(1)}%` })) : null);
+      const view = h("div", { id: "fileView", class: "files-section", hidden: true });
+      body.push(view, fileList(room, f), uploader(room, f));
+      if (f.branches.length) body.push(h("div", { class: "files-section" }, h("h3", null, "Work waiting to be merged"),
+        h("p", { class: "muted small" }, "These changes clashed with newer work, so they were kept on a side branch instead of replacing it."),
+        ...f.branches.map((b) => h("div", { class: "change" }, h("span", { class: "chip git" }, b.name), h("span", { class: "what small" }, b.what), h("span", { class: "when" }, fmtTime(b.when))))));
+      if (f.kind === "git") body.push(h("div", { class: "files-section" }, h("h3", null, "History"),
+        ...(f.history.length ? f.history.map((c) => h("div", { class: "change" }, avatar(c.who, people.find((p) => p.name === c.who)?.kind === "human", "sm"),
+            h("span", { class: "what" }, c.what), h("span", { class: "when" }, fmtTime(c.when))))
+          : [h("p", { class: "muted small" }, "No changes yet.")])));
+      if (me.admin) body.push(h("div", { class: "panel-danger" }, h("button", { type: "button", class: "btn danger", onclick: async () => {
+        if (!confirm(`Remove #${room}'s folder and its ${f.files.length} file${f.files.length === 1 ? "" : "s"}${f.kind === "git" ? ", history included" : ""}? This can't be undone.`)) return;
+        if (await act(() => api(folderUrl(room), { method: "DELETE" }), "Folder removed")) { loadRooms(); openFiles(room); }
+      } }, "Remove folder…")));
+    }
+    openPanel("Files in #" + room, ...body);
+    $("panel").classList.add("wide");
+    $("panel").addEventListener("close", () => { $("panel").classList.remove("wide"); filesOpen = ""; }, { once: true });
+    if (keep) { $("panel").querySelector(".panel-body").scrollTop = scroll; if (filesShown && f?.files.some((x) => x.path === filesShown)) showFile(room, f.files.find((x) => x.path === filesShown)); }
+  }
+
+  function fileList(room, f) {
+    if (!f.files.length) return h("div", { class: "empty" }, h("img", { src: "static/svg/empty.svg", alt: "" }), h("h2", null, "Nothing in here yet"),
+      h("p", { class: "muted" }, "Add files below, or ask an agent in the room to make some."));
+    const rows = [], files = [...f.files].sort((a, b) => {
+      const da = a.path.includes("/") ? a.path.slice(0, a.path.lastIndexOf("/")) : "", db = b.path.includes("/") ? b.path.slice(0, b.path.lastIndexOf("/")) : "";
+      return da === db ? a.path.localeCompare(b.path) : da.localeCompare(db);
+    });
+    let dir = null;
+    files.forEach((file, i) => {
+      const cut = file.path.lastIndexOf("/"), d = cut < 0 ? "" : file.path.slice(0, cut), name = file.path.slice(cut + 1);
+      if (d !== dir) { dir = d; if (d) rows.push(h("div", { class: "file-dir" }, d + "/")); }
+      rows.push(h("div", { class: "file-row", style: `animation-delay:${Math.min(i, 12) * 25}ms` },
+        h("span", { class: "avatar sm" }, h("img", { src: `static/svg/${fileArt(file.path)}.svg`, alt: "" })),
+        h("button", { type: "button", class: "file-name", title: "Look at " + file.path, onclick: () => showFile(room, file) }, name),
+        h("span", { class: "file-size" }, fmtSize(file.size)),
+        h("a", { class: "icon-btn", href: folderUrl(room, "/file", file.path), download: name, "aria-label": "Download " + file.path, title: "Download" }, "↓"),
+        me.admin ? h("button", { type: "button", class: "icon-btn", "aria-label": "Delete " + file.path, title: "Delete", onclick: async () => {
+          if (!confirm(`Delete ${file.path}?` + (f.kind === "plain" ? " A plain folder has no undo." : ""))) return;
+          await act(() => api(folderUrl(room, "/file", file.path), { method: "DELETE" }), "Deleted " + name);
+        } }, "✕") : null));
+    });
+    return h("div", { class: "file-list" }, ...rows);
+  }
+
+  async function showFile(room, file) {
+    const view = $("fileView");
+    if (!view) return;
+    filesShown = file.path;
+    const ext = (file.path.split(".").pop() || "").toLowerCase();
+    const head = h("div", { class: "file-view-head" }, h("strong", null, file.path),
+      h("button", { type: "button", class: "btn small", onclick: () => { view.hidden = true; filesShown = ""; } }, "Close"));
+    let shown;
+    if (file.size > 400000) shown = h("p", { class: "muted" }, "Too big to show here (" + fmtSize(file.size) + "). Download it instead.");
+    else {
+      try {
+        const r = await fetch(folderUrl(room, "/file", file.path), { credentials: "same-origin" });
+        if (!r.ok) throw new Error("couldn't open it");
+        const buf = await r.arrayBuffer();
+        if (IMG_TYPES[ext]) shown = h("img", { class: "file-view-img", alt: file.path, src: URL.createObjectURL(new Blob([buf], { type: IMG_TYPES[ext] })) });
+        else {
+          try { shown = h("pre", { class: "file-view", tabindex: "0" }, new TextDecoder("utf-8", { fatal: true }).decode(buf)); }
+          catch { shown = h("p", { class: "muted" }, "Not a text file. Download it to open it."); }
+        }
+      } catch (err) { shown = h("p", { class: "muted" }, err.message); }
+    }
+    if (filesShown !== file.path) return;
+    view.replaceChildren(head, shown);
+    view.hidden = false;
+    view.scrollIntoView({ block: "nearest" });
+  }
+
+  function uploader(room, f) {
+    const pick = h("input", { type: "file", multiple: true, hidden: true });
+    const into = h("input", { type: "text", placeholder: "folder (optional), e.g. docs", "aria-label": "Put the files in this folder", autocomplete: "off" });
+    const drop = h("div", { class: "drop" });
+    async function put(list) {
+      const prefix = into.value.trim().replace(/^\/+|\/+$/g, "");
+      let done = 0;
+      for (const file of list) {
+        if (file.size > f.max_file) { toast(`${file.name} is over ${fmtSize(f.max_file)}`, "bad"); continue; }
+        try {
+          const r = await fetch(folderUrl(room, "/file", (prefix ? prefix + "/" : "") + file.name), { method: "PUT", credentials: "same-origin",
+            headers: { "Content-Type": "application/octet-stream" }, body: file });
+          if (!r.ok) { let d = r.statusText; try { d = (await r.json()).detail || d; } catch {} throw new Error(d); }
+          done++;
+        } catch (err) { toast(`${file.name}: ${err.message}`, "bad"); }
+      }
+      if (done) toast(done === 1 ? "File added" : done + " files added", "good");
+      pick.value = "";
+    }
+    pick.onchange = () => put([...pick.files]);
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+    drop.ondragleave = () => drop.classList.remove("over");
+    drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); put([...e.dataTransfer.files]); };
+    drop.append(pick, h("span", { class: "muted small" }, "Drop files here, or"),
+      h("div", { class: "row" }, h("button", { type: "button", class: "btn primary small", onclick: () => pick.click() }, "Add files"), into),
+      h("span", { class: "muted small" }, f.kind === "git" ? "Each file you add is recorded under your name." : "A file with the same name is replaced, with no undo."));
+    return drop;
+  }
+  $("filesBtn").onclick = () => { if (current) openFiles(current); };
+
   $("deleteRoom").onclick = async () => {
     closeRoomMenu();
     const room = current, n = rooms.find(r => r.name === room)?.count ?? 0;
@@ -1111,6 +1256,7 @@
       if (e.type === "room_deleted") return roomGone(e.room);
       if (e.type === "agents") return loadAgents();
       if (e.type === "rooms") return loadRooms();
+      if (e.type === "folder") { if (filesOpen === e.room && $("panel").open) openFiles(e.room, true); return; }
       if (e.type === "deleted") { $("feed").querySelector(`.msg[data-id="${e.id}"]`)?.remove(); return loadRooms(); }
       if (e.type !== "message") return;
       const m = e.message;

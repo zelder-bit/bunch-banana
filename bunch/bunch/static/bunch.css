@@ -447,3 +447,54 @@ dialog.panel::after, .login-card::after {  /* left and right */
 /* A message that was sent and is waiting for the hub to store it. */
 .msg.pending { opacity: .6; }
 .msg.pending .sending { font-style: italic; }
+
+/* --- room folder (Files) ------------------------------------------------------------ */
+.room-files .chip { margin-left: .4em; }
+.chip { display: inline-flex; align-items: center; gap: .35em; font-family: 'Nunito', sans-serif; font-size: .75rem; font-weight: 800;
+  border-radius: 999px; padding: .1em .7em; background: var(--surface-2); color: var(--ink); border: 2px solid var(--line); }
+.chip.git { border-color: var(--leaf); }
+.chip.plain { border-color: var(--peel); }
+.files-hero { position: relative; overflow: hidden; border-radius: var(--radius); padding: 22px 20px 18px; min-height: 96px;
+  background: linear-gradient(135deg, var(--surface-2), var(--bg)); border: 2px solid var(--line); }
+.files-hero > :not(.fall) { position: relative; z-index: 1; }
+.files-hero .fall img { opacity: .5; animation-name: files-fall; }
+@keyframes files-fall {
+  0% { transform: translateY(-30px) translateX(0) rotate(0deg); }
+  50% { transform: translateY(70px) translateX(var(--sway, 10px)) rotate(18deg); }
+  100% { transform: translateY(190px) translateX(calc(var(--sway, 10px) * -0.5)) rotate(-28deg); }
+}
+.files-hero h3 { margin: 0 0 .3em; font-size: 1.15rem; display: flex; align-items: center; gap: .5em; flex-wrap: wrap; }
+.files-hero p { margin: 0; max-width: 58ch; }
+.meter { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: 12px; max-width: 320px; }
+.meter > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--leaf), var(--banana), var(--orange)); }
+.kind-pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.kind-card { display: grid; gap: 6px; text-align: left; padding: 16px; border-radius: var(--radius); border: 2px solid var(--line);
+  background: var(--surface); color: inherit; font: inherit; cursor: pointer; transition: transform .15s, border-color .15s, box-shadow .15s; }
+.kind-card:hover { border-color: var(--peel); transform: translateY(-2px); box-shadow: var(--shadow); }
+.kind-card img { width: 44px; height: 44px; }
+.kind-card strong { font-size: 1.05rem; }
+.file-dir { font-family: 'Nunito', sans-serif; font-weight: 800; font-size: .8rem; color: var(--muted); padding: 10px 8px 2px;
+  text-transform: uppercase; letter-spacing: .04em; }
+.file-list { display: grid; gap: 2px; margin: 0 -8px; }
+.file-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 14px; animation: pop .25s ease-out both; }
+.file-row:hover, .file-row:focus-within { background: var(--surface-2); }
+.file-row .file-name { flex: 1; min-width: 0; text-align: left; border: 0; background: none; color: inherit; font: inherit; font-weight: 700;
+  cursor: pointer; padding: .2em 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row .file-name:hover { color: var(--orange-deep); }
+.file-row .file-size { color: var(--muted); font-size: .85rem; flex: none; }
+.file-row .icon-btn { width: 32px; height: 32px; font-size: .95rem; text-decoration: none; }
+.drop { border: 2px dashed var(--peel); border-radius: var(--radius); padding: 14px; text-align: center; display: grid; gap: 8px; justify-items: center;
+  transition: background .15s, border-color .15s; }
+.drop.over { background: var(--surface-2); border-color: var(--orange); }
+.drop .row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }
+.drop input[type="text"] { max-width: 220px; }
+.file-view { margin: 0; padding: 14px; border-radius: 14px; background: var(--surface-2); border: 2px solid var(--line); overflow: auto;
+  max-height: 50vh; font-size: .85rem; line-height: 1.45; white-space: pre; tab-size: 4; }
+.file-view-img { max-width: 100%; max-height: 50vh; border-radius: 14px; border: 2px solid var(--line); }
+.file-view-head { display: flex; align-items: center; gap: 8px; }
+.file-view-head strong { flex: 1; overflow-wrap: anywhere; }
+.files-section h3 { margin: 0 0 6px; font-size: 1rem; }
+.change { display: flex; gap: 10px; align-items: center; padding: 5px 0; }
+.change .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.change .when { color: var(--muted); font-size: .82rem; flex: none; }
+@media (prefers-reduced-motion: reduce) { .file-row { animation: none; } .kind-card { transition: none; } .kind-card:hover { transform: none; } }

@@ -22,6 +22,7 @@ summaries of the latest messages, the message and the message it replies to. In 
 default system prompt. Jobs run one at a time. When a CLI says its plan's limit is hit, that CLI
 cools down until the reset, and the hub tells anyone who asks in the meantime.
 """
+import hashlib
 import json
 import os
 import re
@@ -105,6 +106,183 @@ class heartbeat:
 OUT_DIR = "bunch-out"  # in a project folder: where the CLI leaves pictures for the room
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
                ".svg": "image/svg+xml"}  # the hub shows SVG only as a sandboxed image, never inline
+
+# ------------------------------------------------------------------ the room's shared folder (#84)
+# A room can have one folder kept on the hub, either a git repository or a plain directory. With
+# WORKER_ROOM_FOLDERS=1 this machine keeps a copy per room, runs the CLI inside it and sends the changes back.
+ROOM_FOLDERS = os.environ.get("WORKER_ROOM_FOLDERS", "").strip().lower() in ("1", "true", "yes")
+ROOMS_DIR = os.path.realpath(os.path.expanduser(
+    os.environ.get("WORKER_ROOMS_DIR", "") or os.path.join("~", ".local", "share", "bunch-worker", "rooms")))
+
+
+def raw(method, path, params, data=None, timeout=300):
+    """Like req, for bytes in and out."""
+    r = urllib.request.Request(HUB + path + "?" + urllib.parse.urlencode(params), method=method, data=data, headers={
+        "Authorization": "Bearer " + KEY, "Content-Type": "application/octet-stream"})
+    with urllib.request.urlopen(r, timeout=timeout) as resp:
+        return resp.read()
+
+
+def capped_power(cfg, max_power=MAX_POWER):
+    """The agent's power under this machine's ceiling, before any folder is considered."""
+    want = cfg.get("power") if cfg.get("power") in POWERS else "answer"
+    top = max_power if max_power in POWERS else "answer"
+    return want if POWERS.index(want) <= POWERS.index(top) else top
+
+
+def folder_hint(kind, power):
+    """What the run is told about where it is working, so it knows what happens to its changes."""
+    if kind == "git":
+        text = (" You are working in this room's shared folder, a git repository that every agent in the room uses."
+                " History is kept: each change is recorded with who made it and can be undone.")
+        if power == "full":
+            text += (" Just edit files: your changes are committed under your name and shared for you when you finish."
+                     " Don't push, and don't rewrite history. If someone changed the same lines meanwhile, your work"
+                     " is kept on a side branch and the room is told.")
+    else:
+        text = (" You are working in this room's shared folder, a plain folder that every agent in the room uses."
+                " It is NOT a git repository: there is no history and no undo.")
+        if power == "full":
+            text += (" Files you change replace the shared copies when you finish, even if someone else changed them"
+                     " meanwhile, so change only what you need to and never delete files you weren't asked to.")
+    return text if power == "full" else text + " You can read these files but not change them in this run."
+
+
+def _g(d, *args, check=True):
+    p = subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", "advice.detachedHead=false", *args],
+                       cwd=d, env=child_env(), capture_output=True, text=True, timeout=300)
+    if check and p.returncode:
+        raise OSError("git " + args[0] + ": " + (p.stderr.strip().splitlines() or ["failed"])[-1][:200])
+    return p.stdout.strip()
+
+
+def _sha(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def _local_files(d):
+    """Relative path -> sha256 of everything in a plain folder copy, minus the worker's own picture folder."""
+    out = {}
+    for root, dirs, files in os.walk(d):
+        dirs[:] = [x for x in dirs if not (root == d and x == OUT_DIR) and not os.path.islink(os.path.join(root, x))]
+        for f in files:
+            full = os.path.join(root, f)
+            if not os.path.islink(full):
+                out[os.path.relpath(full, d).replace(os.sep, "/")] = _sha(full)
+    return out
+
+
+class RoomFolder:
+    """This machine's copy of one room's folder for one job. fetch() before the CLI runs, publish() after."""
+
+    def __init__(self, agent, room, kind, rooms_dir=None):
+        self.agent, self.room, self.kind = agent, room, kind
+        self.dir = os.path.join(os.path.realpath(rooms_dir or ROOMS_DIR), urllib.parse.quote(room, safe=""))
+        self.q = {"agent": agent, "room": room}
+        self.base = {}  # plain: what each file looked like when we fetched
+
+    def fetch(self):
+        os.makedirs(self.dir, exist_ok=True)
+        if self.kind == "git":
+            self._fetch_git()
+            # Whatever the last run left is already on the hub (main or a side branch): start from the room's latest.
+            _g(self.dir, "checkout", "-q", "-f", "-B", "main", "origin/main")
+            _g(self.dir, "clean", "-q", "-fd")
+        else:
+            listing = {f["path"]: f["sha"] for f in req("GET", "/api/v1/machine/folder", params=self.q)["files"]}
+            have = _local_files(self.dir)
+            for path in have.keys() - listing.keys():
+                os.remove(os.path.join(self.dir, *path.split("/")))
+            for path, sha in listing.items():
+                if have.get(path) != sha and self._inside(path):
+                    full = os.path.join(self.dir, *path.split("/"))
+                    os.makedirs(os.path.dirname(full), exist_ok=True)
+                    with open(full, "wb") as f:
+                        f.write(raw("GET", "/api/v1/machine/folder/file", {**self.q, "path": path}))
+            self.base = listing
+        return self.dir
+
+    def _inside(self, path):
+        full = os.path.realpath(os.path.join(self.dir, *path.split("/")))
+        return full.startswith(self.dir + os.sep) and ".." not in path.split("/")
+
+    def _fetch_git(self):
+        if not os.path.isdir(os.path.join(self.dir, ".git")):
+            _g(self.dir, "init", "-q", "-b", "main")
+            with open(os.path.join(self.dir, ".git", "info", "exclude"), "a") as f:
+                f.write(f"/{OUT_DIR}/\n")  # the worker's picture folder is never part of the room's files
+        with tempfile.NamedTemporaryFile(suffix=".bundle") as tmp:
+            tmp.write(raw("GET", "/api/v1/machine/folder/bundle", self.q))
+            tmp.flush()
+            _g(self.dir, "fetch", "-q", "--no-tags", tmp.name, "+refs/heads/main:refs/remotes/origin/main")
+
+    def publish(self, msg_id):
+        """Sends what the run changed. Returns a short note for the room ("" when nothing changed)."""
+        return self._publish_git(msg_id) if self.kind == "git" else self._publish_plain()
+
+    def _publish_git(self, msg_id):
+        d = self.dir
+        _g(d, "add", "-A")
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=d, env=child_env()).returncode:
+            _g(d, "-c", f"user.name={self.agent}", "-c", f"user.email={self.agent}@bunch.invalid", "commit", "-q",
+               "-m", f"{self.agent}: work for message #{msg_id} in #{self.room}")
+        if _g(d, "rev-parse", "HEAD") == _g(d, "rev-parse", "origin/main"):
+            return ""
+        _g(d, "branch", "-f", f"unsent-{msg_id}", "HEAD")  # kept here if the hub can't be reached below
+        before = _g(d, "rev-parse", "origin/main")
+        self._fetch_git()
+        if _g(d, "rev-parse", "origin/main") != before:  # someone else got there first: put ours on top if it fits
+            p = subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", f"user.name={self.agent}",
+                                "-c", f"user.email={self.agent}@bunch.invalid", "rebase", "-q", "origin/main"],
+                               cwd=d, env=child_env(), capture_output=True)
+            if p.returncode:
+                _g(d, "rebase", "--abort", check=False)
+        _g(d, "branch", "-f", "bunch-send", "HEAD")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "out.bundle")
+            _g(d, "bundle", "create", "-q", path, "origin/main..bunch-send")
+            with open(path, "rb") as f:
+                r = json.loads(raw("POST", "/api/v1/machine/folder/bundle", {**self.q, "id": msg_id}, f.read()))
+        _g(d, "branch", "-D", f"unsent-{msg_id}", check=False)
+        n = r.get("files", 0)
+        files = f"{n} file{'' if n == 1 else 's'}"
+        if r.get("result") == "branch":
+            return (f"(changed {files} in the room folder, but it clashes with newer work there: mine is kept on "
+                    f"branch {r['branch']} until someone merges it)")
+        return f"(changed {files} in the room folder)"
+
+    def _publish_plain(self):
+        now, sent, gone, replaced, failed = _local_files(self.dir), [], [], [], []
+        for path, sha in now.items():
+            if self.base.get(path) == sha:
+                continue
+            try:
+                with open(os.path.join(self.dir, *path.split("/")), "rb") as f:
+                    r = json.loads(raw("PUT", "/api/v1/machine/folder/file",
+                                       {**self.q, "path": path, "base": self.base.get(path, "")}, f.read()))
+                sent.append(path)
+                if r.get("overwrote"):
+                    replaced.append(path)
+            except urllib.error.HTTPError as e:
+                failed.append(f"{path} ({e.code})")
+        for path in self.base.keys() - now.keys():
+            try:
+                raw("DELETE", "/api/v1/machine/folder/file", {**self.q, "path": path})
+                gone.append(path)
+            except urllib.error.HTTPError as e:
+                failed.append(f"{path} ({e.code})")
+        if not (sent or gone or failed):
+            return ""
+        n = len(sent) + len(gone)
+        note = f"changed {n} file{'' if n == 1 else 's'} in the room folder"
+        if replaced:
+            note += "; replaced someone's newer copy of " + ", ".join(replaced[:5])
+        if failed:
+            note += "; the hub refused " + ", ".join(failed[:5])
+        return f"({note})"
+
+
 # A reply that says it made a picture or file. Checked against what was actually uploaded.
 CLAIM_RE = re.compile(r"\b(?:i(?:'ve| have)?\s+)?(?:created|made|generated|drew|drawn|painted|rendered|saved|attached)\b"
                       r"(?:[^.!?\n]|\.(?=\S)){0,60}\b(?:image|picture|pic|png|jpe?g|svg|drawing|illustration|painting|"
@@ -448,12 +626,26 @@ class Worker:
         system = (cfg.get("system") or DEFAULT_SYSTEM.format(name=name)) + \
             f" Keep the answer under about {int(cfg.get('max_output') or 800)} tokens." + PLAIN_REPLY
         power, d = effective_power(cfg)
+        # A room with a shared folder: work there instead of the agent's own folder, when this machine allows it.
+        shared, shared_note = None, ""
+        if job.get("folder") and capped_power(cfg) != "answer":
+            if not ROOM_FOLDERS:
+                shared_note = f"(#{job['room']} has a shared folder, but {self.machine} hasn't turned on WORKER_ROOM_FOLDERS)"
+            else:
+                try:
+                    shared = RoomFolder(name, job["room"], job["folder"]["kind"])
+                    power, d = capped_power(cfg), shared.fetch()
+                except (OSError, urllib.error.URLError, subprocess.TimeoutExpired) as e:
+                    print(f"  room folder not ready: {e}", file=sys.stderr)
+                    shared, shared_note = None, f"(couldn't get the room folder: {str(e)[:160]})"
         # Pictures come back as files in a folder only the worker uses, so nothing else in a project gets posted.
         out = os.path.join(d, OUT_DIR) if d else self.scratch
         system += picture_hint(power, d)
+        if shared:
+            system += folder_hint(shared.kind, power)
         if cli == "agy" and power == "full":  # it can't run commands headless, but its own image tool works
             system += " For a picture, use your image generation tool, not commands."
-        lowered = power != (cfg.get("power") or "answer")
+        lowered = power != (cfg.get("power") or "answer") and not shared_note
         if lowered:
             print(f"  power {cfg.get('power')} not allowed here (WORKER_MAX_POWER/WORKER_DIRS); using {power}",
                   file=sys.stderr)
@@ -491,6 +683,12 @@ class Worker:
         if pics:
             text = (text + "\n\n" + "\n".join(pics)).strip()
             error = None  # an image with no words is still an answer
+        if shared and power == "full" and not LIMIT_RE.search(error or ""):  # even a failed run may have changed files
+            try:
+                shared_note = shared.publish(job["id"])
+            except (OSError, urllib.error.URLError, subprocess.TimeoutExpired, ValueError) as e:
+                print(f"  room folder not sent: {e}", file=sys.stderr)
+                shared_note = f"(my changes to the room folder weren't shared: {str(e)[:160]})"
         if error and LIMIT_RE.search(error):
             self.cool_until[cli] = until = reset_time(error)
             for other, c in self.agents.items():  # same login: every agent on this CLI is out
@@ -510,6 +708,8 @@ class Worker:
             return self.reply(job, f"({cli} failed: {error.splitlines()[0][:200]}{hint})")
         if lowered:  # say it in the chat too, not only in this machine's journal
             text += f"\n\n({self.machine} allows only {power}, not {cfg.get('power')}: ran as {power})"
+        if shared_note:
+            text += "\n\n" + shared_note
         if not pics and claims_picture(text):  # it says it made something, but nothing came back
             text += "\n\n" + no_picture_note(self.machine, power)
         self.reply(job, text)
@@ -578,6 +778,7 @@ def install(args):
                 f"WORKER_MAX_POWER={opts.get('--max-power', MAX_POWER)}\n"
                 f"WORKER_DIRS={opts.get('--dirs', os.environ.get('WORKER_DIRS', ''))}\n"
                 f"WORKER_SHARE_OLLAMA={'1' if '--share-ollama' in args or SHARE_OLLAMA else ''}\n"
+                f"WORKER_ROOM_FOLDERS={'1' if '--room-folders' in args or ROOM_FOLDERS else ''}\n"
                 f"PATH={os.environ.get('PATH', '/usr/bin:/bin')}\n")  # services don't get ~/.local/bin otherwise
     with open(os.path.join(units, unit + ".service"), "w") as f:
         f.write(UNIT.format(env=env, python=sys.executable, script=os.path.realpath(__file__)))
