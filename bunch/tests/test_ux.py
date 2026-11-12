@@ -90,7 +90,7 @@ def test_a_slow_agent_does_not_hold_up_another(env):
     _auto(c, "aa", "bb")
     gate = None
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         if user == "aa":
             await gate.wait()
         return f"{user} says hi", 10
@@ -121,7 +121,7 @@ def test_queued_message_is_answered_even_if_it_gets_old_while_waiting(env, monke
     _auto(c, "aa")
     gate, calls = None, []
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         calls.append(1)
         if len(calls) == 1:
             await gate.wait()
@@ -171,7 +171,7 @@ def test_loop_cancel_stops_running_answers(env):
     _auto(c, "aa")
     cancelled = []
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         try:
             await asyncio.sleep(60)
         except asyncio.CancelledError:

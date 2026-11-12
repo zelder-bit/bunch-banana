@@ -18,7 +18,7 @@ class FakeLLM:
     def __init__(self):
         self.calls = []
 
-    async def chat(self, model, messages, max_tokens, user=None):
+    async def chat(self, model, messages, max_tokens, user=None, **kw):
         self.calls.append((model, messages, max_tokens, user))
         return f"answer from {model}", 100
 
@@ -396,7 +396,7 @@ def test_agents_stop_answering_each_other(env):
     hub = app.state.hub
     for n in ("aa", "bb"):
         c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         return ("@bb, can you help?" if user == "aa" else "@aa, can you help?"), 10
     llm.chat = chat
     hub.post("human", "r", "@aa hi", human=True)
@@ -438,7 +438,7 @@ def test_agent_asked_by_the_human_isnt_asked_again(env):
     for n in ("aa", "bb"):
         c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         return ("@bb, can you add costs?" if user == "aa" else "costs are $300"), 10
     llm.chat = chat
     hub.post("savannah", "r", "@aa @bb go more in depth", human=True)
@@ -618,7 +618,7 @@ def test_bot_mode_runs_to_done_with_auto_agents(env):
         c.post("/api/admin/agents", json={"name": n, "model": "local/small"}, headers=adm())
     turns = []
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         assert "Bot mode is on" in messages[0]["content"]
         turns.append(user)
         if len(turns) >= 7:

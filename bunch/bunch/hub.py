@@ -749,7 +749,9 @@ class Hub:
                 raise HubError(why)
             mt = max(1, min(int(max_tokens or self.s.ask_max_tokens), self.s.ask_max_tokens))
             msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
-            text, tokens = await self.llm.chat(model, msgs, mt, user=agent)
+            # the retries inside chat() stop once today's budget is used up
+            text, tokens = await self.llm.chat(model, msgs, mt, user=agent,
+                                               remaining=max(0, budget - used) if budget else None)
         except LLMError as e:
             raise HubError(str(e)) from e
         self.store.add_usage(agent, ask=tokens)

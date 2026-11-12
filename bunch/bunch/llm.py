@@ -17,6 +17,18 @@ class LLM:
         self.key = key
         self.timeout = timeout
         self.think_max_tokens = think_max_tokens
+        self._client: httpx.AsyncClient | None = None
+
+    def _http(self) -> httpx.AsyncClient:
+        """One shared client, so connections to the gateway are reused."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
 
     @property
     def enabled(self) -> bool:
@@ -25,18 +37,21 @@ class LLM:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.key}"} if self.key else {}
 
-    async def chat(self, model: str, messages: list[dict], max_tokens: int, user: str | None = None) -> tuple[str, int]:
-        """Returns (text, total_tokens)."""
+    async def chat(self, model: str, messages: list[dict], max_tokens: int, user: str | None = None,
+                   remaining: int | None = None) -> tuple[str, int]:
+        """Returns (text, total_tokens). remaining: tokens the caller may still spend today (None = no cap);
+        a retry is skipped once the calls so far have used that up."""
         payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
         if user:
             payload["user"] = user  # lets LiteLLM attribute spend per agent
         text, total, thought, cut = await self._complete(payload)
-        if (not text or cut) and thought and max_tokens < self.think_max_tokens:
+        afford = lambda: remaining is None or total < remaining
+        if (not text or cut) and thought and max_tokens < self.think_max_tokens and afford():
             # A thinking model (gemma4, qwen3...) spent max_tokens on hidden reasoning and said nothing,
             # or stopped mid-answer: give it room to think and still answer.
             text, more, thought, cut = await self._complete({**payload, "max_tokens": self.think_max_tokens})
             total += more
-        if not text and thought:
+        if not text and thought and afford():
             # Still nothing: ask with thinking off. Only as a last resort, since answers get weaker
             # and some providers reject "none".
             try:
@@ -51,40 +66,42 @@ class LLM:
     async def _complete(self, payload: dict) -> tuple[str, int, bool, bool]:
         """Returns (text, total_tokens, whether the model produced reasoning, whether it hit max_tokens)."""
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as c:
-                r = await c.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=self._headers())
+            r = await self._http().post(f"{self.base_url}/v1/chat/completions", json=payload, headers=self._headers(), timeout=self.timeout)
         except httpx.HTTPError as e:
             raise LLMError(f"gateway unreachable: {type(e).__name__}") from e
         if r.status_code != 200:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
-        data = r.json()
+        data = _json(r)
         try:
             choice = data["choices"][0]
             msg = choice["message"]
             text = msg.get("content") or ""
-        except (KeyError, IndexError, TypeError) as e:
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
             raise LLMError("gateway returned no choices") from e
         thought = bool(msg.get("reasoning") or msg.get("reasoning_content"))
         usage = data.get("usage") or {}
         messages = payload["messages"]
-        total = usage.get("total_tokens") or (len(text) // 4 + sum(len(m.get("content", "")) for m in messages) // 4)
+        total = usage.get("total_tokens") or (len(text) // 4 + sum(len(m.get("content", "") or "") for m in messages) // 4)
         return text, int(total), thought, choice.get("finish_reason") == "length"
 
     async def models(self) -> list[str]:
         try:
-            async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.get(f"{self.base_url}/v1/models", headers=self._headers())
+            r = await self._http().get(f"{self.base_url}/v1/models", headers=self._headers(), timeout=30.0)
         except httpx.HTTPError as e:
             raise LLMError(f"gateway unreachable: {type(e).__name__}") from e
         if r.status_code != 200:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
-        return sorted(m["id"] for m in r.json().get("data", []))
+        try:
+            data = _json(r)
+            model_list = data.get("data", [])
+            return sorted(m["id"] for m in model_list)
+        except (KeyError, TypeError, AttributeError):
+            raise LLMError("gateway returned an unexpected model list")
 
 
     async def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 10) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=timeout) as c:
-                r = await c.request(method, f"{self.base_url}{path}", json=body, headers=self._headers())
+            r = await self._http().request(method, f"{self.base_url}{path}", json=body, headers=self._headers(), timeout=timeout)
         except httpx.HTTPError as e:
             raise LLMError(f"gateway unreachable: {type(e).__name__}") from e
         if r.status_code != 200:
@@ -92,7 +109,7 @@ class LLM:
             if NO_DB_RE.search(msg):
                 raise LLMError(NO_DB)
             raise LLMError(f"gateway {r.status_code}: {msg}")
-        return r.json()
+        return _json(r)
 
     async def model_info(self) -> list[dict]:
         """Every deployment the gateway has: [{name, id, api_base, model, stored}].
@@ -127,6 +144,17 @@ class LLM:
 NO_DB_RE = re.compile(r"STORE_MODEL_IN_DB|no db connected|database_url|prisma", re.I)
 NO_DB = ("adding models from bunch needs the gateway's database: start with --profile keys and set "
          "DATABASE_URL and STORE_MODEL_IN_DB=True (docs/models.md, \"Adding models from the viewer\")")
+
+
+def _json(r: httpx.Response) -> dict:
+    """The response body as a JSON object, or LLMError (a proxy's error page can arrive with status 200)."""
+    try:
+        data = r.json()
+    except ValueError as e:
+        raise LLMError("gateway returned something that isn't JSON") from e
+    if not isinstance(data, dict):
+        raise LLMError("gateway returned an unexpected answer")
+    return data
 
 
 def _short_error(r: httpx.Response) -> str:

@@ -351,6 +351,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         yield
         for t in tasks:
             t.cancel()
+        if hasattr(llm, "aclose"):
+            await llm.aclose()
 
     app = FastAPI(title="bunch", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
