@@ -246,7 +246,7 @@ Machine endpoints (machine key, JSON; `clients/worker.py` uses them):
 | Method & path | Body / query | Returns |
 |---|---|---|
 | `POST /api/v1/machine/hello` | `{hostname, addresses, clis, max_power, dirs, ollama?: {port, models}}` | `{machine, agents: [config…]}` |
-| `GET /api/v1/machine/read` | `wait` (s, max 60) | `{jobs: [{agent, id, room, sender, human, text, parent, room_summary}]}` |
+| `GET /api/v1/machine/read` | `wait` (s, max 60) | `{jobs: [{agent, id, room, sender, human, wake, text, parent, room_summary, recent, note, folder, created, age}]}` (`age`: seconds since the message was sent, by the hub's clock; `recent`: the latest lines of the room; `note`: the room's bot-mode note; `folder`: the room's shared folder, if any) |
 | `POST /api/v1/machine/post` | `{agent, room, text, re?}` | `ok #id` (only for this machine's agents) |
 | `POST /api/v1/machine/report` | `{agent, status: online\|busy\|cooling, tokens?, calls?, until?, room?}` | `ok used/budget` or `over budget used/budget` |
 | `POST /mcp` | JSON-RPC | MCP (Streamable HTTP, JSON responses) |

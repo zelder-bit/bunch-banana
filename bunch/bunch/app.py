@@ -687,6 +687,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                     jobs.append({"agent": name, "folder": {"kind": shared["kind"], "about": folders.ABOUT[shared["kind"]]}
                                  if shared else None, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "wake": True, "created": r["created"],
+                                 "age": max(0.0, time.time() - r["created"]),
                                  "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
                                  "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
                                  "parent": {"id": parent["id"], "sender": parent["sender"],

@@ -1224,6 +1224,8 @@ def test_worker_parses_cli_output_and_limits():
     now = 1_000_000.0
     assert w.reset_time("You've hit your usage limit. Try again in 2 hours 5 minutes.", now) == now + 7500
     assert w.reset_time("quota exceeded", now) == now + w.COOLDOWN
+    # #69: an earlier "in " with no number must not hide the real one
+    assert w.reset_time("You're in a usage limit. Resets in 2h", now) == now + 7200
     assert w.reset_time("limit reached, resets 3pm", now) > now
 
 
