@@ -654,8 +654,12 @@
   }
 
   // Machines: a computer running clients/worker.py, whose CLI logins answer for its agents.
-  function installBlock(name, key) {
-    const cmd = `python3 worker.py install --hub ${location.origin} --key ${key}`;
+  function installBlock(name, key, rotated) {
+    const cmd = rotated ? `python3 worker.py rotate-key --key ${key}` : `python3 worker.py install --hub ${location.origin} --key ${key}`;
+    if (rotated) return [h("strong", null, `New key for ${name}`), h("span", { class: "muted" }, ": run this on it, in the bunch repo's clients/ folder. It swaps the key and restarts the worker; its power and folders stay as they are. Shown once."),
+      h("code", null, cmd),
+      h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
+        try { await navigator.clipboard.writeText(cmd); toast("Command copied", "good"); } catch { toast("Select the command and copy it", "bad"); } } }, "Copy")];
     return [h("strong", null, `Pair ${name}`), h("span", { class: "muted" }, ": run this on it, as the user logged in to Claude Code, Codex or Antigravity (worker.py is in the bunch repo's clients/ folder). Shown once."),
       h("code", null, cmd),
       h("span", { class: "muted small" }, "Its agents can only answer until you allow more. To let them read a folder, add --max-power read --dirs ~/code/app "
@@ -674,10 +678,10 @@
       ["Agents", m.agents.join(", ") || "none yet"],
     ];
     const rotate = async () => {
-      if (!confirm(`Give ${m.name} a new key? Its worker stops until you run the new install command there.`)) return;
+      if (!confirm(`Give ${m.name} a new key? Its worker stops until you run the new key command there.`)) return;
       await act(async () => {
         const r = await api(`/api/admin/machines/${enc(m.name)}/rotate`, { method: "POST" });
-        keyBox.replaceChildren(...installBlock(m.name, r.key)); keyBox.hidden = false;
+        keyBox.replaceChildren(...installBlock(m.name, r.key, true)); keyBox.hidden = false;
       });
     };
     const remove = async () => {

@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 
 
@@ -51,3 +52,49 @@ def test_handle_passes_clean_env(monkeypatch):
     assert "env" in seen, "subprocess.run was not reached"
     assert "BUNCH_MACHINE_KEY" not in seen["env"] and "WORKER_DIRS" not in seen["env"]
     assert seen["env"]["PATH"] == "/usr/bin"
+
+
+
+def test_merged_env_keeps_what_was_not_given():
+    w = _load_worker()
+    old = 'BUNCH_URL=http://old\nBUNCH_MACHINE_KEY=k1\nWORKER_MAX_POWER=full\nWORKER_DIRS=/srv\nWORKER_TIMEOUT=900\n'
+    text, kept = w.merged_env(old, {'BUNCH_URL': 'http://new', 'BUNCH_MACHINE_KEY': 'k2'}, {'WORKER_MAX_POWER': 'answer', 'WORKER_COOLDOWN': '60'})
+    lines = text.strip().split('\n')
+    assert 'BUNCH_URL=http://new' in lines
+    assert 'BUNCH_MACHINE_KEY=k2' in lines
+    assert 'WORKER_MAX_POWER=full' in lines
+    assert 'WORKER_DIRS=/srv' in lines
+    assert 'WORKER_TIMEOUT=900' in lines
+    assert 'WORKER_COOLDOWN=60' in lines
+    assert kept == ['WORKER_MAX_POWER', 'WORKER_DIRS', 'WORKER_TIMEOUT']
+
+def test_merged_env_fresh_install_uses_defaults():
+    w = _load_worker()
+    text, kept = w.merged_env('', {'BUNCH_URL': 'u'}, {'WORKER_MAX_POWER': 'answer'})
+    assert text == 'BUNCH_URL=u\nWORKER_MAX_POWER=answer\n'
+    assert kept == []
+
+def test_install_twice_keeps_power_and_dirs(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    w = _load_worker()
+    monkeypatch.setattr(w.subprocess, 'run', lambda *a, **kw: type('P', (), {'returncode': 0})())
+    w.install(['--hub', 'http://hub', '--key', 'k1', '--max-power', 'full', '--dirs', '/srv/app'])
+    w.install(['--hub', 'http://hub', '--key', 'k2'])
+    env_path = tmp_path / '.config/bunch/bunch-worker.env'
+    content = env_path.read_text()
+    assert 'BUNCH_MACHINE_KEY=k2' in content
+    assert 'WORKER_MAX_POWER=full' in content
+    assert 'WORKER_DIRS=/srv/app' in content
+    assert 'k1' not in content
+    assert (env_path.stat().st_mode & 0o777) == 0o600
+
+def test_rotate_key_changes_only_the_key(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    w = _load_worker()
+    monkeypatch.setattr(w.subprocess, 'run', lambda *a, **kw: type('P', (), {'returncode': 0})())
+    w.install(['--hub', 'http://hub', '--key', 'k1', '--max-power', 'read'])
+    w.rotate_key(['--key', 'k9'])
+    env_path = tmp_path / '.config/bunch/bunch-worker.env'
+    content = env_path.read_text()
+    assert 'BUNCH_MACHINE_KEY=k9' in content
+    assert 'WORKER_MAX_POWER=read' in content
