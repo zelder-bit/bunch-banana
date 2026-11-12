@@ -21,7 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
 from . import mcp as mcpmod
-from .autoreply import autoreply_loop
+from .autoreply import autoreply_loop, forget_room
 from .config import Settings, load
 from . import folders
 from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
@@ -311,7 +311,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise SystemExit(f"There is {'a person' if row['kind'] == 'human' else 'an agent'} named '{name}', but the hub "
                              f"posts its own notes under that name. Remove it, then start again:\n"
                              f"  docker compose run --rm bunch python -m bunch.cli remove {name}")
-    store.ensure_human(s.human_name)
+    try:
+        store.ensure_human(s.human_name)
+    except ValueError:
+        store.db.close()
+        raise SystemExit(f"BUNCH_HUMAN_NAME can't be '{s.human_name}': there is an agent with that name. "
+                         f"Pick another name, or remove the agent:\n"
+                         f"  docker compose run --rm bunch python -m bunch.cli remove {s.human_name}") from None
     llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens)
     hub = Hub(store, s, llm)
 
@@ -447,6 +453,11 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     # -------------------------------------------------------------- basics
     @app.get("/healthz", include_in_schema=False)
     async def healthz():
+        try:  # a locked or missing volume must not report healthy
+            store.q("SELECT 1 FROM agents LIMIT 1")
+        except Exception as e:
+            log.warning("health check: database not answering: %s", e)
+            raise HTTPException(503, "database not answering") from None
         return {"ok": True, "version": __version__}
 
     @app.get("/", include_in_schema=False)
@@ -790,6 +801,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         n = store.delete_room(room)
         if n is None:
             raise HTTPException(404, "no such room")
+        forget_room(room)
         hub.broadcast({"type": "room_deleted", "room": room})
         return {"deleted": room, "messages": n}
 

@@ -26,6 +26,12 @@ DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other 
                   "for other speakers or in the 'sender>to re#id:' format of the list.")
 MAX_INPUT_CHARS = 12_000
 _room_locks: dict[tuple[int, str], asyncio.Lock] = {}  # (event loop, room): auto agents answer one at a time
+
+
+def forget_room(room: str) -> None:
+    """A deleted room's lock would otherwise stay for good. One still held is left for its holder to finish."""
+    for key in [k for k, lock in _room_locks.items() if k[1] == room and not lock.locked()]:
+        del _room_locks[key]
 _gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
 # Small models copy the notes they see in the room, e.g. "(empty answer)" or "(agy failed: ...)": that's no answer.

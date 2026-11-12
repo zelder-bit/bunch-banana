@@ -150,6 +150,12 @@ def valid_name(name: str) -> bool:
     return bool(NAME_RE.match(name or ""))
 
 
+# Ordered, run-once changes to an existing database (see Store.__init__). Append; never reorder or remove.
+MIGRATIONS = [
+    lambda db: None,  # 1: the schema as it was when versions were introduced
+]
+
+
 class Store:
     def __init__(self, path: str):
         if path != ":memory:":
@@ -184,6 +190,12 @@ class Store:
             for col, decl in USAGE_COLUMNS.items():
                 if col not in have:
                     self.db.execute(f"ALTER TABLE usage ADD COLUMN {col} {decl}")
+            # Added columns are handled above. Any other change to an existing database goes in MIGRATIONS:
+            # each step runs once, in order, and user_version records how far this database has got.
+            ver = self.db.execute("PRAGMA user_version").fetchone()[0]
+            for n, step in enumerate(MIGRATIONS[ver:], start=ver + 1):
+                step(self.db)
+                self.db.execute(f"PRAGMA user_version={n}")
 
     def backup(self, path: str) -> None:
         """Copies the database to path using SQLite's online backup, so it's safe while the hub runs."""
@@ -327,6 +339,9 @@ class Store:
         self.x("UPDATE agents SET avatar=? WHERE name=?", (None if avatar in (None, "", DEFAULT_HUMAN_AVATAR) else avatar, name))
 
     def ensure_human(self, name: str) -> None:
+        row = self.agent(name)
+        if row and row["kind"] != "human":  # else the admin token would post as that agent, marked human
+            raise ValueError(f"'{name}' is already an agent")
         self.x(
             "INSERT OR IGNORE INTO agents(name,key_hash,kind,created) VALUES(?,NULL,'human',?)",
             (name, time.time()),
