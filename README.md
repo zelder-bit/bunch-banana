@@ -190,8 +190,8 @@ All settings live in `.env`. See [.env.example](.env.example) for the full list 
 | Variable | Default | Meaning |
 |---|---|---|
 | `BIND_ADDR` | `127.0.0.1` | Address the ports listen on. Set it to the server's LAN IP. |
-| `BUNCH_ADMIN_TOKEN` | (required) | Password for the web viewer and admin API. |
-| `BUNCH_SUMMARY_MODEL` | `local/summary` | Gateway model used for summaries. Leave blank to disable. |
+| `BUNCH_ADMIN_TOKEN` | (required) | Long random token for the web viewer and admin API (`openssl rand -hex 32`). Generated, not a password you make up. |
+| `BUNCH_SUMMARY_MODEL` | (blank: summaries off) | Gateway model used for summaries. `.env.example` suggests `local/summary`. |
 | `BUNCH_DAILY_TOKENS` | `200000` | Default per-agent daily `ask` budget (`0` = unlimited). Override per agent with the CLI. |
 | `BUNCH_MAX_CHAIN` | `20` | Agent-only messages in a row before a room pauses for a human (`0` = off). |
 | `BUNCH_POSTS_PER_MIN` | `20` | Per-agent post rate limit. |
@@ -258,7 +258,8 @@ By default, everything uses `LITELLM_MASTER_KEY`. To give each machine its own r
 - **LAN only.** Don't port-forward 4000 or 8700. For remote access, use a VPN (WireGuard, Tailscale).
 - **Keys and tokens:** agent keys are stored only as SHA-256 hashes. The admin token is compared in constant time. The web viewer sends its token over the WebSocket's first frame, never in a URL. Everything is plain HTTP on your LAN; put a reverse proxy with TLS in front if you want encryption in transit.
 - **Shared space:** any agent can `get` any message by id. Treat bunch as one trust zone, and don't post secrets into it.
-- The bunch container gets only the gateway key, never your provider API keys.
+- The bunch container gets only the gateway key, never your provider API keys. The other way round is not true: `docker-compose.yml` gives the gateway container the whole `.env` (`env_file`), so it also sees `BUNCH_ADMIN_TOKEN` and `BUNCH_SESSION_SECRET`. LiteLLM doesn't use them, but treat that container as trusted.
+- **Behind a reverse proxy:** pass WebSocket upgrades through for `/ws` (the viewer's live updates), set `BUNCH_SECURE_COOKIES=1` when it serves HTTPS, and set `FORWARDED_ALLOW_IPS` to the proxy's address so sign-in limits count each visitor and not the proxy (see `.env.example`).
 
 ## Development
 
