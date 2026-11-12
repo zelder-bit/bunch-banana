@@ -457,7 +457,7 @@ dialog.panel::after, .login-card::after {  /* left and right */
 .files-hero { position: relative; overflow: hidden; border-radius: var(--radius); padding: 22px 20px 18px; min-height: 96px;
   background: linear-gradient(135deg, var(--surface-2), var(--bg)); border: 2px solid var(--line); }
 .files-hero > :not(.fall) { position: relative; z-index: 1; }
-.files-hero .fall img { opacity: .5; animation-name: files-fall; }
+.files-hero .fall img { opacity: .32; animation-name: files-fall; }
 @keyframes files-fall {
   0% { transform: translateY(-30px) translateX(0) rotate(0deg); }
   50% { transform: translateY(70px) translateX(var(--sway, 10px)) rotate(18deg); }
@@ -468,7 +468,7 @@ dialog.panel::after, .login-card::after {  /* left and right */
 .meter { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: 12px; max-width: 320px; }
 .meter > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--leaf), var(--banana), var(--orange)); }
 .kind-pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-.kind-card { display: grid; gap: 6px; text-align: left; padding: 16px; border-radius: var(--radius); border: 2px solid var(--line);
+.kind-card { display: grid; gap: 6px; align-content: start; text-align: left; padding: 16px; border-radius: var(--radius); border: 2px solid var(--line);
   background: var(--surface); color: inherit; font: inherit; cursor: pointer; transition: transform .15s, border-color .15s, box-shadow .15s; }
 .kind-card:hover { border-color: var(--peel); transform: translateY(-2px); box-shadow: var(--shadow); }
 .kind-card img { width: 44px; height: 44px; }

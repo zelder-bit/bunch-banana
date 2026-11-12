@@ -81,7 +81,7 @@
                  pattern="[a-z0-9][a-z0-9_.\-]{0,31}" title="lowercase letters, digits, _ . - (its hostname works well)" required>
         </form>
         <button class="btn small ghost admin-only" id="modelsBtn" type="button" style="margin:8px 0">Models…</button>
-        <button class="btn small ghost admin-only" id="filesBtn" type="button" style="margin:8px 0">Files…</button>
+        <button class="btn small ghost admin-only" id="filesBtn" type="button" style="margin:8px 0">Attachments…</button>
         <div id="keyOut" class="key-out" hidden></div>
 
         <div class="admin-only">
@@ -105,7 +105,7 @@
           <h1><span id="roomName" tabindex="-1">bunch</span><span id="roomCount" class="muted"></span>
             <button class="btn small ghost room-bot" id="botMode" type="button" aria-pressed="false" hidden
               title="Agents hand work to each other without waiting for you, until one posts [done]">Bot mode: off</button>
-            <button class="btn small ghost room-files" id="filesBtn" type="button" hidden>Files</button>
+            <button class="btn small ghost room-files" id="roomFilesBtn" type="button" hidden>Files</button>
             <button class="icon-btn room-more" id="roomMore" type="button" popovertarget="roomMenu" aria-label="Room options" title="Room options" hidden>⋯</button></h1>
           <div id="roomMenu" class="menu" popover>
             <button type="button" class="menu-item danger" id="deleteRoom">Delete room…</button>
@@ -352,9 +352,9 @@
     $("botMode").textContent = "Bot mode: " + (cur?.bot ? "on" : "off");
     $("botMode").setAttribute("aria-pressed", String(!!cur?.bot));
     $("roomMore").hidden = !me.admin || !cur;
-    $("filesBtn").hidden = !cur || (!cur.folder && !me.admin);   // admins can add a folder; everyone can open one
-    $("filesBtn").replaceChildren("Files", ...(cur?.folder ? [h("span", { class: "chip " + cur.folder }, cur.folder === "git" ? "git" : "plain")] : []));
-    $("filesBtn").title = cur?.folder ? "This room's shared folder" : "Give this room a shared folder";
+    $("roomFilesBtn").hidden = !cur || (!cur.folder && !me.admin);   // admins can add a folder; everyone can open one
+    $("roomFilesBtn").replaceChildren("Files", ...(cur?.folder ? [h("span", { class: "chip " + cur.folder }, cur.folder === "git" ? "git" : "plain")] : []));
+    $("roomFilesBtn").title = cur?.folder ? "This room's shared folder" : "Give this room a shared folder";
   }
 
   // The summary shows two lines; "more" opens the rest. It stays open while the summary updates, until you leave the room.
@@ -1127,7 +1127,7 @@
       h("span", { class: "muted small" }, f.kind === "git" ? "Each file you add is recorded under your name." : "A file with the same name is replaced, with no undo."));
     return drop;
   }
-  $("filesBtn").onclick = () => { if (current) openFiles(current); };
+  $("roomFilesBtn").onclick = () => { if (current) openFiles(current); };
 
   $("deleteRoom").onclick = async () => {
     closeRoomMenu();
