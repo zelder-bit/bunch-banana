@@ -1953,3 +1953,30 @@ def test_old_database_with_a_bunch_row_refuses_to_start(tmp_path, kind):
     finally:
         del os.environ["BUNCH_DB"]
     create_app(Settings(db_path=path, admin_token=ADMIN), FakeLLM())  # starts now
+
+
+def test_summarizer_skips_a_failing_message(env, monkeypatch):
+    """#65: one message the model rejects must not block the others, and is given up on after 3 tries."""
+    c, k, app, llm = env
+    hub = app.state.hub
+    import bunch.summarizer as summ
+    summ._attempts.clear()
+    tool(c, k["alice"], "post", room="r", text="x" * 400)
+    tool(c, k["alice"], "post", room="r", text="y" * 400)
+
+    async def failing_chat(model, messages, max_tokens, user=None):
+        if "xxxx" in messages[1]["content"]:
+            raise RuntimeError("model rejected the input")
+        return ("fine", 1)
+
+    monkeypatch.setattr(llm, "chat", failing_chat)
+    auto = lambda: [r["auto_sum"] for r in hub.store.q("SELECT auto_sum FROM messages ORDER BY id")]
+    asyncio.run(summarize_once(hub))
+    assert auto() == [1, 0] and summ._last_failures == 1
+    assert hub.store.q("SELECT summary FROM messages ORDER BY id")[1]["summary"] == "fine"
+    asyncio.run(summarize_once(hub))
+    assert auto() == [1, 0]
+    asyncio.run(summarize_once(hub))
+    assert auto() == [0, 0] and not summ._attempts  # third failure: keep the truncated summary, stop retrying
+    asyncio.run(summarize_once(hub))
+    assert summ._last_failures == 0
