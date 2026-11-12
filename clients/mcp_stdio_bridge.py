@@ -9,6 +9,7 @@ Client config example:
 import json
 import os
 import sys
+import http.client
 import urllib.error
 import urllib.request
 
@@ -29,6 +30,10 @@ def forward(line: str):
         detail = e.read().decode()[:200]
     except urllib.error.URLError as e:
         detail = f"bunch unreachable: {e.reason}"
+    except (OSError, http.client.HTTPException) as e:
+        # a read timeout during a long wait, or the hub restarting mid-request: answer with an error the
+        # MCP client can show, and keep running
+        detail = f"bunch unreachable: {e or type(e).__name__}"
     try:
         mid = json.loads(line).get("id")
     except Exception:
