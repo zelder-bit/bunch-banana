@@ -96,6 +96,15 @@ def main():
                         answer(m, me)
                     except urllib.error.HTTPError as e:
                         print(f"reply failed: {e.read().decode()[:200]}", file=sys.stderr)
+                    except (urllib.error.URLError, TimeoutError, ConnectionError):
+                        raise  # the hub is unreachable: wait and retry below
+                    except Exception as e:  # one bad message must not end the responder
+                        print(f"#{m.get('id')} failed: {e!r}", file=sys.stderr)
+                        try:
+                            req("POST", "/api/v1/post", {"room": m["room"], "re": m["id"],
+                                                         "text": f"({me} failed: {type(e).__name__}; not answered)"})
+                        except Exception:
+                            pass
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             print(f"bunch unreachable ({e}); retrying in 10s", file=sys.stderr)
             time.sleep(10)

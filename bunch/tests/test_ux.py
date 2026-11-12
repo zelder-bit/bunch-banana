@@ -9,7 +9,7 @@ from bunch import autoreply
 from bunch.autoreply import autoreply_once
 from bunch.router import route
 
-from .test_bunch import _load_worker, _machine, adm, env, h  # noqa: F401  (env is a fixture)
+from .test_bunch import _load_worker, _machine, _on, adm, env, h  # noqa: F401  (env is a fixture)
 
 
 def _auto(c, *names):
@@ -247,3 +247,81 @@ def test_router_timeout_setting_reads_the_environment(monkeypatch):
     assert load().router_timeout == 8.0
     monkeypatch.setenv("BUNCH_ROUTER_TIMEOUT", "3.5")
     assert load().router_timeout == 3.5
+
+
+# --------------------------------------------------------------- #63: jobs survive a worker that never answers
+def _job_ids(c, key):
+    return [j["id"] for j in c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"]]
+
+
+def test_unanswered_job_is_offered_again_but_not_for_ever(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")
+    mid = int(hub.post("savannah", "r", "@alice hello", human=True).split("#")[1].split()[0])
+    assert _job_ids(c, key) == [mid]     # fetched; the worker dies before replying
+    assert _job_ids(c, key) == [mid]     # so it is offered once more
+    assert _job_ids(c, key) == []        # and then left alone: a job that kills the worker must not loop
+
+
+def test_answered_job_is_not_offered_again(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")
+    mid = int(hub.post("savannah", "r", "@alice hello", human=True).split("#")[1].split()[0])
+    assert _job_ids(c, key) == [mid]
+    r = c.post("/api/v1/machine/post", headers=h(key), json={"agent": "alice", "room": "r", "text": "hi", "re": mid})
+    assert r.status_code == 200, r.text
+    assert _job_ids(c, key) == []
+
+
+def test_job_survives_a_hub_restart(env):
+    """What the hub knew only in memory (who was offered what, who was waiting) is gone after a restart;
+    the unanswered message is still found in the database."""
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")
+    mid = int(hub.post("savannah", "r", "@alice hello", human=True).split("#")[1].split()[0])
+    assert _job_ids(c, key) == [mid]
+    hub.offered.clear()
+    hub.held.clear()
+    assert _job_ids(c, key) == [mid]
+
+
+def test_old_unanswered_messages_stay_quiet(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")
+    mid = int(hub.post("savannah", "r", "@alice hello", human=True).split("#")[1].split()[0])
+    assert _job_ids(c, key) == [mid]
+    hub.store.x("UPDATE messages SET created=created-3600 WHERE id=?", (mid,))
+    assert _job_ids(c, key) == []
+
+
+def test_worker_reports_a_job_that_blows_up_and_carries_on(env, monkeypatch):
+    w = _load_worker()
+    wk, said, handled = w.Worker(), [], []
+
+    def handle(job):
+        handled.append(job["id"])
+        if job["id"] == 1:
+            raise KeyError("text")
+    wk.handle, wk.hello = handle, lambda force=False: None
+    wk.reply = lambda job, text: said.append((job["id"], text))
+    batches = iter([{"jobs": [{"id": 1, "agent": "bob", "sender": "s", "room": "r"},
+                              {"id": 2, "agent": "bob", "sender": "s", "room": "r"}]}])
+
+    def req(*a, **kw):
+        try:
+            return next(batches)
+        except StopIteration:
+            raise SystemExit
+    monkeypatch.setattr(w, "req", req)
+    with pytest.raises(SystemExit):
+        wk.run()
+    assert handled == [1, 2]
+    assert len(said) == 1 and said[0][0] == 1 and "failed on" in said[0][1] and "KeyError" in said[0][1]

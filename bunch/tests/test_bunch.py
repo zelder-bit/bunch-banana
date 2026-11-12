@@ -950,10 +950,10 @@ def test_machine_reads_jobs_and_speaks_only_for_its_agents(env):
     jobs = c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"]
     assert [(j["agent"], j["text"]) for j in jobs] == [("alice", "@alice hi from the laptop")]
     assert jobs[0]["human"] and jobs[0]["parent"] is None
-    assert c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"] == []
     r = c.post("/api/v1/machine/post", json={"agent": "alice", "room": "r", "text": "hello!", "re": jobs[0]["id"]},
                headers=h(key))
     assert r.status_code == 200
+    assert c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"] == []  # answered: not offered again (#63)
     assert c.post("/api/v1/machine/post", json={"agent": "alice", "room": "r", "text": "x"},
                   headers=h(other)).status_code == 403
     assert c.post("/api/v1/machine/post", json={"agent": "bob", "room": "r", "text": "x"},

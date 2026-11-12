@@ -21,6 +21,8 @@ WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long
 RECENT_LINES = 8  # one-line summaries of the latest messages shown with every answer prompt
 DUPLICATE_WINDOW = 600  # the same text from the same human this soon after is a double send
 MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a human message
+REDELIVER_WINDOW = 900  # a job a worker fetched but never answered is offered again while it is this fresh
+MAX_OFFERS = 2          # ...but only this many times in all, so a job that kills its worker can't loop
 TURN_WAIT = 180  # agents addressed together answer in turn; stop waiting on a slow one after this long
 
 # Bot mode (per room, admins switch it on): agents hand work to each other without a person, until one
@@ -116,7 +118,8 @@ class Hub:
         self._event = asyncio.Event()                # wakes long-polling readers
         self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
         self._hosts_at = 0.0
-        self.held: dict[str, dict[int, None]] = {}  # worker agent -> message ids waiting for its turn
+        self.held: dict[str, dict[int, None]] = {}  # unused since #63 (see unanswered); kept for callers
+        self.offered: dict[tuple[str, int], int] = {}  # (worker agent, message id) -> times handed to its worker
 
     # ---------------------------------------------------------------- events
     def broadcast(self, event: dict) -> None:
@@ -313,6 +316,18 @@ class Hub:
         if m["body"]:
             s += f" (+{fmt_size(len(m['body']))})"
         return s
+
+    def unanswered(self, agent: str) -> list:
+        """Recent messages addressed to agent that it hasn't replied to, whether or not its cursor has
+        passed them. The cursor moves when a worker fetches a job, before anything confirms it was
+        handled; this is what lets the job be offered again after a crash, a lost response or a hub
+        restart, and what keeps a message that is waiting for its turn."""
+        if len(self.offered) > 5000:  # only recent messages matter; don't grow for ever
+            self.offered.clear()
+        return self.store.q(
+            "SELECT m.* FROM messages m WHERE m.created>? AND m.sender!=? AND instr(m.recipients, ?) > 0 "
+            "AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to=m.id AND r.sender=?) ORDER BY m.id",
+            (time.time() - REDELIVER_WINDOW, agent, f",{agent},", agent))
 
     def read(self, agent: str, room: str | None = None, everything: bool = False) -> str:
         header, rows, more = self.read_rows(agent, room, everything)
