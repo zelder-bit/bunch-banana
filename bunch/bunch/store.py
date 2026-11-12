@@ -185,6 +185,17 @@ class Store:
                 if col not in have:
                     self.db.execute(f"ALTER TABLE usage ADD COLUMN {col} {decl}")
 
+    def restore(self, path: str) -> None:
+        """Replaces this database with a backup made by backup(). Run with the hub stopped."""
+        try:
+            src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            src.execute("SELECT 1 FROM agents LIMIT 1")
+        except sqlite3.Error as e:
+            raise ValueError(f"{path} is not a bunch backup ({e})") from None
+        with self.lock, src:
+            src.backup(self.db)
+        src.close()
+
     def backup(self, path: str) -> None:
         """Copies the database to path using SQLite's online backup, so it's safe while the hub runs."""
         tmp = path + ".tmp"
@@ -346,6 +357,11 @@ class Store:
     def delete_agent(self, name: str) -> bool:
         cur = self.x("DELETE FROM agents WHERE name=? AND kind='agent'", (name,))
         self.x("DELETE FROM cursors WHERE agent=?", (name,))
+        if cur.rowcount > 0:
+            # nothing may be left for a later agent of the same name to inherit
+            self.x("DELETE FROM usage WHERE agent=?", (name,))
+            if self.setting("first_responder") == name:
+                self.set_setting("first_responder", "")
         return cur.rowcount > 0
 
     def delete_reserved(self, name: str) -> bool:
@@ -561,6 +577,12 @@ class Store:
             self.x("DELETE FROM messages WHERE id=?", (mid,))
             # the rolling summary may quote it: start the summary over
             self.x("UPDATE rooms SET summary='', summary_upto=0 WHERE name=? AND summary_upto>=?", (row["room"], mid))
+            # files only this message cited would stay on disk with nothing pointing at them
+            # (a short message keeps its text in summary, with no body)
+            ids = {int(i) for i in re.findall(r"\(file:(\d+)\)", row["body"] or row["summary"] or "")}
+            self.delete_files(ids=[i for i in sorted(ids) if not self.one(
+                "SELECT 1 FROM messages WHERE body LIKE ? OR (body IS NULL AND summary LIKE ?) LIMIT 1",
+                (f"%(file:{i})%", f"%(file:{i})%"))])
         return row
 
     def message(self, mid: int):
