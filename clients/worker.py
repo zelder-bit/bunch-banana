@@ -511,7 +511,7 @@ def reset_time(msg, now=None):
     m = re.search(r"\|(\d{10})\b", msg)  # Claude: "...limit reached|1767225600"
     if m:
         return float(m.group(1))
-    m = re.search(r"\bin\s+(?:(\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?", msg, re.I)
+    m = re.search(r"\bin\s+(?=\d)(?:(\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?", msg, re.I)
     if m and (m.group(1) or m.group(2)):
         return now + int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60
     m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", msg, re.I)
@@ -607,8 +607,13 @@ class Worker:
         # so then answer humans always, other agents only when they explicitly @mention us.
         if not job["human"] and not job.get("wake", mentions(job["text"], name)):
             return
-        if job["created"] < self.started - STALE_AFTER:
-            return
+        # Backlog from before this worker started. "age" is measured on the hub's clock, so a clock that is
+        # off on this machine can't make every job look old; hubs that don't send it fall back to "created".
+        age = job.get("age")
+        stale = (age - (time.time() - self.started) > STALE_AFTER) if isinstance(age, (int, float)) \
+            else job["created"] < self.started - STALE_AFTER
+        if stale:
+            return self.reply(job, f"(skipped: sent before {self.machine} started)")
         cfg = self.agents.get(name)
         if not cfg:  # made in the viewer since the last hello: the hub already handed us its message
             self.hello(force=True)
@@ -626,6 +631,8 @@ class Worker:
         system = (cfg.get("system") or DEFAULT_SYSTEM.format(name=name)) + \
             f" Keep the answer under about {int(cfg.get('max_output') or 800)} tokens." + PLAIN_REPLY
         power, d = effective_power(cfg)
+        if power != "answer" and d and not os.path.isdir(d):
+            return self.reply(job, f"(the folder {d} is missing on {self.machine}; not answered)")
         # A room with a shared folder: work there instead of the agent's own folder, when this machine allows it.
         shared, shared_note = None, ""
         if job.get("folder") and capped_power(cfg) != "answer":
@@ -738,7 +745,7 @@ class Worker:
                     sys.exit("the hub rejected this machine key (deleted or rotated?); run install again")
                 print(f"hub error {e.code}; retrying in 10s", file=sys.stderr)
                 time.sleep(10)
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            except OSError as e:  # URLError, timeouts (socket.timeout on Python < 3.10), resets
                 print(f"bunch unreachable ({e}); retrying in 10s", file=sys.stderr)
                 time.sleep(10)
 
