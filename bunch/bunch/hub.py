@@ -313,7 +313,7 @@ class Hub:
             root = self.store.message(root["reply_to"]) or root
         if root["human"]:
             return ""  # a person is in the chain: any other reason it won't wake is not this hint's business
-        asked = {n.lower().lstrip("@").rstrip(".") for n in (to or [])}
+        asked = {n.strip().lower().lstrip("@").rstrip(".") for n in (to.split(",") if isinstance(to, str) else to or [])}
         out = []
         for n in _recips(m):
             row = self.store.agent(n)
