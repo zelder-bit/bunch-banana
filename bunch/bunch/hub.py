@@ -224,6 +224,26 @@ class Hub:
         hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, room, text)
         return f"ok #{mid}" + hint
 
+    def _not_answered(self, agent: str, m, note: str) -> None:
+        if self.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], agent)):
+            return
+        # These replies close a job even when rate/chain limits prevent an ordinary post.
+        mid = self.store.add_message(m["room"], agent, False, [m["sender"]], note,
+                                     None, m["id"], False)
+        self._notify(mid)
+
+    def rejected_reply(self, agent: str, room: str, reply_to: int | None, why: str) -> None:
+        try:
+            m = self.store.message(reply_to) if reply_to is not None else None
+            room = (room or "").strip().lower().lstrip("#")
+            if not m or room != m["room"] or agent not in _recips(m):
+                return
+            self.offered[(agent, reply_to)] = MAX_OFFERS  # fallback if storing the note fails
+            why = "the room is paused" if why.startswith("paused:") else one_line(why, 180)
+            self._not_answered(agent, m, f"({agent}'s answer was not posted: {why}; not answered)")
+        except Exception:
+            pass  # the note is a courtesy; keep the original rejection even if it fails
+
     def finish_routing(self, mid: int, to: list[str] | None) -> None:
         """Attaches the recipients chosen for a message posted with routing=True and lets agents read it.
         With nobody chosen it stays a message for the whole room."""
@@ -282,7 +302,10 @@ class Hub:
         n = self.s.max_chain
         if n <= 0 or self.bot(room):
             return False
-        rows = self.store.q("SELECT human FROM messages WHERE room=? ORDER BY id DESC LIMIT ?", (room, n))
+        # A failed answer neither advances the chain nor resets it.
+        rows = self.store.q("SELECT human FROM messages WHERE room=? "
+                            "AND (human=1 OR COALESCE(body, summary) NOT LIKE '(%; not answered)') "
+                            "ORDER BY id DESC LIMIT ?", (room, n))
         return len(rows) >= n and not any(r["human"] for r in rows)
 
     def _check_chain(self, room: str) -> None:
@@ -429,7 +452,8 @@ class Hub:
         for p in self.store.q("SELECT * FROM messages WHERE room=? AND sender=? AND id<? AND created>? "
                               "ORDER BY id DESC LIMIT 5", (m["room"], m["sender"], m["id"], m["created"] - DUPLICATE_WINDOW)):
             if " ".join((p["body"] or p["summary"] or "").split()) == text and \
-                    self.store.one("SELECT 1 FROM messages WHERE reply_to=?", (p["id"],)):
+                    self.store.one("SELECT 1 FROM messages WHERE reply_to=? "
+                                   "AND COALESCE(body, summary) NOT LIKE '(%; not answered)'", (p["id"],)):
                 # Only the answer to the first copy in between: a double send (or a resend after a send that
                 # looked failed). Anything else posted in between makes it a deliberate nudge ("see above"
                 # again after more was said), which gets answered.
@@ -781,9 +805,9 @@ class Hub:
             else:
                 continue
             try:
-                self.post(name, m["room"], note, reply_to=mid)
-            except HubError:
-                pass  # rate limit / paused room: the notice is a courtesy
+                self._not_answered(name, m, note)
+            except Exception:
+                pass  # the notice is a courtesy
 
     def worker_report(self, agent: str, status: str, tokens: int = 0, calls: int = 0,
                       until: float | None = None, room: str | None = None, cached: int = 0) -> str:

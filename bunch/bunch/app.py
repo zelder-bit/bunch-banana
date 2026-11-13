@@ -734,7 +734,11 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @app.post("/api/v1/machine/post")
     async def machine_post(body: MachinePostIn, authorization: str | None = Header(None)):
         a = machine_agent(machine_of(authorization), body.agent)
-        return PlainTextResponse(hub.post(a["name"], body.room, body.text, reply_to=body.re))
+        try:
+            return PlainTextResponse(hub.post(a["name"], body.room, body.text, reply_to=body.re))
+        except HubError as e:
+            hub.rejected_reply(a["name"], body.room, body.re, str(e))
+            raise
 
     @app.post("/api/v1/machine/file")
     async def machine_file(request: Request, agent: str, room: str, name: str = "file",
