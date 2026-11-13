@@ -740,6 +740,14 @@ class Worker:
                         self.handle(job)
                     except urllib.error.HTTPError as e:
                         print(f"reply failed: {e.read().decode()[:200]}", file=sys.stderr)
+                    except (urllib.error.URLError, TimeoutError, ConnectionError):
+                        raise  # the hub is unreachable: stop here; it offers the unanswered jobs again
+                    except Exception as e:  # one bad job must not end the worker or take the batch with it
+                        print(f"#{job.get('id')} failed: {e!r}", file=sys.stderr)
+                        try:
+                            self.reply(job, f"(failed on {self.machine}: {type(e).__name__}: {str(e)[:150]}; not answered)")
+                        except Exception:
+                            pass
             except urllib.error.HTTPError as e:
                 if e.code == 401:
                     sys.exit("the hub rejected this machine key (deleted or rotated?); run install again")

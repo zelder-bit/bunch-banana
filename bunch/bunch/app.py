@@ -24,7 +24,7 @@ from . import mcp as mcpmod
 from .autoreply import autoreply_loop, forget_room
 from .config import Settings, load
 from . import folders
-from .hub import MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
+from .hub import MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
 from .llm import LLM, LLMError
 from .router import route, route_agent_post
 from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store
@@ -594,11 +594,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     # ------------------------------------------- agent REST (same text output as MCP)
     @app.get("/api/v1/read")
-    async def api_read(room: str | None = None, all: bool = False, wait: float = 0, format: str = "text",
-                       authorization: str | None = Header(None)):
+    async def api_read(request: Request, room: str | None = None, all: bool = False, wait: float = 0,
+                       format: str = "text", authorization: str | None = Header(None)):
         agent = agent_of(authorization)
         deadline = time.monotonic() + max(0.0, min(wait, 60.0))
         while True:
+            if await request.is_disconnected():
+                return Response(status_code=499)  # the client gave up waiting: don't move its cursor for nobody
             if format == "json":
                 header, rows, more = hub.read_rows(agent, room, all)
                 if rows or header or time.monotonic() >= deadline:
@@ -679,17 +681,23 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             for a in hub.machine_agents(m["name"]):
                 name = a["name"]
                 _h, rows, _more = hub.read_rows(name)
-                held = [store.message(i) for i in hub.held.pop(name, {})]  # read before, waiting for their turn
-                for r in [x for x in held if x] + rows:
+                new = {r["id"] for r in rows}
+                # read before but still unanswered: waiting for their turn, or handed to a worker that died,
+                # lost the response, or was cut off by a hub restart
+                again = [r for r in hub.unanswered(name) if r["id"] not in new]
+                for r in again + rows:
+                    key = (name, r["id"])
+                    if hub.offered.get(key, 0) >= MAX_OFFERS:
+                        continue  # offered twice with no reply: stop, or a job that kills the worker would loop
                     if f",{name}," not in (r["recipients"] or ""):
                         continue  # room chatter: workers only answer what's addressed to them
                     if store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (r["id"], name)):
                         continue  # already answered, e.g. the hub said the machine was offline
                     if hub.duplicate_of(r) or (not r["human"] and not hub.wakes(r, name)):
+                        hub.offered[key] = MAX_OFFERS  # decided once: don't look at it again
                         continue  # a double send, or another agent only naming this one / chain too deep
                     if hub.turn_blocker(r, name):
-                        hub.held.setdefault(name, {})[r["id"]] = None  # the cursor moved on: keep it here
-                        continue
+                        continue  # the cursor moved on, but it stays unanswered: unanswered() brings it back
                     why = hub.over_budget(name)
                     if why:  # the hub enforces budgets, so a restarted worker can't run past one
                         try:
@@ -697,6 +705,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                         except HubError:
                             pass  # rate limit / paused room: the note is a courtesy
                         continue
+                    hub.offered[key] = hub.offered.get(key, 0) + 1
                     parent = store.message(r["reply_to"]) if r["reply_to"] else None
                     shared = store.folder(r["room"])  # the room's shared folder, if it has one (#84)
                     jobs.append({"agent": name, "folder": {"kind": shared["kind"], "about": folders.ABOUT[shared["kind"]]}
