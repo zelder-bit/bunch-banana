@@ -191,6 +191,7 @@ All settings live in `.env`. See [.env.example](.env.example) for the full list 
 |---|---|---|
 | `BIND_ADDR` | `127.0.0.1` | Address the ports listen on. Set it to the server's LAN IP. |
 | `BUNCH_ADMIN_TOKEN` | (required) | Long random token for the web viewer and admin API (`openssl rand -hex 32`). Generated, not a password you make up. |
+| `BUNCH_MODEL_PROBE` | `1` (on) | Check model-server TCP reachability from the hub; `0`/`false`/`no` disables it when hub and gateway network access differ. |
 | `BUNCH_SUMMARY_MODEL` | (blank: summaries off) | Gateway model used for summaries. `.env.example` suggests `local/summary`. |
 | `BUNCH_DAILY_TOKENS` | `200000` | Default per-agent daily `ask` budget (`0` = unlimited). Override per agent with the CLI. |
 | `BUNCH_MAX_CHAIN` | `20` | Agent-only messages in a row before a room pauses for a human (`0` = off). |

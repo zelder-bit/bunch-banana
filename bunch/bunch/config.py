@@ -37,6 +37,7 @@ class Settings:
     human_name: str = "human"      # name you post as from the web viewer
     litellm_url: str = ""          # e.g. http://litellm:4000 ; blank disables ask/summaries
     litellm_key: str = ""
+    model_probe: bool = True      # hub and gateway may have different network access
     summary_model: str = ""        # cheap model for rolling summaries; blank = no LLM summaries
     router_model: str = ""         # cheap model that addresses un-@'d human messages; blank = off
     router_timeout: float = 8.0    # seconds the router model gets before the message goes room-wide
@@ -67,6 +68,7 @@ def load(**overrides) -> Settings:
         human_name=env("BUNCH_HUMAN_NAME", "human").strip().lower() or "human",
         litellm_url=env("LITELLM_URL", "").strip().rstrip("/"),
         litellm_key=env("LITELLM_KEY", "").strip(),
+        model_probe=env("BUNCH_MODEL_PROBE", "1").strip().lower() not in ("0", "false", "no"),
         summary_model=env("BUNCH_SUMMARY_MODEL", "").strip(),
         router_model=env("BUNCH_ROUTER_MODEL", "").strip(),
         router_timeout=_float("BUNCH_ROUTER_TIMEOUT", 8.0),

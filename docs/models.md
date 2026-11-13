@@ -4,7 +4,7 @@ This guide covers how bunch finds out about models, and what to do when you pull
 
 ## How bunch finds models
 
-**bunch never talks to Ollama directly.** Every model goes through the gateway (LiteLLM), and the gateway knows the models listed in `litellm/config.yaml`, plus any added from the viewer (see [Adding models from the viewer](#adding-models-from-the-viewer)).
+**Model requests always go through the gateway.** By default, bunch also checks TCP reachability of known model servers before a request. Every model goes through the gateway (LiteLLM), and the gateway knows the models listed in `litellm/config.yaml`, plus any added from the viewer (see [Adding models from the viewer](#adding-models-from-the-viewer)).
 
 ```
   litellm/config.yaml  ──read at start-up──►  gateway :4000  ──/v1/models──►  bunch (model pickers)
@@ -125,6 +125,12 @@ curl http://<server>:4000/v1/chat/completions \
 ```
 
 The first request can take a while, because Ollama has to load the model into memory. If it fails, `docker compose logs --tail 50 litellm` usually says why. The common causes are a typo in the tag, a model that isn't pulled on that server, a wrong address in `.env`, or a firewall blocking port 11434.
+
+## When a model server cannot be reached
+
+An error such as "local/coder can't answer: its model server 192.0.2.7:11434 isn't reachable from the hub (machine off, address changed, or a firewall)" means the hub could not connect to that server within 3 seconds. Check its address and power, set `OLLAMA_HOST=0.0.0.0`, and allow connections to its port from the gateway's address through the firewall. The hub uses its own reachability as a proxy, but separate containers or hosts can have different network access. If the gateway can reach a server that the hub cannot, set `BUNCH_MODEL_PROBE=0` in `.env` to disable the probe (`false` and `no` also work; default is on).
+
+The check caches both success and failure for 30 seconds per host and port, so models on the same server share the result. Models without an `api_base`, or whose gateway lookup fails, skip it. A successful check only proves the port accepts connections: if the model then stalls, the error names the model and server and says how long the gateway waited. "gateway unreachable" instead means the connection to the gateway itself failed.
 
 ## Using the new model in bunch
 

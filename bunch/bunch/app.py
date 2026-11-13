@@ -322,7 +322,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         raise SystemExit(f"BUNCH_HUMAN_NAME can't be '{s.human_name}': there is an agent with that name. "
                          f"Pick another name, or remove the agent:\n"
                          f"  docker compose run --rm bunch python -m bunch.cli remove {s.human_name}") from None
-    llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens)
+    llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens, model_probe=s.model_probe)
     hub = Hub(store, s, llm)
 
     # SVG is shown too: the viewer only puts files in <img> (no scripts there), and opened directly the
