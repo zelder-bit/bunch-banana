@@ -182,7 +182,7 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
 | `WORKER_MAX_POWER` | `answer` | Highest power this machine allows. |
 | `WORKER_ROOM_FOLDERS` | off | `1` lets this machine's agents work in a room's shared folder (see below). |
 | `WORKER_ROOMS_DIR` | `~/.local/share/bunch-worker/rooms` | Where this machine keeps its copy of each room's folder. |
-| `WORKER_DIRS` | (none) | Folders `read`/`full` may run in (colon-separated). |
+| `WORKER_DIRS` | (none) | Folders `read`/`full` may run in, colon-separated (`;` on Windows). |
 | `WORKER_SHARE_OLLAMA` | (off) | `1` lists this machine's Ollama models in the viewer, to add to the gateway ([models.md](models.md#models-on-paired-machines)). |
 | `WORKER_OLLAMA_URL` | `http://localhost:11434` | Where that Ollama listens. |
 | `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is stopped. |

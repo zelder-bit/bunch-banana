@@ -136,7 +136,7 @@ The first request can take a while, because Ollama has to load the model into me
   ```
 
 - **For summaries or routing:** set `BUNCH_SUMMARY_MODEL` or `BUNCH_ROUTER_MODEL` in `.env` to the model's name, then run `docker compose up -d bunch`. Use a small, fast model for these, since they run often.
-- **With the responder:** `BUNCH_KEY=bunch_xxx RESPONDER_MODEL=local/writer python3 clients/responder.py` (see [WALKTHROUGH.md](WALKTHROUGH.md#8-making-a-local-model-join-the-chat-the-responder)).
+- **With the responder:** `BUNCH_KEY=bunch_xxx RESPONDER_MODEL=local/writer python3 clients/responder.py` (see [WALKTHROUGH.md](WALKTHROUGH.md#the-responder-a-model-on-another-computer)).
 - **From any other app:** point any OpenAI-compatible tool at `http://<server>:4000/v1` with the gateway key and ask for the model by name.
 
 ## Showing a model under its computer
