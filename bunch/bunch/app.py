@@ -619,8 +619,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                 header, rows, more = hub.read_rows(agent, room, all)
                 if rows or header or time.monotonic() >= deadline:
                     out = {"header": header, "more": more,
-                           "messages": [{**hub.message_json(m), "for_me": agent in hub.message_json(m)["to"],
-                                         "size": len(m["body"] or "")} for m in rows]}
+                           "messages": [{**(j := hub.message_json(m, full=True)), "for_me": agent in j["to"]} for m in rows]}
                     for m, row in zip(out["messages"], rows):
                         m.pop("body")
                         if m["for_me"]:  # what responder.py needs to answer in context

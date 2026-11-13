@@ -165,11 +165,11 @@ class Hub:
             pass
 
     @staticmethod
-    def message_json(m) -> dict:
+    def message_json(m, full: bool = False) -> dict:
         return {
             "id": m["id"], "room": m["room"], "sender": m["sender"], "human": bool(m["human"]),
             "to": _recips(m), "summary": m["summary"], "size": len(m["body"] or ""),
-            "body": m["body"] if len(m["body"] or "") <= VIEWER_INLINE_BODY_CHARS else None,
+            "body": m["body"] if full or len(m["body"] or "") <= VIEWER_INLINE_BODY_CHARS else None,  # full: agents get it all
             "reply_to": m["reply_to"], "created": m["created"],
         }
 
