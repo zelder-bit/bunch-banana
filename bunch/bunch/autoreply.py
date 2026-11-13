@@ -148,7 +148,8 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     system += "\n\n" + (SAVE_HELP if has_folder else NO_FOLDER_HELP)
     if note:  # bot mode: keep handing work on instead of waiting for the person
         system += "\n\n" + note
-    hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
+    hub.broadcast({"type": "typing", "agent": name, "room": m["room"],
+                   "model": agent["model"]})  # viewer shows "thinking…"
     empty: list[str] = []
     context = [parts[0], recent or ""]
     others = st.agent_names() - {name}

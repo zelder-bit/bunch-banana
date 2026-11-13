@@ -26,6 +26,7 @@ WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edi
 WORKER_STATUSES = ("online", "busy", "cooling")
 WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long = off or not running
 RECENT_LINES = 8  # one-line summaries of the latest messages shown with every answer prompt
+DOUBLE_SEND_WINDOW = 2  # seconds: the same human text twice this fast is one click sent twice, stored once
 DUPLICATE_WINDOW = 600  # the same text from the same human this soon after is a double send
 MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a human message
 REDELIVER_WINDOW = 900  # a job a worker fetched but never answered is offered again while it is this fresh
@@ -191,6 +192,13 @@ class Hub:
             raise HubError("empty text")
         if len(text) > self.s.max_body:
             raise HubError(f"text too long ({len(text)} > {self.s.max_body} chars)")
+
+        if human:
+            last = self.store.one("SELECT * FROM messages WHERE room=? ORDER BY id DESC LIMIT 1", (room,))
+            if (last and last["sender"] == sender and time.time() - last["created"] < DOUBLE_SEND_WINDOW
+                    and last["reply_to"] == (int(reply_to) if reply_to is not None else None)
+                    and " ".join(text_of(last).split()) == " ".join(text.split())):
+                return f"ok #{last['id']}"
 
         if not human:
             self._check_rate(sender)
