@@ -1471,7 +1471,7 @@ def test_auto_agent_does_not_speak_for_others(env):
     mid = int(hub.post("human", "r", "@bob hi", human=True).split("#")[1])
     bob = dict(hub.store.agent("bob"), model="m", system="")
     asyncio.run(answer(hub, bob, hub.store.message(mid)))
-    assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
+    assert "gave no usable answer" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
 
 
 def test_viewer_post_flags_unknown_mentions(env):

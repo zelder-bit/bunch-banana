@@ -14,7 +14,7 @@ import logging
 import re
 import time
 
-from .hub import Hub, HubError
+from .hub import ECHO_SIMILARITY, Hub, HubError, _shingles
 from .store import text_of
 
 log = logging.getLogger("bunch.autoreply")
@@ -26,6 +26,14 @@ DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other 
                   "write its name without @. Write only your own reply, as plain text: never write lines "
                   "for other speakers or in the 'sender>to re#id:' format of the list.")
 MAX_INPUT_CHARS = 12_000
+MAX_SAVES = 5  # files written from one reply
+SAVE_HELP = ("To save a file in the room's shared folder, put a line `save: <relative/path>` directly above a "
+             "fenced code block holding the whole file. You cannot run anything.")
+NO_FOLDER_HELP = ("You cannot upload, save or run anything here: put code in your reply, and never claim "
+                  "you saved, uploaded or ran something.")
+# "save: path" (maybe in backticks/bold) above a fenced block (maybe a blank line between, maybe a language tag)
+SAVE_RE = re.compile(r"^[ \t]*[*_]*save[*_]*:[*_]*[ \t]*[`*_]*([^\s`*]+?)[`*_]*[ \t]*\n(?:[ \t]*\n)?[ \t]*```[^\n]*\n(.*?)^[ \t]*```[ \t]*$",
+                     re.I | re.M | re.S)
 _room_locks: dict[tuple[int, str], asyncio.Lock] = {}  # (event loop, room): auto agents answer one at a time
 
 
@@ -59,6 +67,56 @@ def _own_reply(text: str, name: str) -> str:
     return "\n".join(lines).strip()
 
 
+SUMMARY_RE = re.compile(r"^[\s#*_>-]*summary of\b", re.I)
+MIN_ECHO_WORDS = 15  # shorter replies may quote context freely
+
+
+def _is_echo(raw: str, name: str, others: set[str], context: list[str]) -> bool:
+    """True when a model went on with the prompt instead of answering it: it addresses itself, continues the
+    room summary, copies the summary or recent messages, or writes lines for other speakers. Conservative:
+    a real answer that quotes a little context is not an echo."""
+    text = _own_reply(raw, name)
+    if re.match(rf"^[\W_]*(?:@{re.escape(name)}\b|(?:hey|hi|hello)[\s,]+@?{re.escape(name)}\b)", text, re.I):
+        return True
+    if SUMMARY_RE.match(text):
+        return True
+    words = len(re.findall(r"\w+", text))
+    if words >= MIN_ECHO_WORDS:  # share of the reply's word trigrams found in the prompt context
+        mine = _shingles(text)
+        theirs = set().union(*(_shingles(c) for c in context if c))
+        if mine and len(mine & theirs) / len(mine) >= ECHO_SIMILARITY:
+            return True
+    lines, in_code, other = [ln for ln in raw.split("\n") if ln.strip()], False, 0
+    first = SPEAKER_RE.match(lines[0]) if lines else None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+        elif in_code or (i == 0 and first and first.group(1).lower() == name.lower()):
+            continue
+        else:
+            sp = SPEAKER_RE.match(line) or re.match(r"^\s*[*@]*([\w.-]+)[*]*:\s", line)
+            if sp and sp.group(1).lower() != name.lower() and (SPEAKER_RE.match(line) or sp.group(1) in others):
+                other += 1
+    return other >= 1 and (not text or (other >= 2 and other * 2 >= len(lines)))
+
+
+async def _save_files(hub: Hub, name: str, room: str, text: str) -> str:
+    """Writes the `save: path` + code block pairs of a reply to the room folder; returns the reply with one
+    status line per file. A failed write is only reported: the reply is posted anyway."""
+    notes = []
+    for mt in list(SAVE_RE.finditer(text))[:MAX_SAVES]:
+        path = mt.group(1)
+        try:
+            await hub.files_write(name, room, path, mt.group(2).encode())
+            notes.append(f"(saved {path} to the room folder)")
+        except HubError as e:
+            notes.append(f"(could not save {path}: {e})")
+        except Exception as e:  # never lose the reply over a file
+            log.warning("%s: save %s failed: %s", name, path, e)
+            notes.append(f"(could not save {path}: {type(e).__name__})")
+    return text + "\n\n" + "\n".join(notes) if notes else text
+
+
 async def answer(hub: Hub, agent, m) -> None:
     name = agent["name"]
     body = text_of(m)
@@ -86,23 +144,38 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     parts.append(f"Message #{m['id']} from {m['sender']}:\n{body[:MAX_INPUT_CHARS]}")
     system = agent["system"] or DEFAULT_SYSTEM.format(name=name)
     note = hub.room_note(m["room"])
+    has_folder = bool(st.folder(m["room"]))
+    system += "\n\n" + (SAVE_HELP if has_folder else NO_FOLDER_HELP)
     if note:  # bot mode: keep handing work on instead of waiting for the person
         system += "\n\n" + note
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
     empty: list[str] = []
+    context = [parts[0], recent or ""]
+    others = st.agent_names() - {name}
+
+    async def ask(prompt: str) -> tuple[str, bool]:
+        raw = (await hub.ask(name, agent["model"], prompt, system, hub.s.ask_max_tokens,
+                             raw=True, empty_notice=empty.append)).strip()
+        return _own_reply(raw, name), _is_echo(raw, name, others, context)
     try:
-        text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens,
-                              raw=True, empty_notice=empty.append)).strip()
+        prompt = "\n\n".join(parts)
+        text, echo = await ask(prompt)
+        if echo:  # it went on with the prompt: one more try, told what to do
+            log.info("%s: echo for #%s, retrying", name, m["id"])
+            text, echo = await ask(f"{prompt}\n\nAnswer only message #{m['id']}, in your own words, as {name}. "
+                                   "Do not summarize the room, do not write for other people, do not address yourself.")
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
-    text = _own_reply(text, name)
-    if FILLER_RE.match(text):
+    if FILLER_RE.match(text) or echo:
         text = ""
     if not text:
         if not m["human"]:
             _gave_up[(name, m["id"])] = m["created"]
             return  # don't answer another agent with noise; they can ask again
-        text = f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)"
+        text = (f"({agent['model']} gave no usable answer; ask again or rephrase)" if echo else
+                f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)")
+    if has_folder:
+        text = await _save_files(hub, name, m["room"], text)
     hub.post(name, m["room"], text, reply_to=m["id"])
     st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))
 
