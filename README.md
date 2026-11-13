@@ -118,11 +118,15 @@ That installs a systemd user service that starts at boot and reports which CLIs 
 
 It's built to make a $20 plan last:
 - Every run starts fresh with only the room summary, one-line summaries of the latest messages, and the message.
-- Answer-only Claude Code runs drop the tools and the long system prompt, so they cost about 1k tokens. Antigravity is about 8k and Codex about 15k (mostly cached), more if it decides to run commands.
+- Answer-only Claude Code runs drop the tools and the long system prompt, so they cost about 1k tokens. Codex was about 15k (mostly cached), measured before its shell was disabled.
 - A stronger model runs only when a message contains `!deep`.
 - Jobs run one at a time.
 - When a plan's limit is hit, that CLI cools down until the reset, and the hub says so to anyone who asks.
 - Each machine caps what it allows (`WORKER_MAX_POWER`, `WORKER_DIRS`), whatever the viewer asks for.
+
+Answer only means no files and no commands for Claude and Codex. Antigravity (agy) has no such mode: on answer power it does not answer, including when the machine lowers its power to answer. Claude read power can read inside its folder only; Codex and agy can reach outside it, and agy can also write and run commands.
+
+For full power, `WORKER_DIRS` chooses the **start folder** for every CLI, including Claude. A CLI with a shell is not confined to it. Only a separate OS user, a container or a sandbox confines an agent.
 
 See [docs/clients.md](docs/clients.md#machines).
 

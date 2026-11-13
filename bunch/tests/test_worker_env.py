@@ -1,5 +1,7 @@
 import importlib.util
 import os
+
+import pytest
 from pathlib import Path
 
 
@@ -85,6 +87,9 @@ def test_install_twice_keeps_power_and_dirs(monkeypatch, tmp_path):
     assert 'BUNCH_MACHINE_KEY=k2' in content
     assert 'WORKER_MAX_POWER=full' in content
     assert 'WORKER_DIRS=/srv/app' in content
+    unit = (tmp_path / '.config/systemd/user/bunch-worker.service').read_text()
+    assert 'NoNewPrivileges=yes' in unit
+    assert 'ProtectHome=' not in unit and 'ReadWritePaths=' not in unit
     assert 'k1' not in content
     assert (env_path.stat().st_mode & 0o777) == 0o600
 
@@ -98,3 +103,25 @@ def test_rotate_key_changes_only_the_key(monkeypatch, tmp_path):
     content = env_path.read_text()
     assert 'BUNCH_MACHINE_KEY=k9' in content
     assert 'WORKER_MAX_POWER=read' in content
+
+
+@pytest.mark.parametrize("power, ceiling, allowed", [
+    ("answer", "full", True), ("read", "answer", True), ("full", "answer", True),
+    ("read", "full", False), ("full", "full", False),
+])
+def test_agy_answer_refused_without_starting_cli(monkeypatch, tmp_path, power, ceiling, allowed):
+    monkeypatch.setenv("WORKER_MAX_POWER", ceiling)
+    monkeypatch.setenv("WORKER_DIRS", str(tmp_path) if allowed else "")
+    w = _load_worker()
+
+    def unexpected(*a, **kw):
+        pytest.fail("answer-only agy must not start a subprocess")
+    monkeypatch.setattr(w.subprocess, "run", unexpected)
+    wk = w.Worker()
+    wk.machine = "desktop"
+    wk.agents = {"a": {"cli": "agy", "power": power, "dir": str(tmp_path)}}
+    sent = []
+    wk.reply = lambda job, text: sent.append((job["room"], text))
+    wk.handle({"agent": "a", "id": 1, "room": "r", "human": True, "text": "hi", "created": w.time.time()})
+    assert sent == [("r", "(agy can't be limited to answering: it can read files and run commands on desktop. "
+                          "Give this agent 'read' or 'full' power on a machine that allows it; not answered)")]

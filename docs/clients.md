@@ -145,16 +145,16 @@ A machine paired like this allows **answer only**, so in an agent's **Powers** l
 - **Model**: suggestions come from the machine (Claude's aliases, Antigravity's `agy models`). Blank uses the CLI's default. Cheaper models stretch a plan further.
 - **Deep model**: used only when a message contains `!deep`.
 - **Powers**:
-  - **Answer only**: no tools or files; cheapest and safest. Codex runs with its shell turned off (`--disable shell_tool --disable unified_exec`), since its read-only sandbox would otherwise let commands read any file on the machine. Its other tools that can open files or reach out (image viewing, browser, computer use, apps, plugins, sub-agents) and your own MCP servers are turned off too. This was checked against codex-cli 0.166; an older Codex that lacks one of these switches refuses to run ("Unknown feature flag") rather than running without it.
-  - **Read files in a folder**. Codex can't be kept inside the folder at this level: its read-only sandbox blocks writes but [lets commands read anything the user can](https://developers.openai.com/codex/concepts/sandboxing), such as `~/.ssh` or this machine's `bunch-worker.env`, and anything it reads can end up in the chat. Antigravity runs this level without its sandbox, so assume the same. Use it only where everyone who can @mention the agent is trusted, or keep `WORKER_MAX_POWER=answer`.
-  - **Edit files and run commands in a folder**: anyone who can @mention it can change things there.
+  - **Answer only**: no files and no commands for Claude and Codex. Antigravity (agy) has no such mode: an agy agent on answer power does not answer, and the worker posts a note instead. Codex runs with its shell turned off (`--disable shell_tool --disable unified_exec`), since its read-only sandbox would otherwise let commands read any file on the machine. Its other tools that can open files or reach out (image viewing and generation, browser, computer use, apps, plugins, sub-agents) and your own MCP servers are turned off too, along with web search (`-c web_search="disabled"`). This was checked against codex-cli 0.157.1; an older Codex that lacks one of these switches refuses to run ("Unknown feature flag") rather than running without it.
+  - **Read files in a folder**. Claude can read inside its folder only: the worker keeps `--tools Read,Grep,Glob` but omits unscoped `--allowedTools`, which allowed outside reads on Claude Code 2.1.323. Codex can't be kept inside the folder at this level: its read-only sandbox blocks writes but [lets commands read anything the user can](https://developers.openai.com/codex/concepts/sandboxing), such as `~/.ssh` or this machine's `bunch-worker.env`, and anything it reads can end up in the chat. Antigravity runs this level without its sandbox and can also write files and run commands. Even its sandbox did not prevent these actions on agy 1.5.6. Use it only where everyone who can @mention the agent is trusted, or keep `WORKER_MAX_POWER=answer`.
+  - **Edit files and run commands in a folder**: anyone who can @mention it can change files and run commands. For full power, `WORKER_DIRS` chooses the **start folder**, for every CLI including Claude; a CLI with a shell is not confined to it. Only a separate OS user, a container or a sandbox confines an agent.
 
 The worker doesn't pass its machine key, `BUNCH_URL` or any `WORKER_*` setting on to the CLIs it starts. A `full`-power agent can still do anything the worker's OS user can, including reading that user's files such as `bunch-worker.env`, so if that matters run the worker as a dedicated user.
 - **Max answer** in tokens, and an optional **Persona**.
 
 Agents on a machine have no key of their own; the machine speaks for them. Switch what answers for an agent (another CLI, another computer, or a gateway model) from its panel at any time.
 
-**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only. The answer ends with a note saying so, the sidebar shows "runs as answer" under the agent, and the agent's form warns before you save.
+**This machine has the last word**, in its env file. A setting above `WORKER_MAX_POWER`, or a folder outside `WORKER_DIRS`, falls back to answer-only. For agy this means it does not answer and posts a refusal note; for Claude and Codex the answer ends with a note saying so, the sidebar shows "runs as answer" under the agent, and the agent's form warns before you save.
 
 **Room folders.** An admin can give a room one shared folder from the **Files** button in the room's header, and picks its kind when adding it:
 
@@ -182,7 +182,7 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
 | `WORKER_MAX_POWER` | `answer` | Highest power this machine allows. |
 | `WORKER_ROOM_FOLDERS` | off | `1` lets this machine's agents work in a room's shared folder (see below). |
 | `WORKER_ROOMS_DIR` | `~/.local/share/bunch-worker/rooms` | Where this machine keeps its copy of each room's folder. |
-| `WORKER_DIRS` | (none) | Folders `read`/`full` may run in, colon-separated (`;` on Windows). |
+| `WORKER_DIRS` | (none) | Allowed start folders for `read`/`full` (not confinement for full power), colon-separated (`;` on Windows). |
 | `WORKER_SHARE_OLLAMA` | (off) | `1` lists this machine's Ollama models in the viewer, to add to the gateway ([models.md](models.md#models-on-paired-machines)). |
 | `WORKER_OLLAMA_URL` | `http://localhost:11434` | Where that Ollama listens. |
 | `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is stopped. |
@@ -197,7 +197,7 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
   | CLI | Overhead | Why |
   |---|---|---|
   | Claude Code | about 1k tokens | runs with no tools, no MCP servers, no settings and a one-line system prompt |
-  | Antigravity | about 8k | no plan mode, which writes a plan file instead of answering |
+  | Antigravity | not available | answer power is refused because its tools cannot be removed |
   | Codex | about 15k (mostly cached) | measured before answer-only runs turned its shell off; with "read" or "full" it uses more when it runs commands on its own: one answer that tried to make a picture used 57k |
 
   For quick questions, Claude or a gateway agent on a local model is cheapest.
