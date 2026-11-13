@@ -62,6 +62,7 @@ class AskIn(BaseModel):
     room: str | None = None
     note: str | None = None
     format: str = "text"
+    files: list[str] | None = None
 
 
 class WorkerIn(BaseModel):
@@ -648,7 +649,26 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def api_ask(body: AskIn, authorization: str | None = Header(None)):
         agent = agent_of(authorization)
         return PlainTextResponse(await hub.ask(agent, body.model, body.prompt, body.system,
-                                               body.max_tokens, body.room, note=body.note, format=body.format))
+                                               body.max_tokens, body.room, note=body.note, format=body.format,
+                                               files=body.files))
+
+    # -- a room's shared folder for an agent with its own key (#84 phase 2) ---------------------
+    @app.get("/api/v1/folders/{room}")
+    async def api_folder_list(room: str, authorization: str | None = Header(None)):
+        return PlainTextResponse(await hub.files_list(agent_of(authorization), room))
+
+    @app.get("/api/v1/folders/{room}/file")
+    async def api_folder_file(room: str, path: str, offset: int = 0, authorization: str | None = Header(None)):
+        return PlainTextResponse(await hub.files_read(agent_of(authorization), room, path, offset))
+
+    @app.put("/api/v1/folders/{room}/file")
+    async def api_folder_file_put(request: Request, room: str, path: str, authorization: str | None = Header(None)):
+        agent = agent_of(authorization)
+        return PlainTextResponse(await hub.files_write(agent, room, path, await request.body()))
+
+    @app.get("/api/v1/folders/{room}/log")
+    async def api_folder_log(room: str, authorization: str | None = Header(None)):
+        return PlainTextResponse(await hub.files_log(agent_of(authorization), room))
 
     @app.get("/api/v1/whoami")
     async def api_whoami(authorization: str | None = Header(None)):

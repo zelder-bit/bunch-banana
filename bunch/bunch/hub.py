@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from .config import Settings
 from .llm import LLM, LLMError
 from .store import HUB_SENDER, Store, text_of, valid_name
+from . import folders
 
 VIEWER_INLINE_BODY_CHARS = 2_000  # longer bodies are fetched when the viewer expands a message
 
@@ -664,6 +665,56 @@ class Hub:
             out += f"\n(more: get id={m['id']} offset={offset + len(chunk)})"
         return self._charge_ctx(agent, out)
 
+    # --------------------------------------------------------------- folders
+    def _folder(self, room: str):
+        row = self.store.folder(room)
+        if not row:
+            raise HubError(f"room {room} has no folder")
+        return row, folders.open_folder(self.store, row)
+
+    async def files_list(self, agent: str, room: str) -> str:
+        room = (room or "").strip().lower().lstrip("#")
+        _row, f = self._folder(room)
+        text = await asyncio.to_thread(folders.list_text, f)
+        return self._charge_ctx(agent, f"#{room}\n{text}")
+
+    async def files_read(self, agent: str, room: str, path: str, offset: int = 0) -> str:
+        room = (room or "").strip().lower().lstrip("#")
+        _row, f = self._folder(room)
+        try:
+            text = await asyncio.to_thread(folders.read_text, f, path, self.s.max_file)
+        except folders.FolderError as e:
+            raise HubError(str(e)) from e
+        offset = max(0, int(offset or 0))
+        chunk = text[offset: offset + self.s.get_max]
+        head = f"#{room} {path}"
+        if len(text) > self.s.get_max or offset:
+            head += f" [chars {offset}-{offset + len(chunk)} of {len(text)}]"
+        out = head + "\n" + chunk
+        if offset + len(chunk) < len(text):
+            out += f"\n(more: files read {room} {path} offset={offset + len(chunk)})"
+        return self._charge_ctx(agent, out)
+
+    async def files_write(self, agent: str, room: str, path: str, data: bytes) -> str:
+        room = (room or "").strip().lower().lstrip("#")
+        _row, f = self._folder(room)
+        try:
+            path = await asyncio.to_thread(folders.write_file, f, self.s, agent, path, data)
+        except folders.FolderError as e:
+            raise HubError(str(e)) from e
+        self.broadcast({"type": "folder", "room": room})
+        try:  # the write happened; a rate/pause limit must not hide it
+            self.post(agent, room, f"({agent} changed {path} in the room folder)")
+        except HubError:
+            pass
+        return f"ok (changed {path})"
+
+    async def files_log(self, agent: str, room: str) -> str:
+        room = (room or "").strip().lower().lstrip("#")
+        _row, f = self._folder(room)
+        text = await asyncio.to_thread(folders.log_text, f)
+        return self._charge_ctx(agent, f"#{room}\n{text}")
+
     # ----------------------------------------------------------------- rooms
     def room_overview(self, agent: str = "", fallback: bool = False) -> list[dict]:
         # Aggregate once for the room lists; empty rooms still have zero counts.
@@ -942,7 +993,7 @@ class Hub:
     async def ask(self, agent: str, model: str, prompt: str | None = None, system: str | None = None,
                   max_tokens: int | None = None, room: str | None = None, raw: bool = False,
                   note: str | None = None, empty_notice: Callable[[str], None] | None = None,
-                  format: str = "text") -> str:
+                  format: str = "text", files: list[str] | None = None) -> str:
         """raw: return just the model's text ("" when it said nothing), for the hub's own callers."""
         if format not in ("text", "code"):
             raise HubError("format must be 'text' or 'code'")
@@ -951,6 +1002,15 @@ class Hub:
         note = " ".join((note or "").split())
         if note and not room:
             raise HubError("note requires room")
+        if files:
+            if not room:
+                raise HubError("files needs a room")
+            try:
+                extra = await asyncio.to_thread(folders.read_files_for_prompt, self.store, self.s,
+                                                (room or "").strip().lower().lstrip("#"), files)
+            except folders.FolderError as e:
+                raise HubError(str(e)) from e
+            prompt = (prompt or "") + "\n\n" + extra
         empty: list[str] = []
         if not self.llm.enabled:
             raise HubError("no model gateway configured (LITELLM_URL)")
