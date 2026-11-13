@@ -414,6 +414,8 @@ def effective_power(cfg, max_power=MAX_POWER, dirs=DIRS):
     return power, d
 
 
+AGY_FULL_SETTINGS = json.dumps({"permissions": {"allow": ["command(*)"]}})  # session-only settings for 'full'
+
 CODEX_ANSWER_OFF = ("shell_tool", "unified_exec", "view_image", "image_generation", "browser_use", "browser_use_external",
                     "computer_use", "apps", "plugins", "multi_agent")
 
@@ -452,7 +454,10 @@ def build_cmd(cfg, system, power, workdir, prompt, deep=False):
         argv = ["agy", "--output-format", "json", "--print-timeout", f"{TIMEOUT}s"]
         argv += ["--model", model] if model else []
         # Not --mode plan: that writes a plan file and asks to confirm it instead of answering (3-5x the tokens).
-        argv += ["--mode", "accept-edits"] if power == "full" else ["--disable-slash-commands"]
+        # Full power runs commands too. A headless run can't ask, so a command without an allow rule is refused
+        # and the whole answer comes back empty (agy 1.5.7): allow them for this run only, nothing is saved.
+        argv += ["--mode", "accept-edits", "--settings", AGY_FULL_SETTINGS] if power == "full" \
+            else ["--disable-slash-commands"]
         argv += ["-p", f"{system}\n\n{prompt}"]
         return argv, workdir, None
     raise ValueError(f"unknown cli {cli}")
@@ -497,7 +502,8 @@ def parse_output(cli, out, err, rc):
                 error = (err_.get("message") if isinstance(err_, dict) else err_) or text or d["status"]
             elif not text and d.get("denied_actions"):  # "SUCCESS" with nothing said: a tool was refused
                 tools = ", ".join(a.get("display_name") or a.get("action") or "?" for a in d["denied_actions"])
-                error = f"no answer: it tried {tools}, which headless runs can't use" + \
+                error = f"no answer: it tried {tools}, which this agent isn't allowed to use here" + \
+                    (" (commands need 'full' power)" if "bash" in tools.lower() or "command" in tools.lower() else "") + \
                     (" (agy mcp list shows the MCP servers it can reach)" if "mcp" in tools.lower() else "")
     except (ValueError, TypeError, AttributeError):
         pass
