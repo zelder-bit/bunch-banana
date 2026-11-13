@@ -7,6 +7,7 @@ import asyncio
 import json
 import posixpath
 import re
+import sqlite3
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -605,30 +606,34 @@ class Hub:
 
     # ---------------------------------------------------------------- search
     def search(self, q: str, room: str | None = None, limit: int = 50) -> list[dict]:
-        """Viewer search: ranked literal phrases, or substring search when SQLite lacks FTS5."""
+        """Viewer search: ranked phrases (last word a prefix), then substring search when FTS finds nothing or is unavailable."""
         q = " ".join((q or "").split())
         if len(q) < 2:
             raise HubError("search for at least 2 characters")
         if self.store.fts:
-            match = '"' + q.replace('"', '""') + '"'
+            match = '"' + q.replace('"', '""') + '" *'  # last word is a prefix: "valid" finds "validation"
             where = "messages_fts MATCH ?"
             fargs = [match]
             if room:
                 where += " AND m.room=?"
                 fargs.append(room.strip().lower().lstrip("#"))
-            rows = self.store.q(
+            try:
+                rows = self.store.q(
                 "SELECT m.*, snippet(messages_fts, -1, '', '', '…', 32) AS excerpt "
                 "FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid "
                 f"WHERE {where} ORDER BY bm25(messages_fts), m.id DESC LIMIT ?",
                 (*fargs, max(1, min(int(limit), 200))))
-            out = []
-            for m in rows:
-                j = self.message_json(m)
-                j.pop("body")
-                j.pop("size")
-                j["snippet"] = " ".join(m["excerpt"].split())
-                out.append(j)
-            return out
+            except sqlite3.OperationalError:  # odd syntax: use the substring search below
+                rows = []
+            if rows:  # no hits: fall through, so mid-word and punctuation-only queries still work
+                out = []
+                for m in rows:
+                    j = self.message_json(m)
+                    j.pop("body")
+                    j.pop("size")
+                    j["snippet"] = " ".join(m["excerpt"].split())
+                    out.append(j)
+                return out
         like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         where = "(summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')"
         largs: list = [like, like]
