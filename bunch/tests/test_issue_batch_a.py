@@ -41,3 +41,32 @@ def test_401_is_logged_once_per_address_and_reason(env, caplog):  # #137
     assert "no key" in lines[0] and "unknown key" in lines[1]
     assert "secret-wrong-key" not in caplog.text
     assert c.get("/api/v1/read", headers=h(keys["alice"])).status_code == 200
+
+
+def test_agent_whose_model_the_gateway_lacks_is_not_answered(env):  # #132
+    import asyncio
+    from bunch.autoreply import autoreply_once
+    c, _keys, app, llm = env
+    hub = app.state.hub
+
+    async def hosts():
+        llm.model_names = {"local/small"}
+        return {}
+    llm.model_hosts = hosts
+    hub._hosts_at = 0  # drop the cache the startup pass filled
+    c.post("/api/admin/agents", json={"name": "helper", "model": "local/gone"}, headers=adm())
+    c.post("/api/admin/agents", json={"name": "fine", "model": "local/small"}, headers=adm())
+    st = hub.store
+    assert hub.worker_state(st.agent("helper")) == "auto"  # gateway not asked yet: unknown, as before
+    asyncio.run(hub.refresh_model_hosts())
+    assert hub._models == {"local/small"}
+    assert hub.worker_state(st.agent("helper")) == "no model"
+    assert hub.worker_state(st.agent("fine")) == "auto"
+    calls = len(llm.calls)
+    c.post("/api/admin/rooms/r/messages", json={"room": "r", "text": "@helper there?"}, headers=adm())
+    asyncio.run(autoreply_once(hub))
+    last = c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-1]
+    assert last["sender"] == "helper"
+    assert "the gateway has no model local/gone, so helper can't answer; not answered" in last["summary"]
+    assert len(llm.calls) == calls  # the model wasn't asked
+    assert {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}["helper"]["state"] == "no model"

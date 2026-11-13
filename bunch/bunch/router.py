@@ -54,7 +54,7 @@ async def route(hub: Hub, room: str, text: str, timeout: float | None = None, se
         if a["kind"] != "agent":
             continue
         state = hub.worker_state(a)
-        if state in ("cooling", "offline"):
+        if state in ("cooling", "offline", "no model"):
             continue  # out of quota or not running: picking it would strand the message
         if state == "manual":
             label = "manual, answers only when its person checks" + (", active" if (a["last_seen"] or 0) > cutoff else "")

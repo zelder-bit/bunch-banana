@@ -131,7 +131,7 @@ def read_new(hub: Hub, agent) -> list:
     name, st = agent["name"], hub.store
     had = set(st.joined_rooms(name))  # rooms it was already serving, before this read adds the rest
     _header, rows, _more = hub.read_rows(name, None, False)
-    if hub.worker_state(agent) == "offline":  # its model's machine is off: the hub already said so
+    if hub.worker_state(agent) in ("offline", "no model"):  # its model's machine is off: the hub already said so
         return []
     cutoff, out = time.time() - STALE_AFTER, []
     for m in rows:
@@ -207,7 +207,7 @@ async def autoreply_once(hub: Hub, wait: bool = True) -> None:
     for a in hub.store.auto_agents():
         name = a["name"]
         rows = read_new(hub, a)
-        if hub.worker_state(a) != "offline":
+        if hub.worker_state(a) not in ("offline", "no model"):
             # The cursor can outlive the queue after a restart. Recover only fresh work.
             rows += [m for m in hub.unanswered(name) if m["created"] >= cutoff]
         pending = {m["id"] for m in state["queue"].get(name, [])}
