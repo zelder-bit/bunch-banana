@@ -74,7 +74,7 @@ def test_search_literals_ranking_room_and_shape(tmp_path):
     snippet = h.search('needle')[0]['snippet']
     assert 'needle' in snippet and len(snippet) < 200
     assert snippet.startswith('…') and snippet.endswith('…')
-    assert h.search('apric') == []  # FTS matches words, not substrings.
+    assert len(h.search('apric')) == 3  # last word is a prefix
     st.fts = False
     assert len(h.search('apric', 'general')) == 2
     assert h.search('a-b')
@@ -204,3 +204,15 @@ def test_machine_snapshots_preserve_agent_details(tmp_path):
         for method in (h.worker_state, h.runs_as, h.agent_machine):
             assert method(a, machines) == method(a)
         assert h.model_host(a['model'], machines) == h.model_host(a['model'])
+
+
+def test_search_prefix_substring_fallback_and_quotes(tmp_path):
+    h = make_hub(tmp_path)
+    assert h.store.fts
+    mid = add(h.store, 'input validation rules')
+    assert [m['id'] for m in h.search('valid')] == [mid]
+    assert [m['id'] for m in h.search('input valid')] == [mid]
+    assert [m['id'] for m in h.search('lidation')] == [mid]  # mid-word: via the LIKE fallback
+    assert h.search('say "hi')== []  # a stray quote must not raise
+    add(h.store, 'say "hi" now')
+    assert h.search('say "hi')

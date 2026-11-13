@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from .hub import Hub, one_line
+from .llm import LLMUnreachable
 
 log = logging.getLogger("bunch.summarizer")
 
@@ -46,6 +47,10 @@ async def summarize_once(hub: Hub) -> int:
             _attempts.pop(m["id"], None)
         except asyncio.CancelledError:
             raise
+        except LLMUnreachable as e:  # server off or slow: not this message's fault, so no try is used up
+            log.warning("summarizer: model unreachable, stopping this pass: %s", e)
+            _last_failures = 1  # still backs the loop off
+            return done
         except Exception as e:
             log.warning("summarizer message %s failed: %s", m["id"], e)
             failures += 1
@@ -72,6 +77,10 @@ async def summarize_once(hub: Hub) -> int:
                 done += 1
         except asyncio.CancelledError:
             raise
+        except LLMUnreachable as e:
+            log.warning("summarizer: model unreachable, stopping this pass: %s", e)
+            _last_failures = 1
+            return done
         except Exception as e:
             log.warning("summarizer room %s failed: %s", r["name"], e)
             failures += 1

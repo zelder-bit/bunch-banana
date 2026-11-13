@@ -2078,3 +2078,32 @@ def test_ask_default_budget_cap_has_no_notice(ask_hub, room):
         assert hub.store.message(post_id(out))["summary"] == "answer from local/small"
     else:
         assert out == "answer from local/small"
+
+
+def test_summarizer_unreachable_keeps_tries_and_stops_early(env):
+    from bunch import summarizer
+    from bunch.llm import LLMError, LLMUnreachable
+    c, k, app, llm = env
+    for t in ("a" * 400, "b" * 400):
+        tool(c, k["alice"], "post", room="r", text=t)
+    hub = app.state.hub
+    calls = []
+
+    async def down(*a, **kw):
+        calls.append(1)
+        raise LLMUnreachable("isn't reachable from the hub")
+    real, hub.llm.chat = hub.llm.chat, down
+    summarizer._attempts.clear()
+    for _ in range(6):
+        assert asyncio.run(summarize_once(hub)) == 0
+    assert len(calls) == 6  # one call per pass, not one per message and room
+    assert summarizer._last_failures and not summarizer._attempts
+    assert [m["auto_sum"] for m in hub.store.q("SELECT auto_sum FROM messages")] == [1, 1]
+
+    async def bad(*a, **kw):
+        raise LLMError("gateway 400: bad request")
+    hub.llm.chat = bad
+    for _ in range(3):
+        asyncio.run(summarize_once(hub))
+    assert [m["auto_sum"] for m in hub.store.q("SELECT auto_sum FROM messages")] == [0, 0]
+    hub.llm.chat = real
