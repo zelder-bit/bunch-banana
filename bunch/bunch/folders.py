@@ -285,6 +285,63 @@ def open_folder(store, row):
     return GitFolder(base + ".git") if row["kind"] == "git" else PlainFolder(base)
 
 
+def read_text(f, path: str, cap: int) -> str:
+    """One file's text, or FolderError. Refuses binary (not UTF-8, or NUL bytes) and anything over cap."""
+    data = f.read(path)
+    if len(data) > cap:
+        raise FolderError(f"{path} is {len(data)} bytes; the most that can be read at once is {cap}")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise FolderError(f"{path} is not a text file")
+    if "\x00" in text:
+        raise FolderError(f"{path} is not a text file")
+    return text
+
+
+def list_text(f) -> str:
+    """The folder's files, one per line, for an agent."""
+    rows = f.list()
+    if not rows:
+        return "(empty)"
+    return "\n".join(f"{x['path']} ({x['size']} bytes)" for x in rows)
+
+
+def log_text(f) -> str:
+    """The folder's recent changes, one per line."""
+    rows = f.history()
+    if not rows:
+        return "(no changes yet)"
+    return "\n".join(f"{h['id']} {h['who']} {h['what']}" for h in rows)
+
+
+def write_file(f, s, agent, path: str, data: bytes) -> str:
+    """The shared write: the same path and quota rules as the viewer routes. Returns the cleaned path."""
+    path = clean_path(path)
+    if len(data) > s.max_file:
+        raise FolderError(f"a file can be at most {s.max_file} bytes")
+    if s.max_folder and f.size() + len(data) > s.max_folder:
+        raise FolderError("the room folder is full; remove some files first")
+    f.write(path, data, agent)
+    return path
+
+
+def read_files_for_prompt(store, s, room: str, files: list[str]) -> str:
+    """The files' text under one header each, for ask(files=...). FolderError on no folder, binary, or budget."""
+    row = store.folder(room)
+    if not row:
+        raise FolderError(f"room {room} has no folder")
+    f = open_folder(store, row)
+    parts, total = [], 0
+    for path in files:
+        text = read_text(f, path, s.max_body)
+        total += len(text)
+        if total > s.max_body:
+            raise FolderError(f"files add up to more than {s.max_body} characters")
+        parts.append(f"== {path} ==\n{text}")
+    return f"Files from #{room} folder:\n\n" + "\n\n".join(parts)
+
+
 class FolderIn(BaseModel):
     kind: str = "git"
 

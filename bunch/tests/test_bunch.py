@@ -77,10 +77,10 @@ def test_mcp_handshake_and_tools(env):
     r = c.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=h(keys["alice"]))
     assert r.status_code == 202
     tools = mcp(c, keys["alice"], "tools/list")["result"]["tools"]
-    assert [t["name"] for t in tools] == ["read", "post", "get", "ask", "rooms"]
+    assert [t["name"] for t in tools] == ["read", "post", "get", "ask", "files", "rooms"]
     # Tool definitions are sent to the model every turn; keep them small.
     import json
-    assert len(json.dumps(tools)) < 2200
+    assert len(json.dumps(tools)) < 2600
 
 
 def test_addressing_and_cursors(env):

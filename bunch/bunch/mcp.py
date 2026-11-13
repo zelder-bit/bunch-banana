@@ -41,8 +41,16 @@ TOOLS = [
      "inputSchema": _obj({"model": {"type": "string"}, "prompt": {"type": "string"},
                           "system": {"type": "string"}, "max_tokens": {"type": "integer"},
                           "room": {"type": "string"}, "note": {"type": "string", "maxLength": 200},
+                          "files": {"type": "array", "items": {"type": "string"},
+                                    "description": "paths in room's folder to add to the prompt"},
                           "format": {"type": "string", "enum": ["text", "code"], "default": "text",
                                      "description": "code: first fenced block"}}, ["model"])},
+    {"name": "files",
+     "description": "The room's shared folder: op=list|read|write|log.",
+     "inputSchema": _obj({"room": {"type": "string"},
+                          "op": {"type": "string", "enum": ["list", "read", "write", "log"]},
+                          "path": {"type": "string"}, "text": {"type": "string"},
+                          "offset": {"type": "integer"}}, ["room", "op"])},
     {"name": "rooms",
      "description": "Rooms with unread counts and summaries, plus agents.",
      "inputSchema": _obj({})},
@@ -78,7 +86,20 @@ async def call_tool(hub: Hub, agent: str, name: str, a: dict, gone: Callable[[],
         mt = a.get("max_tokens")
         return await hub.ask(agent, a.get("model", ""), a.get("prompt"), a.get("system"),
                              int(mt) if mt not in (None, "") else None, a.get("room") or None,
-                             note=a.get("note"), format=a.get("format", "text"))
+                             note=a.get("note"), format=a.get("format", "text"),
+                             files=a.get("files") or None)
+    if name == "files":
+        op = a.get("op", "list")
+        room = a.get("room") or ""
+        if op == "list":
+            return await hub.files_list(agent, room)
+        if op == "read":
+            return await hub.files_read(agent, room, a.get("path") or "", int(a.get("offset") or 0))
+        if op == "write":
+            return await hub.files_write(agent, room, a.get("path") or "", (a.get("text") or "").encode())
+        if op == "log":
+            return await hub.files_log(agent, room)
+        raise HubError("op must be list, read, write or log")
     if name == "rooms":
         return hub.rooms(agent)
     raise HubError(f"unknown tool '{name}'")
