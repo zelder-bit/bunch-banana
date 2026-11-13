@@ -88,7 +88,7 @@ async def route(hub: Hub, room: str, text: str, timeout: float | None = None, se
             {"role": "system", "content": PROMPT}, {"role": "user", "content": user}], 40, user=ROUTER), timeout)
     except Exception as e:  # gateway down, model missing, timeout: fall back to room-wide
         log.warning("routing failed: %s", e)
-        return []
+        return _last_answerer(st, room, sender, names)
     st.add_usage(ROUTER, ask=tokens)
     picked: list[str] = []
     for word in re.findall(r"[a-z0-9][a-z0-9_.-]*", (answer or "").lower()):
@@ -98,3 +98,17 @@ async def route(hub: Hub, room: str, text: str, timeout: float | None = None, se
     autos = [n for n in picked if states[n] == "auto"]
     picked = [n for n in picked if states[n] != "auto" or n == autos[0]]  # two local models saying the same thing is noise
     return picked[:2]
+
+
+def _last_answerer(st, room: str, sender: str | None, names: set[str]) -> list[str]:
+    """Router model unavailable (slow to load, down): the available agent that last replied to this same sender
+    here, within the follow-up window, else nobody."""
+    if not sender:
+        return []
+    for r in st.q("SELECT sender, reply_to FROM messages WHERE room=? AND human=0 AND reply_to IS NOT NULL AND created>? "
+                  "ORDER BY id DESC LIMIT 20", (room, time.time() - FOLLOW_UP_WINDOW)):
+        if r["sender"] in names:
+            asked = st.message(r["reply_to"])
+            if asked and asked["sender"] == sender:
+                return [r["sender"]]
+    return []

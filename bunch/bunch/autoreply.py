@@ -228,6 +228,7 @@ async def serve_message(hub: Hub, agent, m) -> None:
     if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
         return  # already answered, e.g. with an "offline" note
     if hub.duplicate_of(m):
+        _gave_up[(name, m["id"])] = m["created"]  # not re-queued every pass
         return  # a double send: the first copy is answered
     try:
         await answer(hub, agent, m)
@@ -243,6 +244,8 @@ async def serve_message(hub: Hub, agent, m) -> None:
         log.exception("%s failed on #%s", name, m["id"])
         if m["human"]:
             _note(hub, agent, m, f"unexpected error ({type(e).__name__})")
+    if not hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
+        _gave_up[(name, m["id"])] = m["created"]  # nothing stored (note failed, or a silent return): don't ask the model again
 
 
 async def _drain(hub: Hub, name: str) -> None:

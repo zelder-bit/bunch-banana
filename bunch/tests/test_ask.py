@@ -37,7 +37,7 @@ def test_empty_reason_after_retries(fallback):
     def handler(req):
         payload = json.loads(req.content)
         sent.append(payload["max_tokens"])
-        last = "reasoning_effort" in payload
+        last = "reasoning_effort" in payload or "think" in payload
         if last and fallback == "rejected":
             return httpx.Response(400, json={"error": "unsupported"})
         return httpx.Response(200, json={
@@ -46,7 +46,7 @@ def test_empty_reason_after_retries(fallback):
                          "finish_reason": "stop" if last else "length"}],
             "usage": {"total_tokens": 100}})
     text, tokens = asyncio.run(make(handler).chat("m", [], 50, empty_notice=reasons.append))
-    assert sent == [50, 500, 50]
+    assert sent == [50, 500, 50] + ([50] if fallback == "rejected" else [])  # rejected: think=false is tried too (#129)
     assert tokens == (200 if fallback == "rejected" else 300)
     if fallback == "answer":
         assert text == "OK" and not reasons
