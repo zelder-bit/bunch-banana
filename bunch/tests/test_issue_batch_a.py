@@ -43,6 +43,22 @@ def test_401_is_logged_once_per_address_and_reason(env, caplog):  # #137
     assert c.get("/api/v1/read", headers=h(keys["alice"])).status_code == 200
 
 
+def test_folder_write_needs_a_joined_room(env):  # #128
+    c, keys, _app, _ = env
+    room = "proj"
+    assert c.post(f"/api/admin/rooms/{room}/messages", json={"room": room, "text": "hi"}, headers=adm()).status_code == 200
+    assert c.post(f"/api/admin/rooms/{room}/folder", json={"kind": "plain"}, headers=adm()).status_code == 200
+    key = keys["alice"]
+    put = lambda: c.put(f"/api/v1/folders/{room}/file", params={"path": "a.txt"}, content=b"x", headers=h(key))  # noqa: E731
+    assert c.get(f"/api/v1/folders/{room}", headers=h(key)).status_code == 200  # reads stay open
+    r = put()
+    assert r.status_code == 400 and "read or post in #proj first, then write to its folder" in r.text
+    out, err = tool(c, key, "files", room=room, op="write", path="a.txt", text="x")
+    assert "read or post in #proj first" in out
+    tool(c, key, "read", room=room)  # joins the room
+    assert put().status_code == 200
+
+
 def test_agent_whose_model_the_gateway_lacks_is_not_answered(env):  # #132
     import asyncio
     from bunch.autoreply import autoreply_once

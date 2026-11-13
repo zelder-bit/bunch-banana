@@ -699,6 +699,8 @@ class Hub:
     async def files_write(self, agent: str, room: str, path: str, data: bytes) -> str:
         room = (room or "").strip().lower().lstrip("#")
         _row, f = self._folder(room)
+        if self.store.cursor(agent, room) is None:  # reads are open; a write needs a room the agent has joined
+            raise HubError(f"read or post in #{room} first, then write to its folder")
         try:
             path = await asyncio.to_thread(folders.write_file, f, self.s, agent, path, data)
         except folders.FolderError as e:

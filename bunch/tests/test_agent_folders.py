@@ -14,6 +14,7 @@ def test_agent_lists_reads_writes_and_logs(env):
     c, keys, _app, _llm = env
     room = _folder(c)
     key = keys["alice"]
+    tool(c, key, "read", room=room)  # joins the room: writing to its folder needs that (#128)
     out, err = tool(c, key, "files", room=room, op="list")
     assert not err and "(empty)" in out
     assert c.get(f"/api/v1/folders/{room}", headers=h(key)).text.startswith(f"#{room}\n(empty)")
@@ -41,6 +42,7 @@ def test_read_refuses_binary_and_bad_paths(env):
     c, keys, _app, _llm = env
     room = _folder(c)
     key = keys["alice"]
+    tool(c, key, "read", room=room)  # joins the room: writing to its folder needs that (#128)
     c.put(f"/api/v1/folders/{room}/file", params={"path": "pic.png"}, content=b"\x00\x01\xff", headers=h(key))
     out, err = tool(c, key, "files", room=room, op="read", path="pic.png")
     assert err and "not a text file" in out
@@ -57,6 +59,7 @@ def test_ask_files_appends_folder_text(env):
     c, keys, _app, llm = env
     room = _folder(c)
     key = keys["alice"]
+    tool(c, key, "read", room=room)  # joins the room: writing to its folder needs that (#128)
     c.put(f"/api/v1/folders/{room}/file", params={"path": "spec.txt"}, content=b"the spec", headers=h(key))
     calls = []
 
@@ -78,6 +81,7 @@ def test_ask_files_over_budget_is_refused(env):
     c, keys, app, _llm = env
     room = _folder(c)
     key = keys["alice"]
+    tool(c, key, "read", room=room)  # joins the room: writing to its folder needs that (#128)
     object.__setattr__(app.state.hub.s, "max_body", 10)
     c.put(f"/api/v1/folders/{room}/file", params={"path": "a"}, content=b"123456", headers=h(key))
     c.put(f"/api/v1/folders/{room}/file", params={"path": "b"}, content=b"123456", headers=h(key))
