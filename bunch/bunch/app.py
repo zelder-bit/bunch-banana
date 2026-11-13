@@ -337,7 +337,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     if fr and not ((row := store.agent(fr)) and row["kind"] == "agent"):  # removed since it was picked
         store.set_setting("first_responder", "")
         log.warning("first responder %r is not an agent any more; cleared", fr)
-    llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens, model_probe=s.model_probe)
+    llm = llm or LLM(s.litellm_url, s.litellm_key, timeout=s.ask_timeout, think_max_tokens=s.think_max_tokens, model_probe=s.model_probe)
     hub = Hub(store, s, llm)
 
     # SVG is shown too: the viewer only puts files in <img> (no scripts there), and opened directly the

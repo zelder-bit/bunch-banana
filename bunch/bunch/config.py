@@ -40,6 +40,7 @@ class Settings:
     model_probe: bool = True      # hub and gateway may have different network access
     summary_model: str = ""        # cheap model for rolling summaries; blank = no LLM summaries
     router_model: str = ""         # cheap model that addresses un-@'d human messages; blank = off
+    ask_timeout: float = 180.0     # seconds one model call may take before the hub gives up
     router_timeout: float = 8.0    # seconds the router model gets before the message goes room-wide
     session_secret: str = ""       # signs login cookies; blank = a random one kept in the database
     secure_cookies: bool = False   # login cookie only sent over HTTPS (set when behind TLS)
@@ -75,6 +76,7 @@ def load(**overrides) -> Settings:
         model_probe=env("BUNCH_MODEL_PROBE", "1").strip().lower() not in ("0", "false", "no"),
         summary_model=env("BUNCH_SUMMARY_MODEL", "").strip(),
         router_model=env("BUNCH_ROUTER_MODEL", "").strip(),
+        ask_timeout=_float("BUNCH_ASK_TIMEOUT", 180.0),
         router_timeout=_float("BUNCH_ROUTER_TIMEOUT", 8.0),
         session_secret=env("BUNCH_SESSION_SECRET", "").strip(),
         secure_cookies=env("BUNCH_SECURE_COOKIES", "").strip().lower() in ("1", "true", "yes"),

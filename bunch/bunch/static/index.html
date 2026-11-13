@@ -938,7 +938,9 @@
   function attachments(text) {
     return [...text.matchAll(FILE_REF)].map(m => h("a", { href: "/api/admin/files/" + m[2], target: "_blank", rel: "noopener", class: "attach" },
       h("img", { src: "/api/admin/files/" + m[2], alt: m[1] || "attachment", loading: "lazy",
-        onerror: (e) => e.target.replaceWith(document.createTextNode("📎 " + (m[1] || "file") + " (download)")) })));
+        onerror: (e) => e.target.replaceWith(IMG_TYPES[(m[1] || "").split(".").pop().toLowerCase()]
+          ? h("span", { class: "muted", title: m[1] || "attachment" }, "picture removed")
+          : document.createTextNode("📎 " + (m[1] || "file") + " (download)")) })));
   }
   function plain(text) { return text.replace(FILE_REF, "").trim(); }
 
@@ -1280,18 +1282,26 @@
   }
 
   // --- "thinking…" while an auto agent works on an answer -------------------------------------
-  const typing = {};   // agent -> { room, timer }
-  function setTyping(agent, room, on) {
+  const typing = {};   // agent -> { room, timer, since, model }
+  let typingTick = null;   // once a second while someone is thinking here, so the seconds count up
+  function setTyping(agent, room, on, model) {
     clearTimeout(typing[agent]?.timer);
     delete typing[agent];
-    if (on) typing[agent] = { room, timer: setTimeout(() => setTyping(agent, room, false), 60000) };
+    if (on) typing[agent] = { room, since: Date.now(), model: model || "", timer: setTimeout(() => setTyping(agent, room, false), 600000) };
     renderTyping();
   }
   function renderTyping() {
     const here = Object.keys(typing).filter(a => typing[a].room === current);
     $("typing").hidden = !here.length;
-    $("typing").replaceChildren(...here.flatMap((a, i) => [i ? ", " : "", avatar(a, false, "xs"), a]),
-      here.length === 1 ? " is thinking" : " are thinking", h("span", { class: "dots" }, h("i"), h("i"), h("i")));
+    if (!here.length) { clearInterval(typingTick); typingTick = null; $("typing").replaceChildren(); return; }
+    if (!typingTick) typingTick = setInterval(renderTyping, 1000);
+    const oldest = here.map(a => typing[a]).reduce((a, b) => (b.since < a.since ? b : a));
+    const secs = Math.floor((Date.now() - oldest.since) / 1000);
+    const kids = [...here.flatMap((a, i) => [i ? ", " : "", avatar(a, false, "xs"), a]),
+      here.length === 1 ? " is thinking" : " are thinking", h("span", { class: "dots" }, h("i"), h("i"), h("i")),
+      ` ${secs} s`];
+    if (secs >= 30) kids.push(h("div", { class: "muted", style: "flex-basis:100%;font-weight:400" }, "still waiting on the model" + (oldest.model ? " (" + oldest.model + ")" : "") + "; it may be loading"));
+    $("typing").replaceChildren(...kids);
   }
 
   // --- live updates ------------------------------------------------------------------------
@@ -1338,7 +1348,7 @@
         if (wsWasUp) catchUp().catch(() => {});   // fetch what was posted while we were away
         wsWasUp = true;
       }
-      if (e.type === "typing") return setTyping(e.agent, e.room, !e.done);
+      if (e.type === "typing") return setTyping(e.agent, e.room, !e.done, e.model);
       if (e.type === "room_deleted") return roomGone(e.room);
       if (e.type === "agents") return loadAgents();
       if (e.type === "rooms") return loadRooms();

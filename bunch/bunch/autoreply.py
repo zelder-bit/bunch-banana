@@ -88,7 +88,8 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     note = hub.room_note(m["room"])
     if note:  # bot mode: keep handing work on instead of waiting for the person
         system += "\n\n" + note
-    hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
+    hub.broadcast({"type": "typing", "agent": name, "room": m["room"],
+                   "model": agent["model"]})  # viewer shows "thinking…"
     empty: list[str] = []
     try:
         text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens,
