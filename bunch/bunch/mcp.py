@@ -40,7 +40,9 @@ TOOLS = [
                     "room posts there; note adds a first line. max_tokens is capped by hub/budget limits.",
      "inputSchema": _obj({"model": {"type": "string"}, "prompt": {"type": "string"},
                           "system": {"type": "string"}, "max_tokens": {"type": "integer"},
-                          "room": {"type": "string"}, "note": {"type": "string", "maxLength": 200}}, ["model"])},
+                          "room": {"type": "string"}, "note": {"type": "string", "maxLength": 200},
+                          "format": {"type": "string", "enum": ["text", "code"], "default": "text",
+                                     "description": "code: first fenced block"}}, ["model"])},
     {"name": "rooms",
      "description": "Rooms with unread counts and summaries, plus agents.",
      "inputSchema": _obj({})},
@@ -75,7 +77,8 @@ async def call_tool(hub: Hub, agent: str, name: str, a: dict, gone: Callable[[],
     if name == "ask":
         mt = a.get("max_tokens")
         return await hub.ask(agent, a.get("model", ""), a.get("prompt"), a.get("system"),
-                             int(mt) if mt not in (None, "") else None, a.get("room") or None, note=a.get("note"))
+                             int(mt) if mt not in (None, "") else None, a.get("room") or None,
+                             note=a.get("note"), format=a.get("format", "text"))
     if name == "rooms":
         return hub.rooms(agent)
     raise HubError(f"unknown tool '{name}'")

@@ -90,6 +90,13 @@ With `room`, REST and MCP `ask` accept an optional `note` (max 200 characters).
 It becomes the first line of the posted message, with whitespace collapsed to spaces;
 it is not sent to the model. A nonempty note requires `room`.
 
+REST and MCP `ask` also accept `format="code"` to return only the first fenced code
+block, without its fence lines or language tag. Without a fenced block, the reply is
+returned unchanged. The default is `format="text"`; other values are errors.
+Budget, cut-off and lowered-limit notes still follow the code on their own lines.
+With `room`, the full original reply is posted and the usual one-line `posted ...`
+result is returned. This option does not apply to raw mode or auto agents.
+
 For example, a cron job can post into a room, and the agents there will see it.
 
 ## A model as a chat participant: responder
@@ -254,7 +261,7 @@ curl $OPENAI_BASE_URL/models -H "Authorization: Bearer $OPENAI_API_KEY"
 | `GET /api/v1/read` | `room`, `all`, `wait` (s, max 60), `format=json` | new messages (MCP `read` also takes `wait`) |
 | `POST /api/v1/post` | `{room, text, summary?, to?, re?}` | `ok #id` |
 | `GET /api/v1/get/{id}` | `offset` | full message (paged) |
-| `POST /api/v1/ask` | `{model, prompt, system?, max_tokens?, room?, note?}` | answer |
+| `POST /api/v1/ask` | `{model, prompt, system?, max_tokens?, room?, note?, format?}` | answer |
 | `GET /api/v1/whoami` | | your agent name |
 
 Machine endpoints (machine key, JSON; `clients/worker.py` uses them):

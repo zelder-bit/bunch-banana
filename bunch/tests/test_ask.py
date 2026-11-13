@@ -72,6 +72,67 @@ async def tool(hub, **args):
 
 
 @pytest.mark.parametrize("protocol", ["rest", "mcp"])
+@pytest.mark.parametrize("reply,expected", [
+    ("Here it is:\n```python\ndef f():\n    return 1\n```\nNotes\n```py\nsecond\n```",
+     "def f():\n    return 1\n"),
+    ("```\nx = 1\n```", "x = 1\n"),
+    ("~~~python\nx = 1\n~~~\nNotes", "x = 1\n"),
+    ("````python\nx = '```'\n`````", "x = '```'\n"),
+    ("```python\npartial", "partial"),
+    ("```python\n```", ""),
+    ("  def f():\n      return 1\n\n", "  def f():\n      return 1\n\n"),
+    ("Use `inline code` here.", "Use `inline code` here."),
+])
+def test_code_format_protocols(direct, protocol, reply, expected):
+    app, hub, headers = direct
+    calls = []
+    async def chat(*args, **kw):
+        calls.append(args)
+        return reply, 10
+    hub.llm.chat = chat
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+            async def ask(**kw):
+                args = {"model": "m", "prompt": "hi", **kw}
+                if protocol == "rest":
+                    r = await c.post("/api/v1/ask", headers=headers, json=args)
+                    return r.text, r.status_code == 400
+                r = await tool(hub, **args)
+                return r["content"][0]["text"], r["isError"]
+            assert await ask(format="code") == (expected, False)
+            assert await ask() == (reply, False)
+            assert await ask(format="text") == (reply, False)
+            out, error = await ask(format="code", room="results")
+            assert not error and out.startswith("posted ")
+            message = hub.store.message(post_id(out))
+            assert (message["body"] or message["summary"]) == reply.strip()
+            count = len(calls)
+            assert await ask(format="json") == ("error: format must be 'text' or 'code'", True)
+            assert len(calls) == count
+            assert await hub.ask("helper", "m", "hi", raw=True, format="code") == reply
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ("Intro\n```python\nx = 1\n```\nNotes", "x = 1\n"),
+    ("Intro\n```python\nx =", "x ="),
+    ("plain reply", "plain reply\n"),
+])
+@pytest.mark.parametrize("final_max", [100, 50])
+def test_code_format_preserves_notices(direct, reply, expected, final_max):
+    _, hub, _ = direct
+    hub.store.set_budget("helper", 100)
+    cut = []
+    async def chat(*args, **kw):
+        cut.append(kw["cut_notice"](final_max))
+        return reply + "\n\n" + cut[-1], 90
+    hub.llm.chat = chat
+    out = asyncio.run(hub.ask("helper", "m", "hi", max_tokens=200, format="code"))
+    assert out == (expected + "\n" + cut[0] + "\n[budget 90/100 today]"
+                   "\n[max_tokens lowered from 200 to 100: what is left of today's budget]")
+
+
+@pytest.mark.parametrize("protocol", ["rest", "mcp"])
 def test_note_and_validation(direct, protocol):
     app, hub, headers = direct
     async def run():
