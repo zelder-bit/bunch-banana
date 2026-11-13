@@ -161,20 +161,22 @@ class LLM:
         return _json(r)
 
     async def model_info(self) -> list[dict]:
-        """Every deployment the gateway has: [{name, id, api_base, model, stored}].
+        """Every deployment, including any description and context limit the gateway knows.
         stored = added at runtime (kept in LiteLLM's database), so bunch may remove it; config-file ones can't be."""
         out = []
         for m in (await self._call("GET", "/model/info")).get("data", []):
             p, i = m.get("litellm_params") or {}, m.get("model_info") or {}
             if m.get("model_name"):
                 out.append({"name": m["model_name"], "id": i.get("id") or "", "api_base": (p.get("api_base") or "").strip(),
-                            "model": p.get("model") or "", "stored": bool(i.get("db_model"))})
+                            "model": p.get("model") or "", "stored": bool(i.get("db_model")),
+                            "description": i.get("description") or "",
+                            "context": i.get("max_input_tokens") or i.get("max_tokens")})
         return out
 
-    async def model_hosts(self) -> dict[str, str]:
+    async def model_hosts(self, info: list[dict] | None = None) -> dict[str, str]:
         """Model name -> host:port from api_base; paid APIs without one are left out."""
         out = {}
-        for m in await self.model_info():
+        for m in await self.model_info() if info is None else info:
             try:
                 url = urlsplit(m["api_base"])
                 host = url.hostname

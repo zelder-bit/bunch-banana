@@ -159,3 +159,77 @@ def test_model_failure_protocols(direct):
         r = await tool(hub, model="m", prompt="hi")
         assert r == {"content": [{"type": "text", "text": "error: model failed"}], "isError": True}
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("probe", [True, False])
+def test_model_list_details_and_probes(direct, monkeypatch, probe):
+    from bunch.llm import LLM
+    app, hub, headers = direct
+    deployments = [
+        {"model_name": "local/coder", "litellm_params": {"api_base": "http://192.0.2.7:11434"},
+         "model_info": {"max_input_tokens": 32768, "description": "Code review\n and fixes"}},
+        {"model_name": "local/general", "litellm_params": {"api_base": "http://192.0.2.7:11434/v1"}},
+        {"model_name": "local/down", "litellm_params": {"api_base": "http://192.0.2.8:11434"}},
+        {"model_name": "paid/big", "model_info": {"max_tokens": 64000}},
+        {"model_name": "unknown"},
+    ]
+    requests, connects = [], []
+    def handler(req):
+        requests.append(req.url.path)
+        if req.url.path == "/model/info":
+            return httpx.Response(200, json={"data": deployments[:-1]})
+        assert req.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": [{"id": d["model_name"]} for d in deployments]})
+    llm = LLM("http://gw", "k", model_probe=probe)
+    llm._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    hub.llm = llm
+    hub.store.create_machine("workstation")
+    hub.store.set_machine_report("workstation", "workstation", ["192.0.2.7"], [], "answer", [])
+    class Writer:
+        def close(self):
+            pass
+    async def run():
+        both = asyncio.Event()
+        async def connect(host, port):
+            connects.append((host, port))
+            if len(connects) == 2:
+                both.set()
+            await asyncio.wait_for(both.wait(), .5)  # distinct servers must be checked concurrently
+            if host == "192.0.2.8":
+                raise OSError("refused")
+            return None, Writer()
+        monkeypatch.setattr(asyncio, "open_connection", connect)
+        up = ", up" if probe else ""
+        down = ", DOWN: not reachable from the hub" if probe else ""
+        expected = (f"models:\nlocal/coder [workstation{up}, context 32768, Code review and fixes]\n"
+                    f"local/down [192.0.2.8:11434{down}]\nlocal/general [workstation{up}]\n"
+                    "paid/big [paid API, context 64000]\nunknown")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+            r = await c.post("/api/v1/ask", headers=headers, json={"model": "?"})
+            assert r.status_code == 200 and r.text == expected
+        result = await tool(hub, model="?")
+        assert not result["isError"] and result["content"][0]["text"] == expected
+        assert sorted(connects) == ([("192.0.2.7", 11434), ("192.0.2.8", 11434)] if probe else [])
+        assert requests.count("/model/info") == 2
+        await llm.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status,data", [(403, {}), (404, {}), (200, {"data": []})])
+def test_model_list_metadata_unavailable(direct, monkeypatch, status, data):
+    from bunch.llm import LLM
+    _, hub, _ = direct
+    def handler(req):
+        if req.url.path == "/model/info":
+            return httpx.Response(status, json=data)
+        return httpx.Response(200, json={"data": [{"id": "b"}, {"id": "a"}]})
+    llm = LLM("http://gw", "k")
+    llm._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    hub.llm = llm
+    async def connect(*args):
+        pytest.fail("no probe without metadata")
+    monkeypatch.setattr(asyncio, "open_connection", connect)
+    async def run():
+        assert await hub.ask("helper", "?") == "models: a, b"
+        await llm.aclose()
+    asyncio.run(run())

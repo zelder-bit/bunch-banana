@@ -779,6 +779,34 @@ class Hub:
         """Where a gateway model runs: a paired machine's name if it's one of ours, else the raw host."""
         return self.model_machine(model) or self._hosts.get(model or "")
 
+    async def model_list(self) -> str:
+        names = await self.llm.models()
+        plain = "models: " + ", ".join(names)
+        try:
+            info = await self.llm.model_info()
+        except (LLMError, AttributeError):  # older gateways / restricted keys still list names
+            return plain
+        if not info:
+            return plain
+        self._hosts = await self.llm.model_hosts(info)
+        self._hosts_at = time.time()
+        hosts = sorted({self._hosts[n] for n in names if n in self._hosts}) if self.llm.model_probe else []
+        status = dict(zip(hosts, await asyncio.gather(*(self.llm._reachable(h) for h in hosts))))
+        details = {m["name"]: m for m in info}
+        lines = []
+        for name in names:
+            m = details.get(name, {})
+            host = self._hosts.get(name)
+            parts = [self.model_host(name)] if host else (["paid API"] if m and not m.get("api_base") else [])
+            if host in status:
+                parts.append("up" if status[host] else "DOWN: not reachable from the hub")
+            if m.get("context"):
+                parts.append(f"context {m['context']}")
+            if m.get("description"):
+                parts.append(" ".join(m["description"].split()))
+            lines.append(name + (" [" + ", ".join(parts) + "]" if parts else ""))
+        return "models:\n" + "\n".join(lines)
+
     def agent_machine(self, row) -> str | None:
         """The computer that actually answers for an agent: its worker's machine, or where its model runs."""
         if row["kind"] != "agent":
@@ -842,7 +870,7 @@ class Hub:
         model = (model or "").strip()
         try:
             if model in ("", "?"):
-                return self._charge_ctx(agent, "models: " + ", ".join(await self.llm.models()))
+                return self._charge_ctx(agent, await self.model_list())
             if not prompt:
                 raise HubError("prompt required")
             budget, used = self.budget(agent), self.spent(agent)
