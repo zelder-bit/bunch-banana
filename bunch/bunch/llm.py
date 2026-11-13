@@ -52,9 +52,11 @@ class LLM:
 
     async def chat(self, model: str, messages: list[dict], max_tokens: int, user: str | None = None,
                    remaining: int | None = None, retry_limit: int | None = None,
-                   cut_notice: Callable[[int], str] | None = None) -> tuple[str, int]:
+                   cut_notice: Callable[[int], str] | None = None,
+                   empty_notice: Callable[[str], None] | None = None) -> tuple[str, int]:
         """Returns (text, total_tokens). remaining: tokens the caller may still spend today (None = no cap);
-        a retry is skipped once the calls so far have used that up."""
+        a retry is skipped once the calls so far have used that up. empty_notice receives the final
+        empty-answer reason separately, so internal callers can keep treating empty text as empty."""
         if time.monotonic() - self._hosts_at >= 300:
             try:
                 await self.model_hosts()
@@ -85,11 +87,21 @@ class LLM:
             # and some providers reject "none".
             try:
                 fallback_max = min(max_tokens, remaining - total) if remaining is not None else max_tokens
-                text, more, _, cut = await self._complete({**payload, "max_tokens": fallback_max, "reasoning_effort": "none"})
+                text, more, thought, cut = await self._complete({**payload, "max_tokens": fallback_max, "reasoning_effort": "none"})
                 final_max = fallback_max
                 total += more
             except LLMError:
                 pass
+        if not text and empty_notice:
+            if thought and cut:
+                why = f"the model used all {final_max} tokens on reasoning; ask with a higher max_tokens"
+            elif thought:
+                why = "the model produced reasoning but no final text"
+            elif cut:
+                why = f"the model hit max_tokens={final_max} without final text; ask with a higher max_tokens"
+            else:
+                why = "the model returned nothing"
+            empty_notice(why)
         if text and cut:  # don't pass half an answer off as a whole one
             notice = cut_notice(final_max) if cut_notice else f"…(cut off at max_tokens={final_max}; ask again with a higher max_tokens or ask for less)"
             text = text.rstrip() + "\n\n" + notice
@@ -111,6 +123,8 @@ class LLM:
             choice = data["choices"][0]
             msg = choice["message"]
             text = msg.get("content") or ""
+            if not text.strip():
+                text = ""
         except (KeyError, IndexError, TypeError, AttributeError) as e:
             raise LLMError("gateway returned no choices") from e
         thought = bool(msg.get("reasoning") or msg.get("reasoning_content"))

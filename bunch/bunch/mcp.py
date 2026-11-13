@@ -36,10 +36,10 @@ TOOLS = [
      "inputSchema": _obj({"id": {"type": "integer"}, "offset": {"type": "integer"}}, ["id"])},
     {"name": "ask",
      "description": "Run a prompt on any model via the gateway. model='?' lists models. "
-                    "room=name posts there. max_tokens overrides the default, within hub/budget limits.",
+                    "room posts there; note adds a first line. max_tokens is capped by hub/budget limits.",
      "inputSchema": _obj({"model": {"type": "string"}, "prompt": {"type": "string"},
                           "system": {"type": "string"}, "max_tokens": {"type": "integer"},
-                          "room": {"type": "string"}}, ["model"])},
+                          "room": {"type": "string"}, "note": {"type": "string", "maxLength": 200}}, ["model"])},
     {"name": "rooms",
      "description": "Rooms with unread counts and summaries, plus agents.",
      "inputSchema": _obj({})},
@@ -72,7 +72,7 @@ async def call_tool(hub: Hub, agent: str, name: str, a: dict) -> str:
     if name == "ask":
         mt = a.get("max_tokens")
         return await hub.ask(agent, a.get("model", ""), a.get("prompt"), a.get("system"),
-                             int(mt) if mt not in (None, "") else None, a.get("room") or None)
+                             int(mt) if mt not in (None, "") else None, a.get("room") or None, note=a.get("note"))
     if name == "rooms":
         return hub.rooms(agent)
     raise HubError(f"unknown tool '{name}'")
