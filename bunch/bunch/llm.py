@@ -18,6 +18,14 @@ class LLMError(Exception):
     pass
 
 
+class LLMTransport(LLMError):
+    """The gateway couldn't be reached or timed out (not a rejection of the request)."""
+
+
+# Ways to ask for no thinking, tried in this order: OpenAI-style, then Ollama's own flag.
+NO_THINK = (("reasoning_effort", "none"), ("think", False))
+
+
 class LLM:
     def __init__(self, base_url: str, key: str, timeout: float = 180.0, think_max_tokens: int = 4_096,
                  model_probe: bool = True):
@@ -31,6 +39,7 @@ class LLM:
         self._hosts_at = float("-inf")
         self._probes: dict[str, tuple[float, bool]] = {}
         self._probe_locks: dict[str, asyncio.Lock] = {}
+        self._no_think: dict[str, str | None] = {}  # model -> the NO_THINK key the gateway took; None = it took neither
 
     def _http(self) -> httpx.AsyncClient:
         """One shared client, so connections to the gateway are reused."""
@@ -85,13 +94,27 @@ class LLM:
         if not text and thought and afford():
             # Still nothing: ask with thinking off. Only as a last resort, since answers get weaker
             # and some providers reject "none".
-            try:
-                fallback_max = min(max_tokens, remaining - total) if remaining is not None else max_tokens
-                text, more, thought, cut = await self._complete({**payload, "max_tokens": fallback_max, "reasoning_effort": "none"})
+            fallback_max = min(max_tokens, remaining - total) if remaining is not None else max_tokens
+            known = self._no_think.get(model, "")  # "" = not tried yet
+            for key, value in NO_THINK:
+                if known is None:
+                    break
+                if known and known != key:
+                    continue
+                try:
+                    text, more, thought, cut = await self._complete({**payload, "max_tokens": fallback_max, key: value})
+                except LLMTransport:
+                    break  # unreachable: the other variant would fail the same way
+                except LLMError:
+                    if known:
+                        break  # the variant that worked before now fails: leave it
+                    if key == NO_THINK[-1][0]:
+                        self._no_think[model] = None  # both rejected: don't try again
+                    continue
+                self._no_think[model] = key
                 final_max = fallback_max
                 total += more
-            except LLMError:
-                pass
+                break
         if not text and empty_notice:
             if thought and cut:
                 why = f"the model used all {final_max} tokens on reasoning; ask with a higher max_tokens"
@@ -115,7 +138,7 @@ class LLM:
             model = payload["model"]
             host = self._hosts.get(model)
             target = f"{model} on {host}" if host else model
-            raise LLMError(f"{target}: {_transport_error(e, self.timeout)}") from e
+            raise LLMTransport(f"{target}: {_transport_error(e, self.timeout)}") from e
         if r.status_code != 200:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
         data = _json(r)
