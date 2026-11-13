@@ -24,7 +24,7 @@ from . import mcp as mcpmod
 from .autoreply import autoreply_loop, forget_room
 from .config import Settings, load
 from . import folders
-from .hub import MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError
+from .hub import MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError, post_id
 from .llm import LLM, LLMError
 from .router import route, route_agent_post
 from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store
@@ -452,6 +452,17 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(403, "admins only")
         return name
 
+    routing_tasks: set[asyncio.Task] = set()  # kept so they aren't garbage-collected mid-flight
+
+    async def route_later(mid: int, room: str, text: str, sender: str) -> None:
+        to: list[str] = []
+        try:
+            to = await route(hub, room, text, sender=sender, skip=mid)
+        except Exception as e:  # route() already falls back to "whole room" on model errors
+            log.warning("routing #%s failed: %s", mid, e)
+        finally:
+            hub.finish_routing(mid, to)
+
     @app.exception_handler(HubError)
     async def _hub_error(_req: Request, exc: HubError):
         return PlainTextResponse(f"error: {exc}", status_code=400)
@@ -788,10 +799,16 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         known = store.agent_names()
         named = [n.rstrip(".") for n in MENTION_RE.findall((body.text or "").lower())]
         addressed = to or body.re is not None or any(n in known for n in named)
-        if not addressed and (body.text or "").strip():
-            to = await route(hub, room.strip().lower().lstrip("#"), body.text, sender=name) or None
-        return {"result": hub.post(name, room, body.text, to=to, summary=body.summary,
-                                   reply_to=body.re, human=True),
+        pick = not addressed and bool((body.text or "").strip())
+        # Nobody named: show the message now and choose who answers in the background (#76). Waiting for the
+        # router model first kept it off everyone's screen for seconds, and lost it if the hub went down.
+        result = hub.post(name, room, body.text, to=to, summary=body.summary, reply_to=body.re, human=True,
+                          routing=pick)
+        if pick:
+            task = asyncio.create_task(route_later(post_id(result), room.strip().lower().lstrip("#"), body.text, name))
+            routing_tasks.add(task)
+            task.add_done_callback(routing_tasks.discard)
+        return {"result": result,
                 "unknown": sorted({n for n in named if n not in known})}  # a typo'd @ otherwise asks nobody
 
     @app.get("/api/admin/search")
