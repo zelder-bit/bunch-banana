@@ -325,6 +325,10 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         raise SystemExit(f"BUNCH_HUMAN_NAME can't be '{s.human_name}': there is an agent with that name. "
                          f"Pick another name, or remove the agent:\n"
                          f"  docker compose run --rm bunch python -m bunch.cli remove {s.human_name}") from None
+    fr = store.setting("first_responder")
+    if fr and not ((row := store.agent(fr)) and row["kind"] == "agent"):  # removed since it was picked
+        store.set_setting("first_responder", "")
+        log.warning("first responder %r is not an agent any more; cleared", fr)
     llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens, model_probe=s.model_probe)
     hub = Hub(store, s, llm)
 
