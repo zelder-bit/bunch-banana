@@ -8,6 +8,7 @@ import json
 import posixpath
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
@@ -116,6 +117,7 @@ class Hub:
         self.store = store
         self.s = settings
         self.llm = llm
+        self._shingle_cache = OrderedDict()  # bounded rooms and recent texts; edits change the cache key
         self.listeners: set[asyncio.Queue] = set()  # web viewer sockets
         self._event = asyncio.Event()                # wakes long-polling readers
         self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
@@ -496,10 +498,25 @@ class Hub:
     def stall(self, m) -> str | None:
         """Why a bot-mode handoff in m would be a loop (None when it's fine): it repeats a recent
         message, or the last PING_PONG agent messages are just two agents taking turns."""
-        text = m["body"] or m["summary"]
+        cache = self._shingle_cache.setdefault(m["room"], OrderedDict())
+        self._shingle_cache.move_to_end(m["room"])
+        while len(self._shingle_cache) > 32:
+            self._shingle_cache.popitem(last=False)
+
+        def shingles(row):
+            key = (row["id"], row["body"] or row["summary"])
+            if key not in cache:
+                cache[key] = _shingles(key[1])
+            cache.move_to_end(key)
+            while len(cache) > ECHO_LOOKBACK + 1:
+                cache.popitem(last=False)
+            return cache[key]
+
+        sa = shingles(m)
         for p in self.store.q("SELECT * FROM messages WHERE room=? AND id<? AND sender!=? ORDER BY id DESC LIMIT ?",
                               (m["room"], m["id"], HUB_SENDER, ECHO_LOOKBACK)):
-            if _similar(text, p["body"] or p["summary"]) >= ECHO_SIMILARITY:
+            sb = shingles(p)
+            if sa and sb and len(sa & sb) / len(sa | sb) >= ECHO_SIMILARITY:
                 return f"#{m['id']} repeats #{p['id']}"
         last = self.store.q("SELECT sender, human FROM messages WHERE room=? AND id<=? AND sender!=? "
                             "ORDER BY id DESC LIMIT ?", (m["room"], m["id"], HUB_SENDER, PING_PONG))
@@ -579,10 +596,29 @@ class Hub:
 
     # ---------------------------------------------------------------- search
     def search(self, q: str, room: str | None = None, limit: int = 50) -> list[dict]:
-        """Viewer search: newest messages whose summary or body contains q (case-insensitive for ASCII)."""
+        """Viewer search: ranked literal phrases, or substring search when SQLite lacks FTS5."""
         q = " ".join((q or "").split())
         if len(q) < 2:
             raise HubError("search for at least 2 characters")
+        if self.store.fts:
+            match = '"' + q.replace('"', '""') + '"'
+            where = "messages_fts MATCH ?"
+            args = [match]
+            if room:
+                where += " AND m.room=?"
+                args.append(room.strip().lower().lstrip("#"))
+            rows = self.store.q(
+                "SELECT m.*, snippet(messages_fts, -1, '', '', '…', 32) AS excerpt "
+                "FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid "
+                f"WHERE {where} ORDER BY bm25(messages_fts), m.id DESC LIMIT ?",
+                (*args, max(1, min(int(limit), 200))))
+            out = []
+            for m in rows:
+                j = self.message_json(m)
+                j.pop("body")
+                j["snippet"] = " ".join(m["excerpt"].split())
+                out.append(j)
+            return out
         like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         where = "(summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')"
         args: list = [like, like]
@@ -618,24 +654,59 @@ class Hub:
         return self._charge_ctx(agent, out)
 
     # ----------------------------------------------------------------- rooms
+    def room_overview(self, agent: str = "", fallback: bool = False) -> list[dict]:
+        # Aggregate once for the room lists; empty rooms still have zero counts.
+        rows = self.store.q(
+            "SELECT r.*, COUNT(m.id) AS count, COALESCE(MAX(m.id),0) AS last_id, "
+            "COUNT(CASE WHEN m.id>r.summary_upto THEN 1 END) AS newer, "
+            "COUNT(CASE WHEN m.id>COALESCE(c.last_id,0) AND m.sender!=? "
+            "AND instr(m.recipients,?)>0 THEN 1 END) AS mine, "
+            "COUNT(CASE WHEN m.id>COALESCE(c.last_id,0) AND m.sender!=? "
+            "AND (m.recipients='' OR instr(m.recipients,?)>0) THEN 1 END) AS new "
+            "FROM rooms r LEFT JOIN messages m ON m.room=r.name "
+            "LEFT JOIN cursors c ON c.room=r.name AND c.agent=? GROUP BY r.name ORDER BY r.name",
+            (agent, f",{agent},", agent, f",{agent},", agent))
+        recent = {}
+        if fallback:
+            for m in self.store.q(
+                "SELECT * FROM (SELECT room,sender,summary,id, "
+                "ROW_NUMBER() OVER (PARTITION BY room ORDER BY id DESC) AS rn FROM messages) "
+                "WHERE rn<=5 ORDER BY id"):
+                recent.setdefault(m["room"], []).append(f"{m['sender']}: {one_line(m['summary'], 70)}")
+        paused = set()
+        if not fallback and self.s.max_chain > 0:
+            paused = {r["room"] for r in self.store.q(
+                "SELECT room FROM (SELECT room,human,ROW_NUMBER() OVER "
+                "(PARTITION BY room ORDER BY id DESC) AS rn FROM messages "
+                "WHERE human=1 OR COALESCE(body,summary) NOT LIKE '(%; not answered)') "
+                "WHERE rn<=? GROUP BY room HAVING COUNT(*)>=? AND SUM(human)=0",
+                (self.s.max_chain, self.s.max_chain))}
+        out = []
+        for row in rows:
+            r = dict(row)
+            if r["summary"]:
+                r["summary"] += f" (+{r['newer']} newer)" if r["newer"] else ""
+            elif fallback:
+                r["summary"] = "recent: " + " | ".join(recent[r["name"]]) if r["name"] in recent else "(empty)"
+            r["paused"] = not r["bot"] and r["name"] in paused
+            out.append(r)
+        return out
+
     def rooms(self, agent: str) -> str:
         st = self.store
         joined = st.joined_rooms(agent)
         lines = []
-        for r in st.rooms()[:50]:
+        for r in self.room_overview(agent, fallback=True)[:50]:
             name = r["name"]
-            mine = st.one("SELECT COUNT(*) AS n FROM messages WHERE room=? AND id>? AND sender!=? "
-                          "AND instr(recipients, ?) > 0", (name, joined.get(name, 0), agent, f",{agent},"))["n"]
+            mine = r["mine"]
             if name in joined:
-                new = st.one("SELECT COUNT(*) AS n FROM messages WHERE room=? AND id>? AND sender!=? "
-                             "AND (recipients='' OR instr(recipients, ?) > 0)",
-                             (name, joined[name], agent, f",{agent},"))["n"]
+                new = r["new"]
                 status = f"{new} new" + (f", {mine} for you" if mine else "")
             else:
                 status = "not joined" + (f", {mine} for you" if mine else "")
             if r["bot"]:
                 status += ", bot mode"
-            lines.append(f"{name} ({status}): {one_line(self.room_summary(name), 100)}")
+            lines.append(f"{name} ({status}): {one_line(r['summary'], 100)}")
         if not lines:
             lines.append("no rooms yet (post to create one)")
         cutoff = time.time() - 600
@@ -679,11 +750,12 @@ class Hub:
             return {"mode": "manual"}
         return {**cfg, "system": row["system"] or ""}  # persona, shared with hub agents
 
-    def runs_as(self, row) -> str | None:
+    def runs_as(self, row, machines=None) -> str | None:
         """The power a machine agent actually gets: its setting, capped by the machine's WORKER_MAX_POWER and
         WORKER_DIRS (as clients/worker.py's effective_power does). None when it isn't on a machine."""
         cfg = self.worker_config(row)
-        m = self.store.machine(cfg.get("machine") or "") if cfg.get("mode") == "worker" or cfg.get("machine") else None
+        m = (self.store.machine(cfg.get("machine") or "") if machines is None else machines.get(cfg.get("machine"))) \
+            if cfg.get("mode") == "worker" or cfg.get("machine") else None
         if not m:
             return None
         want = cfg.get("power") if cfg.get("power") in WORKER_POWERS else "answer"
@@ -705,17 +777,17 @@ class Hub:
     def machine_online(m) -> bool:
         return bool(m) and (m["last_seen"] or 0) > time.time() - WORKER_OFFLINE_AFTER
 
-    def worker_state(self, row) -> str:
+    def worker_state(self, row, machines=None) -> str:
         """auto / manual / offline / online / busy / cooling, as the viewer and router see it."""
         if row["kind"] != "agent":
             return ""
         if row["model"]:
-            m = self.model_machine(row["model"])
-            return "offline" if m and not self.machine_online(self.store.machine(m)) else "auto"
+            m = self.model_machine(row["model"], machines)
+            return "offline" if m and not self.machine_online(self.store.machine(m) if machines is None else machines.get(m)) else "auto"
         cfg = self.worker_config(row)
         if cfg["mode"] != "worker":
             return "manual"
-        if not self.machine_online(self.store.machine(cfg["machine"])):
+        if not self.machine_online(self.store.machine(cfg["machine"]) if machines is None else machines.get(cfg["machine"])):
             return "offline"
         if row["status"] == "cooling":
             return "cooling" if (row["status_until"] or 0) > time.time() else "online"
@@ -762,22 +834,22 @@ class Hub:
         except Exception:  # older LiteLLM / key without access: just don't show hosts
             self._hosts = {}
 
-    def model_machine(self, model: str | None) -> str | None:
+    def model_machine(self, model: str | None, machines=None) -> str | None:
         """The paired machine a gateway model runs on (its api_base points there), if any."""
         host = (self._hosts.get(model or "") or "").lower()
         if not host:
             return None
         host = urlsplit(f"//{host}").hostname or host
         short = host if host[:1].isdigit() or ":" in host else host.split(".")[0]  # workstation.example.ts.net -> workstation
-        for m in self.store.machines():
+        for m in (self.store.machines() if machines is None else machines.values()):
             names = {m["name"], (m["hostname"] or "").lower(), *(a.lower() for a in json.loads(m["addresses"] or "[]"))}
             if host in names or short in names:
                 return m["name"]
         return None
 
-    def model_host(self, model: str | None) -> str | None:
+    def model_host(self, model: str | None, machines=None) -> str | None:
         """Where a gateway model runs: a paired machine's name if it's one of ours, else the raw host."""
-        return self.model_machine(model) or self._hosts.get(model or "")
+        return self.model_machine(model, machines) or self._hosts.get(model or "")
 
     async def model_list(self) -> str:
         names = await self.llm.models()
@@ -807,12 +879,12 @@ class Hub:
             lines.append(name + (" [" + ", ".join(parts) + "]" if parts else ""))
         return "models:\n" + "\n".join(lines)
 
-    def agent_machine(self, row) -> str | None:
+    def agent_machine(self, row, machines=None) -> str | None:
         """The computer that actually answers for an agent: its worker's machine, or where its model runs."""
         if row["kind"] != "agent":
             return None
         if row["model"]:
-            return self.model_machine(row["model"])
+            return self.model_machine(row["model"], machines)
         return self.worker_config(row).get("machine")
 
     def _unavailable_notices(self, mid: int) -> None:

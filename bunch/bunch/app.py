@@ -24,7 +24,7 @@ from . import mcp as mcpmod
 from .autoreply import autoreply_loop, forget_room
 from .config import Settings, load
 from . import folders
-from .hub import MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError, post_id
+from .hub import CACHE_WEIGHT, MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError, post_id
 from .llm import LLM, LLMError
 from .router import route, route_agent_post
 from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store
@@ -518,7 +518,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         """A session proves it's really name by its password, at the sign-in page's rate. Right: earlier
         typos from this address stop counting. Wrong: 403, not 401 (that would sign the viewer out)."""
         recent = check_login_rate(request, name)
-        if not store.verify_user(name, password or ""):
+        if not await asyncio.to_thread(store.verify_user, name, password or ""):
             await failed_login(request, recent, name)
             raise HTTPException(403, wrong)
         clear_failures(request, name)
@@ -535,7 +535,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @app.post("/api/auth/login")
     async def login(body: LoginIn, request: Request):
         recent = check_login_rate(request, body.name)
-        row = store.verify_user(body.name, body.password)
+        row = await asyncio.to_thread(store.verify_user, body.name, body.password)
         if not row:
             await failed_login(request, recent, body.name)
             raise HTTPException(401, "wrong name or password")
@@ -777,10 +777,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         viewer(request, authorization)
         out = []
         kinds = {f["room"]: f["kind"] for f in store.q("SELECT room, kind FROM folders")}
-        for r in store.rooms():
-            last = store.one("SELECT MAX(id) AS id, COUNT(*) AS n FROM messages WHERE room=?", (r["name"],))
-            out.append({"name": r["name"], "summary": hub.room_summary(r["name"], fallback=False),
-                        "count": last["n"], "last_id": last["id"] or 0, "paused": hub.paused(r["name"]),
+        for r in hub.room_overview():
+            out.append({"name": r["name"], "summary": r["summary"],
+                        "count": r["count"], "last_id": r["last_id"], "paused": r["paused"],
                         "bot": bool(r["bot"]), "folder": kinds.get(r["name"])})
         return out
 
@@ -905,31 +904,34 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         _, admin = viewer(request, authorization)
         await hub.refresh_model_hosts()
         out = []
+        usage = store.usage_by_agent()
+        zero = {"ask": 0, "ctx": 0, "sub": 0, "calls": 0, "cached": 0}
+        machines = {m["name"]: m for m in store.machines()}
         first = store.setting("first_responder")
         for a in store.agents():
-            u = store.usage_today(a["name"])
+            u = usage.get(a["name"], zero)
             out.append({"name": a["name"], "kind": a["kind"], "last_seen": a["last_seen"],
                         "description": a["description"], "model": a["model"],
-                        "daily_tokens": hub.budget(a["name"]) if a["kind"] == "agent" else None,
+                        "daily_tokens": (a["daily_tokens"] if a["daily_tokens"] is not None else hub.s.daily_tokens) if a["kind"] == "agent" else None,
                         "budget_set": a["daily_tokens"], "system": a["system"] if admin else None,
                         "ask_tokens_today": u["ask"], "ctx_tokens_today": u["ctx"],
                         "sub_tokens_today": u["sub"], "sub_calls_today": u["calls"],
-                        "sub_cached_today": u["cached"], "spent_today": hub.spent(a["name"]),
-                        "state": hub.worker_state(a), "status_until": a["status_until"],
+                        "sub_cached_today": u["cached"], "spent_today": u["ask"] + u["sub"] + int(u["cached"] * CACHE_WEIGHT),
+                        "state": hub.worker_state(a, machines), "status_until": a["status_until"],
                         "worker": _worker_view(hub.worker_config(a), admin),
-                        "runs_as": hub.runs_as(a),
-                        "runs_on": hub.model_host(a["model"]) if a["model"] else None,
-                        "machine": hub.agent_machine(a), "first_responder": a["name"] == first,
+                        "runs_as": hub.runs_as(a, machines),
+                        "runs_on": hub.model_host(a["model"], machines) if a["model"] else None,
+                        "machine": hub.agent_machine(a, machines), "first_responder": a["name"] == first,
                         "avatar": shown_avatar(a["avatar"]) if a["kind"] == "human" else None})
         # The hub's own helpers are listed only while they can run (a model set and the gateway on, as in
         # lifespan() and router.route()) or have used tokens today.
         for system, model, does in (("_summarizer", hub.s.summary_model, "writes the room summaries"),
                                     ("_router", hub.s.router_model, "picks who answers")):
-            u = store.usage_today(system)
+            u = usage.get(system, zero)
             if (model and hub.llm.enabled) or u["ask"]:
                 out.append({"name": system, "kind": "system", "last_seen": None, "description": does,
                             "model": model or None, "daily_tokens": None,
-                            "runs_on": hub.model_host(model) if model else None, "machine": hub.model_machine(model),
+                            "runs_on": hub.model_host(model, machines) if model else None, "machine": hub.model_machine(model, machines),
                             "ask_tokens_today": u["ask"], "ctx_tokens_today": 0})
         return out
 
@@ -1162,7 +1164,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             require_admin(request, authorization)
         name = body.name.strip().lower()
         try:
-            store.create_user(name, body.password, body.admin)
+            await asyncio.to_thread(store.create_user, name, body.password, body.admin)
         except ValueError as e:
             raise HTTPException(400, str(e))
         hub.agents_changed()
@@ -1180,7 +1182,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         elif who != name:
             await admin_proves_it(request, authorization, body.my_password)
         try:
-            store.set_password(name, body.password)
+            await asyncio.to_thread(store.set_password, name, body.password)
         except ValueError as e:
             raise HTTPException(400, str(e))
         if who == name and not token_auth(request, authorization):  # keep the person who changed it signed in
