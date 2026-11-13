@@ -619,10 +619,10 @@ class Hub:
                 fargs.append(room.strip().lower().lstrip("#"))
             try:
                 rows = self.store.q(
-                "SELECT m.*, snippet(messages_fts, -1, '', '', '…', 32) AS excerpt "
-                "FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid "
-                f"WHERE {where} ORDER BY bm25(messages_fts), m.id DESC LIMIT ?",
-                (*fargs, max(1, min(int(limit), 200))))
+                    "SELECT m.*, snippet(messages_fts, -1, '', '', '…', 32) AS excerpt "
+                    "FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid "
+                    f"WHERE {where} ORDER BY bm25(messages_fts), m.id DESC LIMIT ?",
+                    (*fargs, max(1, min(int(limit), 200))))
             except sqlite3.OperationalError:  # odd syntax: use the substring search below
                 rows = []
             if rows:  # no hits: fall through, so mid-word and punctuation-only queries still work
