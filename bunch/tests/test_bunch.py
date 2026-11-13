@@ -1178,6 +1178,9 @@ def test_worker_builds_lean_cli_commands():
     assert argv[:2] == ["claude", "-p"] and cwd == "/tmp/x" and stdin == "the prompt"
     assert argv[argv.index("--tools") + 1] == "" and argv[argv.index("--system-prompt") + 1] == "be brief"
     assert argv[argv.index("--model") + 1] == "sonnet"
+    argv, cwd, stdin = w.build_cmd({"cli": "claude"}, "s", "read", "/d", "p")
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob" and "--allowedTools" not in argv
+    assert cwd == "/d" and stdin == "p"
     argv, _, _ = w.build_cmd({"cli": "claude", "model": "sonnet", "deep_model": "opus"}, "s", "full", "/d", "p", True)
     assert argv[argv.index("--model") + 1] == "opus" and "acceptEdits" in argv and "--system-prompt" not in argv
     argv, _, stdin = w.build_cmd({"cli": "codex", "model": ""}, "sys", "read", "/d", "p")
@@ -1188,12 +1191,16 @@ def test_worker_builds_lean_cli_commands():
     # Answer-only: its read-only sandbox can still read any file, so the shell is turned off entirely.
     argv, _, _ = w.build_cmd({"cli": "codex"}, "s", "answer", "/d", "p")
     disabled = {argv[i + 1] for i, a in enumerate(argv) if a == "--disable"}
-    assert {"shell_tool", "unified_exec", "view_image", "browser_use", "computer_use", "apps", "plugins"} <= disabled
+    assert {"shell_tool", "unified_exec", "view_image", "browser_use", "computer_use", "apps", "plugins",
+            "image_generation", "browser_use_external", "multi_agent"} <= disabled
     assert argv[argv.index("-s") + 1] == "read-only" and argv[-1] == "-"
     assert argv[argv.index("-c") + 1] == "mcp_servers={}"  # the person's own MCP servers stay out too
+    assert 'web_search="disabled"' in [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
+    with pytest.raises(ValueError, match="agy cannot be limited"):
+        w.build_cmd({"cli": "agy"}, "s", "answer", "/d", "p")
     # agy ignores stdin, so the prompt goes in -p (last, so no flag can swallow it).
-    argv, _, stdin = w.build_cmd({"cli": "agy", "model": "gemini-3.8-flash-low"}, "sys", "answer", "/d", "p")
-    assert argv[-2:] == ["-p", "sys\n\np"] and stdin is None and "--sandbox" in argv
+    argv, _, stdin = w.build_cmd({"cli": "agy", "model": "gemini-3.8-flash-low"}, "sys", "read", "/d", "p")
+    assert argv[-2:] == ["-p", "sys\n\np"] and stdin is None and "--sandbox" not in argv
     assert "--mode" not in argv and "--disable-slash-commands" in argv  # plan mode writes plans, not answers
     assert argv[argv.index("--model") + 1] == "gemini-3.8-flash-low"
     argv, _, _ = w.build_cmd({"cli": "agy"}, "s", "full", "/d", "p")

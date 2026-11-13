@@ -455,7 +455,7 @@
     return { on: active, title: active ? "Own session: its client read in the last 10 min"
       : "Own session: it sees messages next time its client reads" };
   }
-  const POWER_LABELS = { answer: "Answer only: no tools, no files (cheapest)", read: "Read files in a folder",
+  const POWER_LABELS = { answer: "Answer only: no files, no commands", read: "Read files in a folder",
                          full: "Edit files and run commands in a folder" };
   // The machine has the last word on powers: say how to give it more, since a fresh pairing allows answer only.
   const raisePowerHow = (m) => `${m.name} allows ${m.max_power === "read" ? "reading files" : "answer only"}. For more, on ${m.name} `
@@ -581,7 +581,7 @@
       const capped = m && rank.indexOf(power.value) > allowed;
       for (const o of power.options) {  // the machine would run these as less anyway; keep a saved one visible
         o.disabled = !!m && o.value !== power.value && rank.indexOf(o.value) > allowed;
-        o.textContent = POWER_LABELS[o.value] + (m && rank.indexOf(o.value) > allowed ? ` (${m.name} doesn't allow it yet)` : "");
+        o.textContent = (p.cli === "agy" && o.value === "answer" ? "Answer only: agy won't answer" : POWER_LABELS[o.value]) + (m && rank.indexOf(o.value) > allowed ? ` (${m.name} doesn't allow it yet)` : "");
       }
       const d = dir.value.trim().replace(/\/+$/, "");
       const outside = m && power.value !== "answer" && !capped && (!(m.dirs || []).length
@@ -590,10 +590,12 @@
         + (m && allowed < 2 ? raisePowerHow(m) + ". " : "")
         + (outside ? `That folder isn't in ${m.name}'s WORKER_DIRS (${(m.dirs || []).join(", ") || "none"}), so it will run as answer only. ` : "")
         + (power.value !== "full" ? "Pictures need \"Edit files and run commands\". " : "")
-        + (power.value === "full" ? "Anyone who can @mention this agent can make it change files and run commands there."
-          : power.value === "read" ? (p.cli === "claude" ? "Can read anything in the folder and quote it into the chat."
+        + (p.cli === "agy" ? "agy has no answer-only mode: on answer power it does not answer, including when capped by the machine. " : "Answer only means no files and no commands for Claude and Codex. ")
+        + (power.value === "full" ? "Anyone who can @mention this agent can make it change files and run commands. WORKER_DIRS chooses the start folder for every CLI, including Claude; a CLI with a shell is not confined to it. Only a separate OS user, a container or a sandbox confines an agent."
+          : power.value === "read" ? (p.cli === "claude" ? "Can read inside its folder only and quote it into the chat."
             : `Can read and quote files in the folder. ${CLI_NAMES[p.cli] || p.cli} may also read files outside it, anything `
-              + `the user on ${m?.name || "that machine"} can (e.g. ~/.ssh), so only use this where everyone in the chat is trusted.`) : "");
+              + `the user on ${m?.name || "that machine"} can (e.g. ~/.ssh), so only use this where everyone in the chat is trusted.`
+              + (p.cli === "agy" ? " agy can also write files and run commands." : "")) : "");
     };
     who.onchange = power.onchange = sync; dir.oninput = sync;
     sync();
@@ -662,7 +664,7 @@
         try { await navigator.clipboard.writeText(cmd); toast("Command copied", "good"); } catch { toast("Select the command and copy it", "bad"); } } }, "Copy")];
     return [h("strong", null, `Pair ${name}`), h("span", { class: "muted" }, ": run this on it, as the user logged in to Claude Code, Codex or Antigravity (worker.py is in the bunch repo's clients/ folder). Shown once."),
       h("code", null, cmd),
-      h("span", { class: "muted small" }, "Its agents can only answer until you allow more. To let them read a folder, add --max-power read --dirs ~/code/app "
+      h("span", { class: "muted small" }, "Claude and Codex agents can only answer until you allow more; agy agents won't answer. To let them read a folder, add --max-power read --dirs ~/code/app "
         + "(or --max-power full to edit files and run commands there). You can change this later in that machine's ~/.config/bunch/bunch-worker.env."),
       h("button", { class: "btn small", style: "margin-top:8px", type: "button", onclick: async () => {
         try { await navigator.clipboard.writeText(cmd); toast("Command copied", "good"); } catch { toast("Select the command and copy it", "bad"); } } }, "Copy")];

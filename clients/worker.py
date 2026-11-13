@@ -414,7 +414,7 @@ def effective_power(cfg, max_power=MAX_POWER, dirs=DIRS):
     return power, d
 
 
-CODEX_ANSWER_OFF = ("shell_tool", "unified_exec", "view_image", "browser_use", "browser_use_external",
+CODEX_ANSWER_OFF = ("shell_tool", "unified_exec", "view_image", "image_generation", "browser_use", "browser_use_external",
                     "computer_use", "apps", "plugins", "multi_agent")
 
 
@@ -428,8 +428,8 @@ def build_cmd(cfg, system, power, workdir, prompt, deep=False):
         if power == "answer":  # no tools, no settings, short system prompt: ~1k tokens of overhead
             argv += ["--tools", "", "--setting-sources", "", "--system-prompt", system]
         elif power == "read":
-            argv += ["--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob",
-                     "--append-system-prompt", system]
+            # Unscoped allowedTools permits reads outside cwd (Claude Code 2.1.323); default permissions deny them.
+            argv += ["--tools", "Read,Grep,Glob", "--append-system-prompt", system]
         else:
             argv += ["--permission-mode", "acceptEdits", "--allowedTools", "Read,Grep,Glob,Edit,Write,Bash",
                      "--append-system-prompt", system]
@@ -438,20 +438,21 @@ def build_cmd(cfg, system, power, workdir, prompt, deep=False):
         argv = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--ignore-rules"]
         argv += ["-m", model] if model else []
         if power == "answer":  # Codex's read-only sandbox still lets commands read any file the user can: no shell,
-            # nor the other tools that can open files or reach out (checked on codex-cli 0.166), nor the
+            # nor the other tools that can open files or reach out (checked on codex-cli 0.157.1), nor the
             # person's own MCP servers. An older Codex without one of these flags stops with "Unknown feature
             # flag" instead of running unprotected.
-            argv += ["-c", "mcp_servers={}"]
+            argv += ["-c", "mcp_servers={}", "-c", 'web_search="disabled"']
             for feature in CODEX_ANSWER_OFF:
                 argv += ["--disable", feature]
         argv += ["-s", "workspace-write" if power == "full" else "read-only", "-C", workdir, "-"]
         return argv, workdir, f"{system}\n\n{prompt}"
     if cli == "agy":  # agy ignores stdin: the prompt rides in -p
+        if power == "answer":
+            raise ValueError("agy cannot be limited to answering")
         argv = ["agy", "--output-format", "json", "--print-timeout", f"{TIMEOUT}s"]
         argv += ["--model", model] if model else []
         # Not --mode plan: that writes a plan file and asks to confirm it instead of answering (3-5x the tokens).
         argv += ["--mode", "accept-edits"] if power == "full" else ["--disable-slash-commands"]
-        argv += ["--sandbox"] if power == "answer" else []
         argv += ["-p", f"{system}\n\n{prompt}"]
         return argv, workdir, None
     raise ValueError(f"unknown cli {cli}")
@@ -645,6 +646,10 @@ class Worker:
                 except (OSError, urllib.error.URLError, subprocess.TimeoutExpired) as e:
                     print(f"  room folder not ready: {e}", file=sys.stderr)
                     shared, shared_note = None, f"(couldn't get the room folder: {str(e)[:160]})"
+        # agy 1.5.6 still reads, writes and runs commands with --sandbox; it has no answer-only mode.
+        if cli == "agy" and power == "answer":
+            return self.reply(job, f"(agy can't be limited to answering: it can read files and run commands on {self.machine}. "
+                                  "Give this agent 'read' or 'full' power on a machine that allows it; not answered)")
         # Pictures come back as files in a folder only the worker uses, so nothing else in a project gets posted.
         out = os.path.join(d, OUT_DIR) if d else self.scratch
         system += picture_hint(power, d)
@@ -768,6 +773,7 @@ EnvironmentFile={env}
 ExecStart={python} {script}
 Restart=always
 RestartSec=10
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=default.target
