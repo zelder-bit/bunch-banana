@@ -22,6 +22,7 @@ PROMPT = ("You route chat messages from a human to AI agents. Pick the agent(s) 
 LABELS = {"auto": "auto, cheap", "online": "subscription", "busy": "subscription, busy"}
 FOLLOW_UP_WORDS = 3   # "try again", "go on", "thanks": too short for the model to route on its own
 FOLLOW_UP_WINDOW = 1800
+QUICK_FOLLOW_UP = 120  # seconds: a reply this fresh to the same person makes any next message theirs to continue
 # "go more in depth with this", "can you expand on that": longer, but still a follow-up to the last answer
 BACK_REF_RE = re.compile(r"\b(?:this|that|it|those|these|more|again|above|expand|elaborate|in depth|continue)\b", re.I)
 
@@ -67,14 +68,19 @@ async def route(hub: Hub, room: str, text: str, timeout: float | None = None, se
     names = {a["name"] for a, _ in agents}
     # A follow-up goes to whoever answered last here, not to a new pick: any very short message, or one
     # that refers back when the last agent message answered this same person.
-    last = st.one("SELECT sender, reply_to FROM messages WHERE room=? AND human=0 AND created>? ORDER BY id DESC LIMIT 1",
+    last = st.one("SELECT sender, reply_to, created FROM messages WHERE room=? AND human=0 AND created>? ORDER BY id DESC LIMIT 1",
                   (room, time.time() - FOLLOW_UP_WINDOW)) if routing else None
     if last and last["sender"] in names:
         if len(text.split()) <= FOLLOW_UP_WORDS:
             return [last["sender"]]
         asked = st.message(last["reply_to"]) if last["reply_to"] else None
-        if sender and asked and asked["sender"] == sender and BACK_REF_RE.search(text):
-            return [last["sender"]]
+        if sender and asked and asked["sender"] == sender:
+            # The word limit is by design: longer messages may start a new topic. But the agent's reply to this
+            # same person was the last thing said here moments ago and nobody is @'d: "i dont see todo_list.py"
+            # is about that reply, whatever its length. Kept narrow (fresh, same person, no @mention).
+            quick = time.time() - last["created"] < QUICK_FOLLOW_UP and not MENTION_RE.search(text)
+            if quick or BACK_REF_RE.search(text):
+                return [last["sender"]]
     if first in names:  # the admin picked who takes un-@'d messages: no need to ask a model
         return [first]
     if not routing:  # first responder is offline or cooling: the message goes to the whole room
@@ -88,7 +94,7 @@ async def route(hub: Hub, room: str, text: str, timeout: float | None = None, se
             {"role": "system", "content": PROMPT}, {"role": "user", "content": user}], 40, user=ROUTER), timeout)
     except Exception as e:  # gateway down, model missing, timeout: fall back to room-wide
         log.warning("routing failed: %s", e)
-        return []
+        return _last_answerer(st, room, sender, names)
     st.add_usage(ROUTER, ask=tokens)
     picked: list[str] = []
     for word in re.findall(r"[a-z0-9][a-z0-9_.-]*", (answer or "").lower()):
@@ -98,3 +104,17 @@ async def route(hub: Hub, room: str, text: str, timeout: float | None = None, se
     autos = [n for n in picked if states[n] == "auto"]
     picked = [n for n in picked if states[n] != "auto" or n == autos[0]]  # two local models saying the same thing is noise
     return picked[:2]
+
+
+def _last_answerer(st, room: str, sender: str | None, names: set[str]) -> list[str]:
+    """Router model unavailable (slow to load, down): the available agent that last replied to this same sender
+    here, within the follow-up window, else nobody."""
+    if not sender:
+        return []
+    for r in st.q("SELECT sender, reply_to FROM messages WHERE room=? AND human=0 AND reply_to IS NOT NULL AND created>? "
+                  "ORDER BY id DESC LIMIT 20", (room, time.time() - FOLLOW_UP_WINDOW)):
+        if r["sender"] in names:
+            asked = st.message(r["reply_to"])
+            if asked and asked["sender"] == sender:
+                return [r["sender"]]
+    return []
