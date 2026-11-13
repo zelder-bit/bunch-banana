@@ -817,11 +817,24 @@ class Hub:
             why = self.over_budget(agent, budget, used)
             if why:
                 raise HubError(why)
-            mt = max(1, min(int(max_tokens or self.s.ask_max_tokens), self.s.ask_max_tokens))
+            requested = int(max_tokens) if max_tokens is not None else self.s.ask_max_tokens
+            limit = self.s.ask_max_tokens_limit
+            remaining = max(0, budget - used) if budget else None
+            mt = max(1, min(requested, limit))
+            reason = "the hub's limit"
+            if remaining is not None and remaining < mt:
+                mt, reason = remaining, "what is left of today's budget"
+            lowered = (f"\n[max_tokens lowered from {requested} to {mt}: {reason}]"
+                       if not raw and max_tokens is not None and mt < requested else "")
+            def cut_notice(n):
+                if raw:  # auto agents keep the original answer text, including its cut-off marker
+                    return "…(cut off at the length limit; ask me to continue)"
+                return (f"…(cut off at max_tokens={n}; ask again with a higher max_tokens, "
+                        f"up to {limit} and within today's remaining budget, or ask for less)")
             msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
             # the retries inside chat() stop once today's budget is used up
             text, tokens = await self.llm.chat(model, msgs, mt, user=agent,
-                                               remaining=max(0, budget - used) if budget else None)
+                                               remaining=remaining, retry_limit=limit, cut_notice=cut_notice)
         except LLMError as e:
             raise HubError(str(e)) from e
         self.store.add_usage(agent, ask=tokens)
@@ -830,7 +843,7 @@ class Hub:
             return self._charge_ctx(agent, text or "")
         note = f"\n[budget {used}/{budget} today]" if budget and used > 0.8 * budget else ""
         if room:  # put the answer in a room for visibility; hand back only the short line
-            res = self.post(agent, room, text or "(empty answer)")
+            res = self.post(agent, room, (text or "(empty answer)") + lowered)
             mid = post_id(res)
-            return self._charge_ctx(agent, f"posted {self.fmt_line(self.store.message(mid), agent, True)}{note}")
-        return self._charge_ctx(agent, (text or "(empty answer)") + note)
+            return self._charge_ctx(agent, f"posted {self.fmt_line(self.store.message(mid), agent, True)}{note}{lowered}")
+        return self._charge_ctx(agent, (text or "(empty answer)") + note + lowered)

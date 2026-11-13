@@ -56,8 +56,12 @@ class Settings:
     max_request: int = 1_000_000   # largest request body on any other route (bytes); never below 4 x max_body
     max_files_total: int = 2_000_000_000  # all attachments together (bytes); uploads past it get 413 (0 = unlimited)
     max_folder: int = 500_000_000  # one room's shared folder, history included (bytes; 0 = unlimited)
-    ask_max_tokens: int = 1_024    # default/upper max_tokens for ask()
+    ask_max_tokens: int = 1_024    # default max_tokens for ask()
+    ask_max_tokens_limit: int = 8_192  # caller ceiling; never below the default
     think_max_tokens: int = 4_096  # retry budget when a thinking model spends max_tokens on reasoning (0 = off)
+
+    def __post_init__(self):
+        object.__setattr__(self, "ask_max_tokens_limit", max(self.ask_max_tokens, self.ask_max_tokens_limit))
 
 
 def load(**overrides) -> Settings:
@@ -88,6 +92,7 @@ def load(**overrides) -> Settings:
         max_files_total=_int("BUNCH_MAX_FILES_TOTAL", 2_000_000_000),
         max_folder=_int("BUNCH_MAX_FOLDER", 500_000_000),
         ask_max_tokens=_int("BUNCH_ASK_MAX_TOKENS", 1_024),
+        ask_max_tokens_limit=_int("BUNCH_ASK_MAX_TOKENS_LIMIT", 8_192),
         think_max_tokens=_int("BUNCH_THINK_MAX_TOKENS", 4_096),
     )
     return replace(s, **overrides) if overrides else s

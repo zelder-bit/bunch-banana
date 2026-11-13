@@ -495,7 +495,7 @@ def test_llm_retries_and_marks_cut_off_answers():
         llm2, sent2, client2 = _llm_with([_choice("half an ans", "length")], orig)
         httpx.AsyncClient = client2
         text, _ = asyncio.run(llm2.chat("m", [{"role": "user", "content": "hi"}], 800))
-        assert text.startswith("half an ans") and "cut off at the length limit" in text and len(sent2) == 1
+        assert text.startswith("half an ans") and "cut off at max_tokens=800" in text and "ask me to continue" not in text and len(sent2) == 1
     finally:
         httpx.AsyncClient = orig
 
@@ -1991,3 +1991,90 @@ def test_summarizer_skips_a_failing_message(env, monkeypatch):
     assert auto() == [0, 0] and not summ._attempts  # third failure: keep the truncated summary, stop retrying
     asyncio.run(summarize_once(hub))
     assert summ._last_failures == 0
+
+
+@pytest.fixture
+def ask_hub(tmp_path):
+    from bunch.hub import Hub
+    from bunch.store import Store
+    store = Store(str(tmp_path / "hub.db"))
+    store.create_agent("helper")
+    yield Hub(store, Settings(daily_tokens=250), FakeLLM())
+    store.db.close()
+
+
+@pytest.mark.parametrize("requested,expected", [(None, 1024), (4000, 4000), (8192, 8192), (20000, 8192)])
+def test_ask_output_limit(ask_hub, requested, expected):
+    from bunch.mcp import call_tool
+    hub = ask_hub
+    hub.store.set_budget("helper", 0)
+    out = asyncio.run(call_tool(hub, "helper", "ask", dict(model="local/small", prompt="hi", max_tokens=requested)))
+    assert hub.llm.calls[-1][2] == expected
+    if requested == 20000:
+        assert out.endswith("[max_tokens lowered from 20000 to 8192: the hub's limit]")
+    else:
+        assert "lowered" not in out
+
+
+def test_ask_remaining_budget_and_room_notice(ask_hub):
+    hub = ask_hub
+    hub.store.add_usage("helper", ask=50)
+    out = asyncio.run(hub.ask("helper", "local/small", "hi", max_tokens=20000, room="results"))
+    notice = "[max_tokens lowered from 20000 to 200: what is left of today's budget]"
+    assert hub.llm.calls[-1][2] == 200
+    assert out.endswith(notice)
+    assert hub.store.message(post_id(out))["body"].endswith(notice)
+    out = asyncio.run(hub.ask("helper", "local/small", "hi"))
+    assert hub.llm.calls[-1][2] == 100  # omitted size is still capped by the budget
+    assert "lowered" not in out
+
+
+def test_ask_cut_notice(ask_hub):
+    hub = ask_hub
+    async def chat(model, messages, max_tokens, **kw):
+        return "partial\n\n" + kw["cut_notice"](max_tokens), 10
+    hub.llm.chat = chat
+    out = asyncio.run(hub.ask("helper", "local/small", "hi", max_tokens=200))
+    assert "cut off at max_tokens=200" in out
+    assert "up to 8192" in out and "ask for less" in out and "continue" not in out
+
+
+def test_ask_limit_config(monkeypatch):
+    from bunch.config import load
+    monkeypatch.setenv("BUNCH_ASK_MAX_TOKENS", "2048")
+    monkeypatch.setenv("BUNCH_ASK_MAX_TOKENS_LIMIT", "6000")
+    assert load().ask_max_tokens_limit == 6000
+    monkeypatch.setenv("BUNCH_ASK_MAX_TOKENS_LIMIT", "1000")
+    assert load().ask_max_tokens_limit == 2048
+    assert Settings(ask_max_tokens=10000).ask_max_tokens_limit == 10000
+    assert load(ask_max_tokens=12000).ask_max_tokens_limit == 12000
+
+
+@pytest.mark.parametrize("requested", [None, 20000])
+@pytest.mark.parametrize("budget", [0, 250])
+@pytest.mark.parametrize("reply,cut", [("answer \n", False), ("partial \n", True), ("", False)])
+def test_ask_raw_preserves_original_output(ask_hub, monkeypatch, requested, budget, reply, cut):
+    import httpx
+    hub = ask_hub
+    hub.store.set_budget("helper", budget)
+    llm, sent, client = _llm_with([_choice(reply, "length" if cut else "stop")], httpx.AsyncClient)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    hub.llm = llm
+    out = asyncio.run(hub.ask("helper", "local/small", "hi", max_tokens=requested, raw=True))
+    expected = reply
+    if cut:
+        expected = reply.rstrip() + "\n\n…(cut off at the length limit; ask me to continue)"
+    assert out == expected
+    assert sent[0]["max_tokens"] == (250 if budget else 8192 if requested else 1024)
+
+
+@pytest.mark.parametrize("room", [None, "results"])
+def test_ask_default_budget_cap_has_no_notice(ask_hub, room):
+    hub = ask_hub
+    out = asyncio.run(hub.ask("helper", "local/small", "hi", room=room))
+    assert hub.llm.calls[-1][2] == 250
+    assert "lowered" not in out
+    if room:
+        assert hub.store.message(post_id(out))["summary"] == "answer from local/small"
+    else:
+        assert out == "answer from local/small"

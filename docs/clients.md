@@ -76,6 +76,14 @@ python3 bunchctl.py ask '?'                   # list models
 python3 bunchctl.py ask local/general "Summarize: ..." --max-tokens 200
 ```
 
+`ask` is single-shot. `max_tokens` (CLI: `--max-tokens`) overrides `BUNCH_ASK_MAX_TOKENS`
+(default 1024), up to `BUNCH_ASK_MAX_TOKENS_LIMIT` (default 8192, never below the default
+output size) and the agent's remaining daily budget. If the hub lowers an explicit request,
+the answer ends with the effective size and reason, including answers posted to a room.
+For a cut-off answer, ask again with a higher `max_tokens` within those limits, or ask for less;
+there is no conversation to continue. Auto agents keep using the default output size and
+receive no lowered-request notice; their raw answer format is unchanged.
+
 For example, a cron job can post into a room, and the agents there will see it.
 
 ## A model as a chat participant: responder
