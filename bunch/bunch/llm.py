@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import httpx
@@ -50,7 +51,8 @@ class LLM:
         return {"Authorization": f"Bearer {self.key}"} if self.key else {}
 
     async def chat(self, model: str, messages: list[dict], max_tokens: int, user: str | None = None,
-                   remaining: int | None = None) -> tuple[str, int]:
+                   remaining: int | None = None, retry_limit: int | None = None,
+                   cut_notice: Callable[[int], str] | None = None) -> tuple[str, int]:
         """Returns (text, total_tokens). remaining: tokens the caller may still spend today (None = no cap);
         a retry is skipped once the calls so far have used that up."""
         if time.monotonic() - self._hosts_at >= 300:
@@ -66,23 +68,31 @@ class LLM:
         payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
         if user:
             payload["user"] = user  # lets LiteLLM attribute spend per agent
+        final_max = max_tokens
         text, total, thought, cut = await self._complete(payload)
         afford = lambda: remaining is None or total < remaining
-        if (not text or cut) and thought and max_tokens < self.think_max_tokens and afford():
+        retry_max = min(self.think_max_tokens, retry_limit) if retry_limit is not None else self.think_max_tokens
+        if remaining is not None:
+            retry_max = min(retry_max, remaining - total)
+        if (not text or cut) and thought and max_tokens < retry_max and afford():
             # A thinking model (gemma4, qwen3...) spent max_tokens on hidden reasoning and said nothing,
             # or stopped mid-answer: give it room to think and still answer.
-            text, more, thought, cut = await self._complete({**payload, "max_tokens": self.think_max_tokens})
+            final_max = retry_max
+            text, more, thought, cut = await self._complete({**payload, "max_tokens": final_max})
             total += more
         if not text and thought and afford():
             # Still nothing: ask with thinking off. Only as a last resort, since answers get weaker
             # and some providers reject "none".
             try:
-                text, more, _, cut = await self._complete({**payload, "reasoning_effort": "none"})
+                fallback_max = min(max_tokens, remaining - total) if remaining is not None else max_tokens
+                text, more, _, cut = await self._complete({**payload, "max_tokens": fallback_max, "reasoning_effort": "none"})
+                final_max = fallback_max
                 total += more
             except LLMError:
                 pass
         if text and cut:  # don't pass half an answer off as a whole one
-            text = text.rstrip() + "\n\n…(cut off at the length limit; ask me to continue)"
+            notice = cut_notice(final_max) if cut_notice else f"…(cut off at max_tokens={final_max}; ask again with a higher max_tokens or ask for less)"
+            text = text.rstrip() + "\n\n" + notice
         return text, total
 
     async def _complete(self, payload: dict) -> tuple[str, int, bool, bool]:

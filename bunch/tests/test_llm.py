@@ -242,3 +242,33 @@ def test_probe_disabled_attempts_no_connection(monkeypatch):
             assert llm._hosts == {"local/coder": "host:11434"}
             await llm.aclose()
         asyncio.run(run())
+
+
+@pytest.mark.parametrize("remaining,expected", [(None, 300), (250, 150)])
+def test_retry_size_and_cut_notice(remaining, expected):
+    import json
+    sent = []
+    def handler(request):
+        sent.append(json.loads(request.content)["max_tokens"])
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "partial", "reasoning_content": "hmm"}, "finish_reason": "length"}],
+            "usage": {"total_tokens": 100}
+        })
+    llm = make(handler)
+    text, total = asyncio.run(llm.chat("m", [], 50, remaining=remaining, retry_limit=300,
+                                      cut_notice=lambda n: f"cut at {n}"))
+    assert sent == [50, expected] and total == 200
+    assert text.endswith(f"cut at {expected}")
+
+
+def test_non_thinking_fallback_size():
+    import json
+    sent = []
+    def handler(request):
+        sent.append(json.loads(request.content)["max_tokens"])
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "", "reasoning_content": "hmm"}, "finish_reason": "length"}],
+            "usage": {"total_tokens": 100}
+        })
+    asyncio.run(make(handler).chat("m", [], 80, remaining=150, retry_limit=80))
+    assert sent == [80, 50]

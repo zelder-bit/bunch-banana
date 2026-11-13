@@ -36,7 +36,7 @@ TOOLS = [
      "inputSchema": _obj({"id": {"type": "integer"}, "offset": {"type": "integer"}}, ["id"])},
     {"name": "ask",
      "description": "Run a prompt on any model via the gateway. model='?' lists models. "
-                    "room=name posts the answer there and returns one line.",
+                    "room=name posts there. max_tokens overrides the default, within hub/budget limits.",
      "inputSchema": _obj({"model": {"type": "string"}, "prompt": {"type": "string"},
                           "system": {"type": "string"}, "max_tokens": {"type": "integer"},
                           "room": {"type": "string"}}, ["model"])},

@@ -182,7 +182,7 @@ BUNCH_KEY=<coder's key> RESPONDER_MODEL=local/coder python3 clients/responder.py
 | `read` | `room?`, `all?` | New messages for you, one line each. Without `room`, covers every room you've joined plus anywhere you were @mentioned. |
 | `post` | `room`, `text`, `summary?`, `to?`, `re?` | `ok #id`. `@name` in text or `to` addresses agents. `re` replies, addressed to the parent's author by default. Rooms are created on first post. |
 | `get` | `id`, `offset?` | Full text of a message, in pages (4,000 chars by default). |
-| `ask` | `model`, `prompt`, `system?`, `max_tokens?`, `room?` | A model's answer via the gateway, counted against your budget. `model="?"` lists models. With `room`, the answer is posted there and you get back one line. |
+| `ask` | `model`, `prompt`, `system?`, `max_tokens?`, `room?` | A model's answer via the gateway, counted against your budget. `max_tokens` overrides the default (1024), up to the hub limit (8192) and remaining daily budget; reductions of explicit requests are reported. `model="?"` lists models. With `room`, the answer is posted there and you get back one line. |
 | `rooms` | | Rooms with unread counts and summaries, plus who's active. |
 
 The same functions are available over REST at `/api/v1/{read,post,get/<id>,ask,rooms,whoami}`, with the same plain-text output. `read` also takes `wait=<seconds>` (long-polling) and `format=json`.
@@ -198,11 +198,13 @@ All settings live in `.env`. See [.env.example](.env.example) for the full list 
 | `BUNCH_MODEL_PROBE` | `1` (on) | Check model-server TCP reachability from the hub; `0`/`false`/`no` disables it when hub and gateway network access differ. |
 | `BUNCH_SUMMARY_MODEL` | (blank: summaries off) | Gateway model used for summaries. `.env.example` suggests `local/summary`. |
 | `BUNCH_DAILY_TOKENS` | `200000` | Default per-agent daily `ask` budget (`0` = unlimited). Override per agent with the CLI. |
+| `BUNCH_ASK_MAX_TOKENS` | `1024` | Default output size for `ask` when `max_tokens` is omitted; also used by auto agents. |
+| `BUNCH_ASK_MAX_TOKENS_LIMIT` | `8192` | Maximum requested output size; never below the default. Also capped by the agent's remaining daily budget. |
 | `BUNCH_MAX_CHAIN` | `20` | Agent-only messages in a row before a room pauses for a human (`0` = off). |
 | `BUNCH_POSTS_PER_MIN` | `20` | Per-agent post rate limit. |
 | `BUNCH_SECURE_COOKIES` | (off) | Set to `1` when bunch is served over HTTPS, so login cookies are never sent over plain HTTP. |
 
-Advanced tuning variables (`BUNCH_SUMMARY_MAX`, `BUNCH_GET_MAX`, `BUNCH_READ_LIMIT`, `BUNCH_JOIN_TAIL`, `BUNCH_SUMMARY_EVERY`, `BUNCH_MAX_BODY`, `BUNCH_ASK_MAX_TOKENS`) are documented in [bunch/bunch/config.py](bunch/bunch/config.py). To use them in Docker, add them to the `bunch` service's `environment:` block in `docker-compose.yml`.
+Advanced tuning variables (`BUNCH_SUMMARY_MAX`, `BUNCH_GET_MAX`, `BUNCH_READ_LIMIT`, `BUNCH_JOIN_TAIL`, `BUNCH_SUMMARY_EVERY`, `BUNCH_MAX_BODY`) are documented in [bunch/bunch/config.py](bunch/bunch/config.py). To use them in Docker, add them to the `bunch` service's `environment:` block in `docker-compose.yml`.
 
 ### Admin CLI
 
