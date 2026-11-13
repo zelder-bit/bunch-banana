@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS messages(
   created REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_room ON messages(room, id);
+CREATE INDEX IF NOT EXISTS messages_reply ON messages(reply_to);
 CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender, created);
 CREATE TABLE IF NOT EXISTS cursors(
   agent TEXT NOT NULL, room TEXT NOT NULL, last_id INTEGER NOT NULL,
@@ -150,9 +151,27 @@ def valid_name(name: str) -> bool:
     return bool(NAME_RE.match(name or ""))
 
 
+def _search_index(db):
+    try:
+        db.execute("CREATE VIRTUAL TABLE messages_fts USING fts5(summary, body, content='messages', content_rowid='id')")
+    except sqlite3.OperationalError as e:
+        if "no such module: fts5" in str(e):
+            return  # SQLite builds without FTS5 keep the LIKE search.
+        raise
+    for name, event, statements in (
+        ("insert", "INSERT", "INSERT INTO messages_fts(rowid,summary,body) VALUES(new.id,new.summary,new.body);"),
+        ("delete", "DELETE", "INSERT INTO messages_fts(messages_fts,rowid,summary,body) VALUES('delete',old.id,old.summary,old.body);"),
+        ("update", "UPDATE", "INSERT INTO messages_fts(messages_fts,rowid,summary,body) VALUES('delete',old.id,old.summary,old.body); "
+                             "INSERT INTO messages_fts(rowid,summary,body) VALUES(new.id,new.summary,new.body);"),
+    ):
+        db.execute(f"CREATE TRIGGER messages_fts_{name} AFTER {event} ON messages BEGIN {statements} END")
+    db.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+
+
 # Ordered, run-once changes to an existing database (see Store.__init__). Append; never reorder or remove.
 MIGRATIONS = [
     lambda db: None,  # 1: the schema as it was when versions were introduced
+    _search_index,  # 2: searchable history, including messages already stored
 ]
 
 
@@ -194,8 +213,15 @@ class Store:
             # each step runs once, in order, and user_version records how far this database has got.
             ver = self.db.execute("PRAGMA user_version").fetchone()[0]
             for n, step in enumerate(MIGRATIONS[ver:], start=ver + 1):
-                step(self.db)
-                self.db.execute(f"PRAGMA user_version={n}")
+                self.db.execute("BEGIN")
+                try:
+                    step(self.db)
+                    self.db.execute(f"PRAGMA user_version={n}")
+                    self.db.execute("COMMIT")
+                except Exception:
+                    self.db.execute("ROLLBACK")
+                    raise
+            self.fts = bool(self.db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone())
 
     def restore(self, path: str) -> None:
         """Replaces this database with a backup made by backup(). Run with the hub stopped."""
@@ -460,6 +486,12 @@ class Store:
             return {"ask": 0, "ctx": 0, "sub": 0, "calls": 0, "cached": 0}
         return {"ask": row["ask_tokens"], "ctx": row["ctx_tokens"], "sub": row["sub_tokens"], "calls": row["sub_calls"],
                 "cached": row["sub_cached"]}
+
+    def usage_by_agent(self) -> dict[str, dict]:
+        return {r["agent"]: {"ask": r["ask"], "ctx": r["ctx"], "sub": r["sub"],
+                             "calls": r["calls"], "cached": r["cached"]} for r in self.q(
+            "SELECT agent, SUM(ask_tokens) AS ask, SUM(ctx_tokens) AS ctx, SUM(sub_tokens) AS sub, "
+            "SUM(sub_calls) AS calls, SUM(sub_cached) AS cached FROM usage WHERE day=? GROUP BY agent", (today(),))}
 
     # -- rooms & messages ------------------------------------------------
     def ensure_room(self, room: str) -> None:
