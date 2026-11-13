@@ -1207,6 +1207,7 @@ def test_worker_builds_lean_cli_commands():
     assert argv[argv.index("--model") + 1] == "gemini-3.8-flash-low"
     argv, _, _ = w.build_cmd({"cli": "agy"}, "s", "full", "/d", "p")
     assert argv[argv.index("--mode") + 1] == "accept-edits" and "--sandbox" not in argv
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"permissions": {"allow": ["command(*)"]}}  # #133
 
 
 def test_worker_parses_cli_output_and_limits():
