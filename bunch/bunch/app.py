@@ -855,9 +855,10 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         pick = not addressed and bool((body.text or "").strip())
         # Nobody named: show the message now and choose who answers in the background (#76). Waiting for the
         # router model first kept it off everyone's screen for seconds, and lost it if the hub went down.
+        newest = store.one("SELECT MAX(id) AS id FROM messages")["id"] or 0
         result = hub.post(name, room, body.text, to=to, summary=body.summary, reply_to=body.re, human=True,
                           routing=pick)
-        if pick:
+        if pick and post_id(result) > newest:  # a double send got the first message's id back: already routed (#148)
             task = asyncio.create_task(route_later(post_id(result), room.strip().lower().lstrip("#"), body.text, name))
             routing_tasks.add(task)
             task.add_done_callback(routing_tasks.discard)
