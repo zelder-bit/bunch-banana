@@ -26,6 +26,7 @@ WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edi
 WORKER_STATUSES = ("online", "busy", "cooling")
 WORKER_OFFLINE_AFTER = 180  # a machine long-polls every ~50 s; silent this long = off or not running
 RECENT_LINES = 8  # one-line summaries of the latest messages shown with every answer prompt
+DOUBLE_SEND_WINDOW = 2  # seconds: the same human text twice this fast is one click sent twice, stored once
 DUPLICATE_WINDOW = 600  # the same text from the same human this soon after is a double send
 MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a human message
 REDELIVER_WINDOW = 900  # a job a worker fetched but never answered is offered again while it is this fresh
@@ -126,6 +127,7 @@ class Hub:
         self._event = asyncio.Event()                # wakes long-polling readers
         self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
         self._hosts_at = 0.0
+        self._models: set[str] | None = None        # every model name the gateway has; None = unknown
         self.routing: dict[int, tuple[str, float]] = {}  # message id -> (room, since): shown, recipients still being chosen
         self.offered: dict[tuple[str, int], int] = {}  # (worker agent, message id) -> times handed to its worker
 
@@ -191,6 +193,13 @@ class Hub:
             raise HubError("empty text")
         if len(text) > self.s.max_body:
             raise HubError(f"text too long ({len(text)} > {self.s.max_body} chars)")
+
+        if human:
+            last = self.store.one("SELECT * FROM messages WHERE room=? ORDER BY id DESC LIMIT 1", (room,))
+            if (last and last["sender"] == sender and time.time() - last["created"] < DOUBLE_SEND_WINDOW
+                    and last["reply_to"] == (int(reply_to) if reply_to is not None else None)
+                    and " ".join(text_of(last).split()) == " ".join(text.split())):
+                return f"ok #{last['id']}"
 
         if not human:
             self._check_rate(sender)
@@ -728,6 +737,8 @@ class Hub:
     async def files_write(self, agent: str, room: str, path: str, data: bytes) -> str:
         room = (room or "").strip().lower().lstrip("#")
         _row, f = self._folder(room)
+        if self.store.cursor(agent, room) is None:  # reads are open; a write needs a room the agent has joined
+            raise HubError(f"read or post in #{room} first, then write to its folder")
         try:
             path = await asyncio.to_thread(folders.write_file, f, self.s, agent, path, data)
         except folders.FolderError as e:
@@ -870,10 +881,12 @@ class Hub:
         return bool(m) and (m["last_seen"] or 0) > time.time() - WORKER_OFFLINE_AFTER
 
     def worker_state(self, row, machines=None) -> str:
-        """auto / manual / offline / online / busy / cooling, as the viewer and router see it."""
+        """auto / manual / offline / online / busy / cooling / no model, as the viewer and router see it."""
         if row["kind"] != "agent":
             return ""
         if row["model"]:
+            if self._models is not None and row["model"] not in self._models:
+                return "no model"  # the gateway dropped it: nothing can answer
             m = self.model_machine(row["model"], machines)
             return "offline" if m and not self.machine_online(self.store.machine(m) if machines is None else machines.get(m)) else "auto"
         cfg = self.worker_config(row)
@@ -923,9 +936,10 @@ class Hub:
             return
         self._hosts_at = time.time()
         try:
-            self._hosts = await self.llm.model_hosts()
+            self._hosts = await self.llm.model_hosts()  # one /model/info call, which also records the names
+            self._models = getattr(self.llm, "model_names", None) or None  # empty = we weren't told, not "none"
         except Exception:  # older LiteLLM / key without access: just don't show hosts
-            self._hosts = {}
+            self._hosts, self._models = {}, None
 
     def model_machine(self, model: str | None, machines=None) -> str | None:
         """The paired machine a gateway model runs on (its api_base points there), if any."""
@@ -954,6 +968,7 @@ class Hub:
         if not info:
             return plain
         self._hosts = await self.llm.model_hosts(info)
+        self._models = {m["name"] for m in info}
         self._hosts_at = time.time()
         hosts = sorted({self._hosts[n] for n in names if n in self._hosts}) if self.llm.model_probe else []
         status = dict(zip(hosts, await asyncio.gather(*(self.llm._reachable(h) for h in hosts))))
@@ -993,6 +1008,8 @@ class Hub:
             if state == "offline":
                 what = row["model"] or cfg["cli"]
                 note = f"({self.agent_machine(row)} is offline, so {what} can't answer; not answered)"
+            elif state == "no model":
+                note = f"(the gateway has no model {row['model']}, so {name} can't answer; not answered)"
             elif state == "cooling":
                 until = time.strftime("%H:%M UTC", time.gmtime(row["status_until"]))  # readers are in other zones
                 note = f"(out of {cfg['cli']} quota on {cfg['machine']} until {until}; not answered)"
