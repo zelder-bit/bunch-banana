@@ -21,7 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
 from . import mcp as mcpmod
-from .autoreply import autoreply_loop
+from .autoreply import autoreply_loop, forget_room
 from .config import Settings, load
 from . import folders
 from .hub import MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError, post_id
@@ -294,6 +294,10 @@ def shown_avatar(avatar: str | None) -> str:
     return avatar if avatar and any(avatar in group for group in HUMAN_AVATARS.values()) else DEFAULT_HUMAN_AVATAR
 
 
+WS_PING = 25.0    # seconds: idle sockets get a ping, and every socket's access is re-checked this often
+WS_QUEUE = 1000   # events a viewer may fall behind before its socket is closed to make it catch up
+
+
 def create_app(settings: Settings | None = None, llm: LLM | None = None) -> FastAPI:
     s = settings or load()
     if not s.admin_token:
@@ -311,7 +315,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise SystemExit(f"There is {'a person' if row['kind'] == 'human' else 'an agent'} named '{name}', but the hub "
                              f"posts its own notes under that name. Remove it, then start again:\n"
                              f"  docker compose run --rm bunch python -m bunch.cli remove {name}")
-    store.ensure_human(s.human_name)
+    try:
+        store.ensure_human(s.human_name)
+    except ValueError:
+        store.db.close()
+        raise SystemExit(f"BUNCH_HUMAN_NAME can't be '{s.human_name}': there is an agent with that name. "
+                         f"Pick another name, or remove the agent:\n"
+                         f"  docker compose run --rm bunch python -m bunch.cli remove {s.human_name}") from None
     llm = llm or LLM(s.litellm_url, s.litellm_key, think_max_tokens=s.think_max_tokens)
     hub = Hub(store, s, llm)
 
@@ -351,6 +361,8 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         yield
         for t in tasks:
             t.cancel()
+        if hasattr(llm, "aclose"):
+            await llm.aclose()
 
     app = FastAPI(title="bunch", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
@@ -458,6 +470,11 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     # -------------------------------------------------------------- basics
     @app.get("/healthz", include_in_schema=False)
     async def healthz():
+        try:  # a locked or missing volume must not report healthy
+            store.q("SELECT 1 FROM agents LIMIT 1")
+        except Exception as e:
+            log.warning("health check: database not answering: %s", e)
+            raise HTTPException(503, "database not answering") from None
         return {"ok": True, "version": __version__}
 
     @app.get("/", include_in_schema=False)
@@ -705,6 +722,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                     jobs.append({"agent": name, "folder": {"kind": shared["kind"], "about": folders.ABOUT[shared["kind"]]}
                                  if shared else None, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "wake": True, "created": r["created"],
+                                 "age": max(0.0, time.time() - r["created"]),
                                  "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
                                  "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
                                  "parent": {"id": parent["id"], "sender": parent["sender"],
@@ -765,6 +783,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def admin_messages(request: Request, room: str, before: int | None = None, after: int | None = None,
                              limit: int = 100, authorization: str | None = Header(None)):
         viewer(request, authorization)
+        room = room.strip().lower().lstrip("#")
         limit = max(1, min(limit, 500))
         if after is not None:  # catch-up after a reconnect: oldest first
             rows = store.q("SELECT * FROM messages WHERE room=? AND id>? ORDER BY id LIMIT ?", (room, after, limit))
@@ -816,6 +835,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         n = store.delete_room(room)
         if n is None:
             raise HTTPException(404, "no such room")
+        forget_room(room)
         hub.broadcast({"type": "room_deleted", "room": room})
         return {"deleted": room, "messages": n}
 
@@ -1049,6 +1069,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_worker(name, cfg)
             hub.broadcast({"type": "agents"})
             return {"name": name, "machine": cfg["machine"]}  # its machine speaks for it: no key to hand out
+        hub.agents_changed()
         return {"name": name, "key": key, "note": "shown once; store it on the agent's machine"}
 
     @app.put("/api/admin/agents/{name}/info")
@@ -1059,10 +1080,19 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         if not row or row["kind"] != "agent":
             raise HTTPException(404, "no such agent")
         fields = body.model_dump(exclude_none=True)
+        model = (fields.get("model") or "").strip()
+        if model and llm.enabled:  # a model the gateway doesn't have would fail on every message
+            try:
+                known = await llm.models()
+            except LLMError:
+                known = None  # gateway down: don't block the edit
+            if known is not None and model not in known:
+                raise HTTPException(400, f"the gateway has no model '{model}'")
         store.set_agent_info(name, **fields)
         if (fields.get("model") or "").strip():
             store.set_worker(name, None)  # an auto agent is answered by the hub, not a worker
         row = store.agent(name)
+        hub.agents_changed()
         return {"name": name, "description": row["description"], "model": row["model"], "system": row["system"]}
 
     @app.put("/api/admin/agents/{name}/worker")
@@ -1130,6 +1160,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.create_user(name, body.password, body.admin)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        hub.agents_changed()
         return {"name": name, "admin": body.admin}
 
     @app.put("/api/admin/users/{name}/password")
@@ -1162,6 +1193,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(404, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        hub.agents_changed()
         return {"name": name, "admin": body.admin}
 
     @app.delete("/api/admin/users/{name}")
@@ -1178,22 +1210,29 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(400, str(e))
         if not deleted:
             raise HTTPException(404, "no such user")
+        hub.agents_changed()
         return {"deleted": name}
 
     @app.post("/api/admin/agents/{name}/rotate")
     async def admin_rotate(request: Request, name: str, authorization: str | None = Header(None)):
         require_admin(request, authorization)
         try:
-            return {"name": name, "key": store.rotate_key(name)}
+            key = store.rotate_key(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        hub.agents_changed()
+        return {"name": name, "key": key}
 
     @app.put("/api/admin/agents/{name}/budget")
     async def admin_budget(request: Request, name: str, body: BudgetIn, authorization: str | None = Header(None)):
         require_admin(request, authorization)
-        if not store.agent(name):
+        row = store.agent(name)
+        if not row or row["kind"] != "agent":
             raise HTTPException(404, "no such agent")
+        if body.daily_tokens is not None and body.daily_tokens < 0:
+            raise HTTPException(400, "daily_tokens can't be negative (0 = no budget, leave it out for the default)")
         store.set_budget(name, body.daily_tokens)
+        hub.agents_changed()
         return {"name": name, "daily_tokens": hub.budget(name)}
 
     @app.put("/api/admin/agents/{name}/first")
@@ -1206,6 +1245,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_setting("first_responder", name)
         elif store.setting("first_responder") == name:
             store.set_setting("first_responder", "")
+        hub.agents_changed()
         return {"first_responder": store.setting("first_responder") or None}
 
     @app.delete("/api/admin/agents/{name}")
@@ -1213,6 +1253,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         require_admin(request, authorization)
         if not store.delete_agent(name):
             raise HTTPException(404, "no such agent")
+        hub.agents_changed(gone=name)
         return {"deleted": name}
 
     @app.websocket("/ws")
@@ -1234,19 +1275,46 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         if not (by_token or (same_origin and (session_user(socket.session) or token_session(socket.session)))):
             await socket.close(code=4401)
             return
-        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        def still_allowed() -> bool:
+            # The admin token can't change while the hub runs; a session can end (user deleted, password
+            # changed on another device), and an open socket must not outlive it.
+            return by_token or bool(session_user(socket.session) or token_session(socket.session))
+
+        async def until_closed() -> None:
+            try:  # the viewer sends nothing after the first frame, so anything read here is the close
+                while (await socket.receive())["type"] != "websocket.disconnect":
+                    pass
+            except Exception:
+                pass
+
+        q: asyncio.Queue = asyncio.Queue(maxsize=WS_QUEUE)
         hub.listeners.add(q)
+        gone = asyncio.create_task(until_closed())
+        checked = time.monotonic()
         try:
             await socket.send_json({"type": "ready"})
             while True:
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=25)
-                except asyncio.TimeoutError:
-                    event = {"type": "ping"}
+                get = asyncio.create_task(q.get())
+                done, _ = await asyncio.wait({get, gone}, timeout=WS_PING, return_when=asyncio.FIRST_COMPLETED)
+                if get not in done:
+                    get.cancel()
+                if gone in done:
+                    break
+                # done() without cancelled(): the event arrived just as the wait timed out; don't lose it
+                event = get.result() if get.done() and not get.cancelled() else {"type": "ping"}
+                if time.monotonic() - checked >= WS_PING:
+                    checked = time.monotonic()
+                    if not still_allowed():
+                        await socket.close(code=4401)
+                        break
+                if event.get("type") == "lagged":
+                    await socket.close(code=4408)  # fell too far behind: reconnect and catch up
+                    break
                 await socket.send_json(event)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
+            gone.cancel()
             hub.listeners.discard(q)
 
     return app

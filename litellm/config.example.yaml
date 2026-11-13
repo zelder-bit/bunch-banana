@@ -40,7 +40,7 @@ model_list:
   # ---- Paid services (delete what you don't use) ----------------------------
   - model_name: paid/claude
     litellm_params:
-      model: anthropic/claude-sonnet-4-5        # check provider docs for current IDs
+      model: anthropic/claude-sonnet-5-5        # check provider docs for current IDs
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: paid/gpt
@@ -54,9 +54,11 @@ model_list:
   #     api_key: os.environ/OPENROUTER_API_KEY
 
 router_settings:
-  # If the local model is down or busy, fall back to a paid one.
-  fallbacks:
-    - local/general: ["paid/gpt"]
+  # Optional: if the local model is down or busy, fall back to a paid one. Off by default, because with an
+  # API key set a local box being down turns into paid usage without anyone noticing, and with no key the
+  # fallback only adds an error. Uncomment once you want that trade.
+  # fallbacks:
+  #   - local/general: ["paid/gpt"]
   num_retries: 1
   timeout: 300
 

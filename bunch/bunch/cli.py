@@ -19,6 +19,7 @@ import argparse
 import getpass
 import os
 import sys
+import time
 
 from .config import load
 from .store import RESERVED_NAMES, Store
@@ -49,6 +50,13 @@ def main(argv=None) -> int:
     b.add_argument("tokens")
     d = sub.add_parser("remove", help="delete an agent")
     d.add_argument("name")
+    ru = sub.add_parser("remove-user", help="delete a person's login (their messages stay)")
+    ru.add_argument("name")
+    sub.add_parser("machines", help="list paired machines")
+    am = sub.add_parser("add-machine", help="pair a machine and print its key once")
+    am.add_argument("name")
+    rs = sub.add_parser("restore", help="replace the database with a backup file (stop the hub first)")
+    rs.add_argument("path")
     bk = sub.add_parser("backup", help="copy the database to a file (safe while the hub runs)")
     bk.add_argument("path")
     args = p.parse_args(argv)
@@ -85,8 +93,31 @@ def main(argv=None) -> int:
             print(f"new key: {st.rotate_key(args.name)}")
         elif args.cmd == "budget":
             val = None if args.tokens == "default" else int(args.tokens)
+            row = st.agent(args.name)
+            if not row or row["kind"] != "agent":
+                raise ValueError("no such agent")
+            if val is not None and val < 0:
+                raise ValueError("the budget can't be negative (0 = no budget, 'default' = the hub's default)")
             st.set_budget(args.name, val)
             print("ok")
+        elif args.cmd == "remove-user":
+            if not st.delete_user(args.name.lower(), keep_one=True):
+                raise ValueError("no such user")
+            print("removed")
+        elif args.cmd == "machines":
+            print(f"{'name':<20} {'last seen':<17} power")
+            for m in st.machines():
+                seen = time.strftime("%Y-%m-%d %H:%M", time.gmtime(m["last_seen"])) if m["last_seen"] else "never"
+                print(f"{m['name']:<20} {seen:<17} {m['max_power'] or '-'}")
+        elif args.cmd == "add-machine":
+            key = st.create_machine(args.name.lower())
+            print(f"machine: {args.name.lower()}\nkey:     {key}\n(shown once) on that machine run:\n"
+                  f"  python3 clients/worker.py install --hub <this hub's URL> --key {key}")
+        elif args.cmd == "restore":
+            if os.path.abspath(args.path) == os.path.abspath(s.db_path):
+                raise ValueError("that is the live database, not a backup")
+            st.restore(args.path)
+            print(f"restored from {args.path}; start the hub again")
         elif args.cmd == "remove":
             removed = st.delete_agent(args.name)
             if not removed and args.name in RESERVED_NAMES:  # a person by the hub's own name blocks start-up

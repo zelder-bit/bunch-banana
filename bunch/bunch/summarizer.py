@@ -19,49 +19,77 @@ ROOM_PROMPT = ("You maintain the running summary of a chat room between AI agent
 SUMMARIZER = "_summarizer"
 
 
+_attempts: dict[int, int] = {}   # message id -> failed tries; cleared on success or after 3
+_last_failures = 0               # failures in the latest pass, for the loop's backoff
+
+
 async def summarize_once(hub: Hub) -> int:
     """One pass. Returns how many summaries were written."""
+    global _last_failures
     st, s, llm = hub.store, hub.s, hub.llm
     done = 0
+    failures = 0
 
     for m in st.q("SELECT id, sender, body FROM messages WHERE auto_sum=1 ORDER BY id LIMIT 10"):
-        text, tok = await llm.chat(s.summary_model, [
-            {"role": "system", "content": MSG_PROMPT},
-            {"role": "user", "content": f"From {m['sender']}:\n{(m['body'] or '')[:8000]}"},
-        ], 80, user=SUMMARIZER)
-        st.add_usage(SUMMARIZER, ask=tok)
-        line = one_line(text, s.summary_max)
-        if line:
-            st.x("UPDATE messages SET summary=?, auto_sum=0 WHERE id=?", (line, m["id"]))
-        else:
-            st.x("UPDATE messages SET auto_sum=0 WHERE id=?", (m["id"],))
-        done += 1
+        try:
+            text, tok = await llm.chat(s.summary_model, [
+                {"role": "system", "content": MSG_PROMPT},
+                {"role": "user", "content": f"From {m['sender']}:\n{(m['body'] or '')[:8000]}"},
+            ], 80, user=SUMMARIZER)
+            st.add_usage(SUMMARIZER, ask=tok)
+            line = one_line(text, s.summary_max)
+            if line:
+                st.x("UPDATE messages SET summary=?, auto_sum=0 WHERE id=?", (line, m["id"]))
+            else:
+                st.x("UPDATE messages SET auto_sum=0 WHERE id=?", (m["id"],))
+            done += 1
+            _attempts.pop(m["id"], None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("summarizer message %s failed: %s", m["id"], e)
+            failures += 1
+            _attempts[m["id"]] = _attempts.get(m["id"], 0) + 1
+            if _attempts[m["id"]] >= 3:
+                st.x("UPDATE messages SET auto_sum=0 WHERE id=?", (m["id"],))
+                _attempts.pop(m["id"], None)
 
     for r in st.rooms():
-        new = st.q("SELECT id, sender, summary FROM messages WHERE room=? AND id>? ORDER BY id LIMIT 200",
-                   (r["name"], r["summary_upto"]))
-        if len(new) < max(1, s.summary_every):
-            continue
-        convo = "\n".join(f"#{x['id']} {x['sender']}: {x['summary']}" for x in new)
-        text, tok = await llm.chat(s.summary_model, [
-            {"role": "system", "content": ROOM_PROMPT},
-            {"role": "user", "content": f"Previous summary:\n{r['summary'] or '(none)'}\n\nNew messages:\n{convo}"},
-        ], 300, user=SUMMARIZER)
-        st.add_usage(SUMMARIZER, ask=tok)
-        summary = " ".join((text or "").split())[:1200]
-        if summary:
-            st.x("UPDATE rooms SET summary=?, summary_upto=? WHERE name=?", (summary, new[-1]["id"], r["name"]))
-            done += 1
+        try:
+            new = st.q("SELECT id, sender, summary FROM messages WHERE room=? AND id>? ORDER BY id LIMIT 200",
+                       (r["name"], r["summary_upto"]))
+            if len(new) < max(1, s.summary_every):
+                continue
+            convo = "\n".join(f"#{x['id']} {x['sender']}: {x['summary']}" for x in new)
+            text, tok = await llm.chat(s.summary_model, [
+                {"role": "system", "content": ROOM_PROMPT},
+                {"role": "user", "content": f"Previous summary:\n{r['summary'] or '(none)'}\n\nNew messages:\n{convo}"},
+            ], 300, user=SUMMARIZER)
+            st.add_usage(SUMMARIZER, ask=tok)
+            summary = " ".join((text or "").split())[:1200]
+            if summary:
+                st.x("UPDATE rooms SET summary=?, summary_upto=? WHERE name=?", (summary, new[-1]["id"], r["name"]))
+                done += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("summarizer room %s failed: %s", r["name"], e)
+            failures += 1
+
+    _last_failures = failures
     return done
 
 
 async def summarizer_loop(hub: Hub, interval: float = 20.0) -> None:
     log.info("summarizer on (model=%s)", hub.s.summary_model)
+    delay = interval
     while True:
         try:
             await summarize_once(hub)
+            delay = min(delay * 2, 600.0) if _last_failures else interval
         except asyncio.CancelledError:
             raise
         except Exception as e:  # gateway down, model missing, etc. Try again later.
             log.warning("summarizer pass failed: %s", e)
-        await asyncio.sleep(interval)
+            delay = min(delay * 2, 600.0)
+        await asyncio.sleep(delay)
