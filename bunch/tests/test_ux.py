@@ -405,7 +405,7 @@ def test_unaddressed_message_appears_before_the_router_answers(env):
     assert c.get("/api/v1/read", params={"room": "r"}, headers=h(k["carol"])).text == "no new messages"
     go.append(1)
     for _ in range(200):
-        if c.get(f"/api/admin/rooms/r/messages", headers=adm()).json()[-2]["to"] == ["bob"]:
+        if c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-2]["to"] == ["bob"]:
             break
     assert c.get("/api/admin/rooms/r/messages", headers=adm()).json()[-2]["to"] == ["bob"]
     assert not hub.routing

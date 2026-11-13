@@ -2,7 +2,6 @@
 import sqlite3
 
 import pytest
-from fastapi.testclient import TestClient
 
 from bunch import autoreply, config
 from bunch.app import create_app
@@ -36,14 +35,14 @@ def test_config_rejects_zero_and_negative(monkeypatch):
     monkeypatch.setenv('BUNCH_READ_LIMIT', '0')
     with pytest.raises(SystemExit):
         config._int('BUNCH_READ_LIMIT', 30)
-    
+
     monkeypatch.setenv('BUNCH_MAX_CHAIN', '-1')
     with pytest.raises(SystemExit):
         config._int('BUNCH_MAX_CHAIN', 6)
-    
+
     monkeypatch.setenv('BUNCH_MAX_CHAIN', '0')
     assert config._int('BUNCH_MAX_CHAIN', 6) == 0
-    
+
     monkeypatch.delenv('BUNCH_MAX_CHAIN', raising=False)
     assert config._int('BUNCH_MAX_CHAIN', 6) == 6
 

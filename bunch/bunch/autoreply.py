@@ -60,7 +60,7 @@ def _own_reply(text: str, name: str) -> str:
 
 
 async def answer(hub: Hub, agent, m) -> None:
-    name, st = agent["name"], hub.store
+    name = agent["name"]
     body = text_of(m)
     if not m["human"] and not hub.wakes(m, name):
         return
@@ -89,7 +89,7 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     if note:  # bot mode: keep handing work on instead of waiting for the person
         system += "\n\n" + note
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
-    empty = []
+    empty: list[str] = []
     try:
         text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens,
                               raw=True, empty_notice=empty.append)).strip()
@@ -243,7 +243,7 @@ async def autoreply_loop(hub: Hub) -> None:
                 log.warning("auto-reply pass failed: %s", e)
             try:
                 await asyncio.wait_for(woke.wait(), 30)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
     finally:
         await _stop_tasks(hub)  # shutdown: don't leave answers running

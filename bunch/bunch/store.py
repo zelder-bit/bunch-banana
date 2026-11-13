@@ -149,7 +149,7 @@ def hash_key(key: str) -> str:
 
 
 def today() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    return dt.datetime.now(dt.UTC).strftime("%Y-%m-%d")
 
 
 def valid_name(name: str) -> bool:
@@ -555,6 +555,7 @@ class Store:
             try:
                 fid = self.db.execute("INSERT INTO files(room,name,mime,size,uploader,created) VALUES(?,?,?,?,?,?)",
                                       (room, name, mime, len(data), uploader, time.time())).lastrowid
+                assert fid is not None  # an INSERT always sets lastrowid
                 tmp = self.file_path(fid) + ".tmp"
                 with open(tmp, "wb") as f:
                     f.write(data)
@@ -578,7 +579,8 @@ class Store:
     def delete_files(self, ids: list[int] | None = None, room: str | None = None,
                      older_than: float | None = None) -> tuple[int, int]:
         """Removes files by id, or by room and/or age. Returns (count, bytes freed)."""
-        where, args = [], []
+        where: list[str] = []
+        args: list = []
         if ids is not None and not ids:
             return 0, 0
         if ids is not None:
@@ -620,7 +622,9 @@ class Store:
             "VALUES(?,?,?,?,?,?,?,?,?)",
             (room, sender, int(human), rec, summary, body, reply_to, int(auto_sum), time.time()),
         )
-        return cur.lastrowid
+        rowid = cur.lastrowid
+        assert rowid is not None  # an INSERT always sets lastrowid
+        return rowid
 
     def delete_message(self, mid: int):
         """Removes a message for good. Returns the deleted row, or None."""

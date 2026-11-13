@@ -1,5 +1,4 @@
 """Admin actions clean up after themselves and tell other viewers (#74)."""
-import pytest
 
 from bunch import cli
 
@@ -30,7 +29,6 @@ def test_deleting_an_agent_leaves_nothing_behind(env):
 
 def test_agent_changes_reach_other_viewers(env, monkeypatch):
     c, k, app, llm = env
-    hub = app.state.hub
     seen = _events(app, monkeypatch)
     ops = [
         lambda: c.post('/api/admin/agents', json={'name': 'dave'}, headers=adm()),
@@ -58,16 +56,12 @@ def test_budget_rejects_negatives_and_people(env):
 
 def test_agent_model_must_exist_on_the_gateway(env):
     c, k, app, llm = env
-    hub = app.state.hub
-    st = hub.store
     assert c.put('/api/admin/agents/alice/info', json={'model': 'nope/missing'}, headers=adm()).status_code == 400
     assert c.put('/api/admin/agents/alice/info', json={'model': 'paid/big'}, headers=adm()).status_code == 200
 
 
 def test_messages_route_normalises_the_room(env):
     c, k, app, llm = env
-    hub = app.state.hub
-    st = hub.store
     c.post('/api/v1/post', json={'room': 'plans', 'text': 'hello'}, headers=h(k['alice']))
     a = c.get('/api/admin/rooms/plans/messages', headers=adm()).json()
     b = c.get('/api/admin/rooms/%23Plans/messages', headers=adm()).json()

@@ -1,5 +1,4 @@
 import importlib.util
-import os
 
 import pytest
 from pathlib import Path

@@ -11,18 +11,45 @@ jobs:
       run:
         working-directory: bunch
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.15"
       - run: pip install -r requirements-dev.txt
-      - run: pytest -q
+      - run: pytest -q --cov=bunch --cov-report=term
       - run: pip install pip-audit && pip-audit -r requirements.txt
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
+        with:
+          python-version: "3.13"
+      - run: pip install -r bunch/requirements-dev.txt
+      - run: ruff check bunch clients
+      - run: mypy bunch/bunch
+
+  clients:
+    # The clients are stdlib-only and run on other people's machines: make sure
+    # they still parse on the Python versions people actually have. 3.9's last
+    # build is only published for Ubuntu 24.04, so this job stays on that image.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m py_compile clients/*.py
 
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Validate compose file
         run: |
           cp .env.example .env
@@ -41,16 +68,16 @@ jobs:
   check-public:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Scan for private info (IPs, emails, keys, home paths)
         run: SKIP_LLM=1 bash scripts/check-public.sh --all
 
   secrets-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v3
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

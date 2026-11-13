@@ -85,10 +85,10 @@ def main(argv=None) -> int:
         elif args.cmd == "list":
             print(f"{'name':<20} {'kind':<6} {'budget':>9} {'ask today':>10} {'ctx today':>10}  model")
             for row in st.agents():
-                u = st.usage_today(row["name"])
+                usage = st.usage_today(row["name"])
                 bud = row["daily_tokens"] if row["daily_tokens"] is not None else s.daily_tokens
                 print(f"{row['name']:<20} {row['kind']:<6} {bud if row['kind'] == 'agent' else '-':>9} "
-                      f"{u['ask']:>10} {u['ctx']:>10}  {row['model'] or ''}")
+                      f"{usage['ask']:>10} {usage['ctx']:>10}  {row['model'] or ''}")
         elif args.cmd == "rotate":
             print(f"new key: {st.rotate_key(args.name)}")
         elif args.cmd == "budget":
