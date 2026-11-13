@@ -60,6 +60,7 @@ class AskIn(BaseModel):
     system: str | None = None
     max_tokens: int | None = None
     room: str | None = None
+    note: str | None = None
 
 
 class WorkerIn(BaseModel):
@@ -646,7 +647,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def api_ask(body: AskIn, authorization: str | None = Header(None)):
         agent = agent_of(authorization)
         return PlainTextResponse(await hub.ask(agent, body.model, body.prompt, body.system,
-                                               body.max_tokens, body.room))
+                                               body.max_tokens, body.room, note=body.note))
 
     @app.get("/api/v1/whoami")
     async def api_whoami(authorization: str | None = Header(None)):

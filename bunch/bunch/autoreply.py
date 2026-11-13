@@ -35,7 +35,7 @@ def forget_room(room: str) -> None:
 _gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
 # Small models copy the notes they see in the room, e.g. "(empty answer)" or "(agy failed: ...)": that's no answer.
-FILLER_RE = re.compile(r"^\((?:empty answer|[\w.:/-]+ (?:failed|returned nothing|didn't answer)\b[^\n]*)\)$", re.I)
+FILLER_RE = re.compile(r"^\((?:empty answer(?::[^\n]*)?|[\w.:/-]+ (?:failed|returned nothing|didn't answer)\b[^\n]*)\)$", re.I)
 # ...and the "Recent messages" lines: "#12 alice>bob re#11: text". A model that goes on in that format
 # writes a whole made-up conversation, speaking for other agents and the human.
 SPEAKER_RE = re.compile(r"^\s*(?:#\d+\s+)?@?([\w.-]+)(?:>[\w.,@-]+(?:\s+re#\d+)?|\s+re#\d+):\s*")
@@ -92,8 +92,10 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     if note:  # bot mode: keep handing work on instead of waiting for the person
         system += "\n\n" + note
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
+    empty = []
     try:
-        text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens, raw=True)).strip()
+        text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens,
+                              raw=True, empty_notice=empty.append)).strip()
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
     text = _own_reply(text, name)
@@ -103,7 +105,7 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
         if not m["human"]:
             _gave_up[(name, m["id"])] = m["created"]
             return  # don't answer another agent with noise; they can ask again
-        text = f"({agent['model']} returned nothing; try again or rephrase)"
+        text = f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)"
     hub.post(name, m["room"], text, reply_to=m["id"])
     st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))
 

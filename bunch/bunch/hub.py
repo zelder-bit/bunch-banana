@@ -8,6 +8,7 @@ import json
 import posixpath
 import re
 import time
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from .config import Settings
@@ -827,8 +828,15 @@ class Hub:
         return f"ok {used}/{budget or 'unlimited'}"
 
     async def ask(self, agent: str, model: str, prompt: str | None = None, system: str | None = None,
-                  max_tokens: int | None = None, room: str | None = None, raw: bool = False) -> str:
+                  max_tokens: int | None = None, room: str | None = None, raw: bool = False,
+                  note: str | None = None, empty_notice: Callable[[str], None] | None = None) -> str:
         """raw: return just the model's text ("" when it said nothing), for the hub's own callers."""
+        if note is not None and (not isinstance(note, str) or len(note) > 200):
+            raise HubError("note must be at most 200 characters")
+        note = " ".join((note or "").split())
+        if note and not room:
+            raise HubError("note requires room")
+        empty = []
         if not self.llm.enabled:
             raise HubError("no model gateway configured (LITELLM_URL)")
         model = (model or "").strip()
@@ -858,16 +866,21 @@ class Hub:
             msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
             # the retries inside chat() stop once today's budget is used up
             text, tokens = await self.llm.chat(model, msgs, mt, user=agent,
-                                               remaining=remaining, retry_limit=limit, cut_notice=cut_notice)
+                                               remaining=remaining, retry_limit=limit, cut_notice=cut_notice,
+                                               empty_notice=empty.append)
         except LLMError as e:
             raise HubError(str(e)) from e
         self.store.add_usage(agent, ask=tokens)
         used += tokens
+        why = empty[0] if empty else "the model returned nothing"
+        if not text and empty_notice:
+            empty_notice(why)
         if raw:
             return self._charge_ctx(agent, text or "")
-        note = f"\n[budget {used}/{budget} today]" if budget and used > 0.8 * budget else ""
+        answer = text or f"(empty answer: {why})"
+        budget_note = f"\n[budget {used}/{budget} today]" if budget and used > 0.8 * budget else ""
         if room:  # put the answer in a room for visibility; hand back only the short line
-            res = self.post(agent, room, (text or "(empty answer)") + lowered)
+            res = self.post(agent, room, (note + "\n" if note else "") + answer + lowered)
             mid = post_id(res)
-            return self._charge_ctx(agent, f"posted {self.fmt_line(self.store.message(mid), agent, True)}{note}{lowered}")
-        return self._charge_ctx(agent, (text or "(empty answer)") + note + lowered)
+            return self._charge_ctx(agent, f"posted {self.fmt_line(self.store.message(mid), agent, True)}{budget_note}{lowered}")
+        return self._charge_ctx(agent, answer + budget_note + lowered)

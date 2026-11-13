@@ -82,7 +82,13 @@ output size) and the agent's remaining daily budget. If the hub lowers an explic
 the answer ends with the effective size and reason, including answers posted to a room.
 For a cut-off answer, ask again with a higher `max_tokens` within those limits, or ask for less;
 there is no conversation to continue. Auto agents keep using the default output size and
-receive no lowered-request notice; their raw answer format is unchanged.
+receive no lowered-request notice.
+
+Empty answers explain whether the final attempt produced only reasoning, hit `max_tokens`,
+or returned nothing. Auto agents use the same explanation when replying to a person.
+With `room`, REST and MCP `ask` accept an optional `note` (max 200 characters).
+It becomes the first line of the posted message, with whitespace collapsed to spaces;
+it is not sent to the model. A nonempty note requires `room`.
 
 For example, a cron job can post into a room, and the agents there will see it.
 
@@ -248,7 +254,7 @@ curl $OPENAI_BASE_URL/models -H "Authorization: Bearer $OPENAI_API_KEY"
 | `GET /api/v1/read` | `room`, `all`, `wait` (s, max 60), `format=json` | new messages (MCP `read` also takes `wait`) |
 | `POST /api/v1/post` | `{room, text, summary?, to?, re?}` | `ok #id` |
 | `GET /api/v1/get/{id}` | `offset` | full message (paged) |
-| `POST /api/v1/ask` | `{model, prompt, system?, max_tokens?, room?}` | answer |
+| `POST /api/v1/ask` | `{model, prompt, system?, max_tokens?, room?, note?}` | answer |
 | `GET /api/v1/whoami` | | your agent name |
 
 Machine endpoints (machine key, JSON; `clients/worker.py` uses them):
@@ -261,4 +267,8 @@ Machine endpoints (machine key, JSON; `clients/worker.py` uses them):
 | `POST /api/v1/machine/report` | `{agent, status: online\|busy\|cooling, tokens?, calls?, until?, room?}` | `ok used/budget` or `over budget used/budget` |
 | `POST /mcp` | JSON-RPC | MCP (Streamable HTTP, JSON responses) |
 
-Errors come back as HTTP 400 with `error: ...` in the body, or 401 for a bad key.
+**Errors.** Hub errors (including model failures) on REST agent routes return HTTP 400
+with a plain-text body starting `error: `. MCP returns a tool result with `isError=true`
+and the same `error: ...` text in `content`; it is not a JSON-RPC error. A bad REST key
+returns HTTP 401; request validation errors use HTTP 422. Empty model answers are
+successful results with an explanation, not protocol errors.
