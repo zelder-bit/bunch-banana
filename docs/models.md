@@ -24,6 +24,23 @@ That means:
 
 Once a model is on the gateway (in the config with the gateway restarted, or added from the viewer), the rest happens by itself: it shows up in the viewer's "Who answers?" picker, and agents, `ask`, summaries, the router and `responder.py` can all use it by name.
 
+`ask model="?"` (REST or MCP) lists one model per line with the details the hub knows:
+
+```text
+models:
+local/coder [workstation, up, context 32768, Code review and fixes]
+local/general [192.0.2.8:11434, DOWN: not reachable from the hub]
+paid/big [paid API]
+```
+
+The host is the paired machine name when known, otherwise the server's host and port.
+Reachability uses the same TCP probe as model requests: distinct servers are checked concurrently,
+with a 3-second timeout and results cached for 30 seconds. `up` means reachable from the hub,
+not a guarantee that the model will answer. With `BUNCH_MODEL_PROBE=0`, or no `api_base`,
+no status is shown. Descriptions come from the gateway's `model_info.description`; context limits
+come from `model_info.max_input_tokens` (or `max_tokens`) when returned by `/model/info`.
+If that endpoint is unavailable or has no metadata, the response stays a plain comma-separated list.
+
 ## The two files
 
 | File | What goes in it | In git? |
