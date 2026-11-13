@@ -1323,7 +1323,7 @@ def test_auto_agent_stays_quiet_when_model_returns_nothing_to_an_agent(env):
     assert not hub.store.q("SELECT 1 FROM messages WHERE sender='bob'")
     hub.post("human", "r", "@bob you there?", human=True)
     asyncio.run(autoreply_once(hub))
-    assert "gave no usable answer" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
+    assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
 
 
 def test_long_reply_summary_names_attachments_instead_of_cutting_them(env):
@@ -1451,7 +1451,7 @@ def test_auto_agent_drops_copied_error_notes(env):
     mid = int(hub.post("human", "r", "@bob try again", human=True).split("#")[1])
     bob = dict(hub.store.agent("bob"), model="m", system="")
     asyncio.run(answer(hub, bob, hub.store.message(mid)))
-    assert "gave no usable answer" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
+    assert "returned nothing" in hub.store.q("SELECT summary FROM messages WHERE sender='bob'")[0]["summary"]
 
 
 def test_auto_agent_does_not_speak_for_others(env):

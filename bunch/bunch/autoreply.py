@@ -31,8 +31,8 @@ SAVE_HELP = ("To save a file in the room's shared folder, put a line `save: <rel
              "fenced code block holding the whole file. You cannot run anything.")
 NO_FOLDER_HELP = ("You cannot upload, save or run anything here: put code in your reply, and never claim "
                   "you saved, uploaded or ran something.")
-# "save: path" (maybe in backticks/bold) right above a fenced block (maybe with a language tag)
-SAVE_RE = re.compile(r"^[ \t]*[*_]*save[*_]*:[*_]*[ \t]*[`*_]*([^\s`*]+?)[`*_]*[ \t]*\n[ \t]*```[^\n]*\n(.*?)^[ \t]*```[ \t]*$",
+# "save: path" (maybe in backticks/bold) above a fenced block (maybe a blank line between, maybe a language tag)
+SAVE_RE = re.compile(r"^[ \t]*[*_]*save[*_]*:[*_]*[ \t]*[`*_]*([^\s`*]+?)[`*_]*[ \t]*\n(?:[ \t]*\n)?[ \t]*```[^\n]*\n(.*?)^[ \t]*```[ \t]*$",
                      re.I | re.M | re.S)
 _room_locks: dict[tuple[int, str], asyncio.Lock] = {}  # (event loop, room): auto agents answer one at a time
 
