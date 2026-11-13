@@ -8,6 +8,7 @@ import json
 import posixpath
 import re
 import time
+from urllib.parse import urlsplit
 
 from .config import Settings
 from .llm import LLM, LLMError
@@ -741,6 +742,7 @@ class Hub:
         host = (self._hosts.get(model or "") or "").lower()
         if not host:
             return None
+        host = urlsplit(f"//{host}").hostname or host
         short = host if host[:1].isdigit() or ":" in host else host.split(".")[0]  # workstation.example.ts.net -> workstation
         for m in self.store.machines():
             names = {m["name"], (m["hostname"] or "").lower(), *(a.lower() for a in json.loads(m["addresses"] or "[]"))}

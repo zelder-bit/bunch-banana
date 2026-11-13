@@ -471,6 +471,8 @@ def _llm_with(responses, orig):
     sent = []
 
     def reply(req):
+        if req.url.path == "/model/info":
+            return httpx.Response(200, json={"data": []})
         sent.append(json.loads(req.content))
         return httpx.Response(200, json=responses[min(len(sent), len(responses)) - 1])
     return LLM("http://gw", "k"), sent, lambda **kw: orig(transport=httpx.MockTransport(reply), **kw)
@@ -1108,12 +1110,12 @@ def _hosts(app, llm, table):
 
 def test_gateway_models_show_which_machine_they_run_on(env):
     c, k, app, llm = env
-    _hosts(app, llm, {"local/small": "192.0.2.7", "paid/big": "api.example.com"})
+    _hosts(app, llm, {"local/small": "192.0.2.7:11434", "paid/big": "api.example.com:443"})
     _machine(c)
     c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
     c.post("/api/admin/agents", json={"name": "big", "model": "paid/big"}, headers=adm())
     agents = {a["name"]: a for a in c.get("/api/admin/agents", headers=adm()).json()}
-    assert agents["helper"]["runs_on"] == "workstation" and agents["big"]["runs_on"] == "api.example.com"
+    assert agents["helper"]["runs_on"] == "workstation" and agents["big"]["runs_on"] == "api.example.com:443"
     assert agents["alice"]["runs_on"] is None
     # Grouped by the computer that answers: the local model lives on workstation, the API on no machine.
     assert agents["helper"]["machine"] == "workstation" and agents["big"]["machine"] is None
@@ -1121,7 +1123,7 @@ def test_gateway_models_show_which_machine_they_run_on(env):
     assert {k: models["local/small"][k] for k in ("name", "runs_on", "machine")} == \
         {"name": "local/small", "runs_on": "workstation", "machine": "workstation"}
     assert models["local/small"]["used_by"] == ["helper", "_summarizer"]
-    assert models["paid/big"]["machine"] is None and models["paid/big"]["runs_on"] == "api.example.com"
+    assert models["paid/big"]["machine"] is None and models["paid/big"]["runs_on"] == "api.example.com:443"
 
 
 def test_gateway_agent_goes_offline_with_its_machine(env):
@@ -1129,7 +1131,7 @@ def test_gateway_agent_goes_offline_with_its_machine(env):
     from bunch.autoreply import autoreply_once
     c, k, app, llm = env
     hub = app.state.hub
-    _hosts(app, llm, {"local/small": "workstation.example.ts.net"})
+    _hosts(app, llm, {"local/small": "workstation.example.ts.net:11434"})
     _machine(c)
     c.post("/api/admin/agents", json={"name": "helper", "model": "local/small"}, headers=adm())
     asyncio.run(hub.refresh_model_hosts())
