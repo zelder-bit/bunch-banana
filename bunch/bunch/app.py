@@ -891,6 +891,14 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                                       older_than=cutoff)
         return {"deleted": n, "bytes": freed}
 
+    @app.get("/api/admin/messages/{mid}/body")
+    async def admin_message_body(request: Request, mid: int, authorization: str | None = Header(None)):
+        viewer(request, authorization)
+        row = store.message(mid)
+        if not row:
+            raise HTTPException(404, "no such message")
+        return {"id": mid, "body": row["body"], "size": len(row["body"] or "")}
+
     @app.delete("/api/admin/messages/{mid}")
     async def admin_delete_message(request: Request, mid: int, authorization: str | None = Header(None)):
         require_admin(request, authorization)
