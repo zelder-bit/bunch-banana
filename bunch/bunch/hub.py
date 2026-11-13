@@ -932,8 +932,11 @@ class Hub:
 
     async def ask(self, agent: str, model: str, prompt: str | None = None, system: str | None = None,
                   max_tokens: int | None = None, room: str | None = None, raw: bool = False,
-                  note: str | None = None, empty_notice: Callable[[str], None] | None = None) -> str:
+                  note: str | None = None, empty_notice: Callable[[str], None] | None = None,
+                  format: str = "text") -> str:
         """raw: return just the model's text ("" when it said nothing), for the hub's own callers."""
+        if format not in ("text", "code"):
+            raise HubError("format must be 'text' or 'code'")
         if note is not None and (not isinstance(note, str) or len(note) > 200):
             raise HubError("note must be at most 200 characters")
         note = " ".join((note or "").split())
@@ -961,11 +964,14 @@ class Hub:
                 mt, reason = remaining, "what is left of today's budget"
             lowered = (f"\n[max_tokens lowered from {requested} to {mt}: {reason}]"
                        if not raw and max_tokens is not None and mt < requested else "")
+            cut_notes = []
             def cut_notice(n):
                 if raw:  # auto agents keep the original answer text, including its cut-off marker
                     return "…(cut off at the length limit; ask me to continue)"
-                return (f"…(cut off at max_tokens={n}; ask again with a higher max_tokens, "
-                        f"up to {limit} and within today's remaining budget, or ask for less)")
+                notice = (f"…(cut off at max_tokens={n}; ask again with a higher max_tokens, "
+                          f"up to {limit} and within today's remaining budget, or ask for less)")
+                cut_notes.append(notice)
+                return notice
             msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
             # the retries inside chat() stop once today's budget is used up
             text, tokens = await self.llm.chat(model, msgs, mt, user=agent,
@@ -986,4 +992,14 @@ class Hub:
             res = self.post(agent, room, (note + "\n" if note else "") + answer + lowered)
             mid = post_id(res)
             return self._charge_ctx(agent, f"posted {self.fmt_line(self.store.message(mid), agent, True)}{budget_note}{lowered}")
+        if format == "code":
+            cut = cut_notes[-1] if cut_notes else ""
+            cut_note = "\n" + cut if cut and answer.endswith(cut) else ""
+            original = answer[:-len(cut)].rstrip("\r\n") if cut_note else answer
+            fence = re.search(r"(?m)^ {0,3}(`{3,}|~{3,})[^\r\n]*\r?\n", original)
+            if fence:
+                code = original[fence.end():]
+                closing = re.search(r"(?m)^ {0,3}" + fence[1][0] + "{" + str(len(fence[1]))
+                                    + r",}[ \t]*\r?$", code)
+                answer = (code[:closing.start()] if closing else code) + cut_note
         return self._charge_ctx(agent, answer + budget_note + lowered)
