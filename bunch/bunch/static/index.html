@@ -313,6 +313,7 @@
   function signOut(msg) {
     clearTimeout(wsTimer);   // a reconnect may already be queued
     if (ws) { ws.onclose = null; ws.onmessage = null; try { ws.close(); } catch {} ws = null; }
+    loadRooms.cancel(); loadAgents.cancel(); bodyCache.clear();
     timers.forEach(clearInterval); timers = []; started = false;
     $("app").hidden = true; $("login").hidden = false;
     $("err").textContent = msg || ""; $("err").hidden = !msg;
@@ -335,17 +336,62 @@
   }
 
   // --- sidebar ---------------------------------------------------------------------
-  async function loadRooms() {
-    rooms = await api("/api/admin/rooms");
-    $("rooms").replaceChildren(...rooms.map(r =>
-      h("button", { class: "room" + (r.name === current ? " active" : ""), "aria-current": r.name === current ? "page" : null, onclick: () => openRoom(r.name) },
-        h("span", null, "# " + r.name),
-        mentions[r.name] ? h("span", { class: "badge at", title: "Addressed to you" }, "@" + mentions[r.name])
-          : unread[r.name] ? h("span", { class: "badge" }, String(unread[r.name])) : null)));
+  // Coalesce refreshes, retaining a trailing call even during a steady stream of events.
+  function pacedRefresh(fn) {
+    let last = -Infinity, timer = null, pending = null, finish, fail;
+    const refresh = () => {
+      if (pending) return pending;
+      pending = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+      pending.catch(() => {});  // event handlers need no rejection; awaited calls still propagate errors
+      timer = setTimeout(async () => {
+        const done = finish, reject = fail;
+        pending = null; timer = null; last = Date.now();
+        try { await fn(); done(); }
+        catch (err) { if (err.message !== "unauthorized") toast(err.message, "bad"); reject(err); }
+      }, Math.max(0, 2000 - (Date.now() - last)));
+      return pending;
+    };
+    refresh.cancel = () => { clearTimeout(timer); if (pending) finish(); pending = null; last = -Infinity; };
+    return refresh;
+  }
+  const loadRooms = pacedRefresh(fetchRooms), loadAgents = pacedRefresh(fetchAgents);
+  function roomRow(r) {
+    return h("button", { class: "room" + (r.name === current ? " active" : ""), "data-room": r.name,
+      "aria-current": r.name === current ? "page" : null, onclick: () => openRoom(r.name) },
+      h("span", null, "# " + r.name),
+      mentions[r.name] ? h("span", { class: "badge at", title: "Addressed to you" }, "@" + mentions[r.name])
+        : unread[r.name] ? h("span", { class: "badge" }, String(unread[r.name])) : null);
+  }
+  function showRoomCount(r) {
+    $("roomCount").textContent = r.count.toLocaleString() + (r.count === 1 ? " message" : " messages");
+  }
+  const roomRefreshes = new Set();
+  function updateRoom(m) {
+    for (const events of roomRefreshes) events.push(m);
+    const r = rooms.find(r => r.name === m.room);
+    if (!r) { loadRooms(); return; }
+    if (m.id > (r.last_id || 0)) { r.count++; r.last_id = m.id; }
+    const row = [...$("rooms").children].find(el => el.dataset.room === r.name);
+    if (row) row.replaceWith(roomRow(r));
+    if (r.name === current) showRoomCount(r);
+    updateTitle();
+  }
+  async function fetchRooms() {
+    // An event can arrive while the snapshot is in flight; retain updates newer than that snapshot.
+    const events = [];
+    roomRefreshes.add(events);
+    try {
+      rooms = await api("/api/admin/rooms");
+      for (const m of events) {
+        const r = rooms.find(r => r.name === m.room);
+        if (r && m.id > (r.last_id || 0)) { r.count++; r.last_id = m.id; }
+      }
+    } finally { roomRefreshes.delete(events); }
+    $("rooms").replaceChildren(...rooms.map(roomRow));
     updateTitle();
     if (!rooms.length) $("rooms").append(h("p", { class: "muted small" }, "No rooms yet."));
     const cur = rooms.find(r => r.name === current);
-    if (cur) { setSummary(cur.summary); $("roomCount").textContent = cur.count.toLocaleString() + (cur.count === 1 ? " message" : " messages"); }
+    if (cur) { setSummary(cur.summary); showRoomCount(cur); }
     $("paused").hidden = !cur?.paused || cur.bot;
     $("botOn").hidden = !cur?.bot;
     $("botMode").hidden = !me.admin || !cur;
@@ -383,7 +429,7 @@
   let machines = [];                               // paired machines (clients/worker.py), from the hub
   const CLI_NAMES = { claude: "Claude Code", codex: "Codex", agy: "Antigravity" };
 
-  async function loadAgents() {
+  async function fetchAgents() {
     const [list, ms] = await Promise.all([api("/api/admin/agents"), api("/api/admin/machines")]);
     machines = ms;
     people = list.filter(a => a.kind !== "system");
@@ -870,10 +916,11 @@
 
   // --- messages ------------------------------------------------------------------------
   // Same rule as the server: @name not preceded by a word char or @; a trailing "." ends the sentence.
-  const MENTION = /(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})/g;
+  const MENTION = /@([a-z0-9][a-z0-9_.-]{0,31})/g;
   function richText(text) {
     const out = []; let last = 0;
     for (const m of text.matchAll(MENTION)) {
+      if (m.index && /[\w@]/.test(text[m.index - 1])) continue;
       const name = m[1].replace(/\.+$/, "");
       if (!person(name)) continue;
       out.push(text.slice(last, m.index));
@@ -893,6 +940,7 @@
   }
   function plain(text) { return text.replace(FILE_REF, "").trim(); }
 
+  const bodyCache = new Map();  // promises also coalesce expansions while a fetch is in flight
   function renderMsg(m) {
     const kids = [
       h("div", { class: "meta" },
@@ -906,7 +954,28 @@
     ];
     const pics = attachments((m.body || "") + "\n" + m.summary);
     if (pics.length) kids.push(h("div", { class: "attachments" }, pics.filter((_, i, a) => a.findIndex(x => x.href === _.href) === i)));
-    if (m.body) kids.push(h("details", null, h("summary", null, "Full message · " + m.body.length.toLocaleString() + " chars"), h("pre", null, richText(plain(m.body)))));
+    if (m.size || m.body) {
+      const content = h("div"), details = h("details", null,
+        h("summary", null, "Full message · " + (m.size || m.body.length).toLocaleString() + " chars"), content);
+      let rendered = false, loading = false;
+      details.addEventListener("toggle", async () => {
+        if (!details.open || rendered || loading) return;
+        loading = true; content.textContent = "loading…";
+        try {
+          let body = m.body;
+          if (body == null) {
+            if (!bodyCache.has(m.id)) bodyCache.set(m.id, api(`/api/admin/messages/${m.id}/body`)
+              .then(r => r.body || "").catch(err => { bodyCache.delete(m.id); throw err; }));
+            body = await bodyCache.get(m.id);
+          }
+          content.replaceChildren(h("pre", null, richText(plain(body))));
+          if (m.body == null) content.append(h("div", { class: "attachments" }, attachments(body)));
+          rendered = true;
+        } catch (err) { content.textContent = "Couldn't load message. Close and reopen to retry."; }
+        finally { loading = false; }
+      });
+      kids.push(details);
+    }
     const forMe = (m.to || []).includes(me.name);
     return h("div", { class: "msg" + (m.human ? " human" : "") + (forMe ? " for-me" : ""), "data-id": m.id }, avatar(m.sender, m.human), h("div", { class: "bubble" }, kids));
   }
@@ -1224,7 +1293,7 @@
   }
 
   // --- live updates ------------------------------------------------------------------------
-  let wsWasUp = false;
+  let wsWasUp = false, reconnectDelay = 1000;
   function lastShownId() {
     const all = $("feed").querySelectorAll(".msg[data-id]");
     return all.length ? Number(all[all.length - 1].dataset.id) : 0;
@@ -1235,14 +1304,22 @@
     const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
     feed.querySelector(".empty")?.remove();
     const row = renderMsg(m), pend = feed.querySelector(".pending");
-    if (pend) feed.insertBefore(row, pend); else feed.append(row);   // a message still being sent stays last
+    const next = [...feed.querySelectorAll(".msg[data-id]")].find(el => Number(el.dataset.id) > m.id);
+    if (next || pend) feed.insertBefore(row, next || pend); else feed.append(row);   // a message still being sent stays last
     if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
   }
   async function catchUp() {
     if (!current) return;
     const room = current;
-    const msgs = await api("/api/admin/rooms/" + encodeURIComponent(room) + "/messages?after=" + lastShownId() + "&limit=500");
-    if (room === current) bulk(() => msgs.forEach(appendMsg));
+    let after = lastShownId();
+    const limit = 500;
+    while (room === current) {
+      const msgs = await api(`/api/admin/rooms/${enc(room)}/messages?after=${after}&limit=${limit}`);
+      if (room !== current) return;
+      bulk(() => msgs.forEach(appendMsg));
+      if (msgs.length < limit) break;
+      after = msgs[msgs.length - 1].id;
+    }
     await loadRooms();
   }
   function setLive(on, text) { $("live").classList.toggle("on", on); $("liveText").textContent = text; }
@@ -1254,6 +1331,7 @@
     ws.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
       if (e.type === "ready") {
+        reconnectDelay = 1000;
         setLive(true, "live");
         if (wsWasUp) catchUp().catch(() => {});   // fetch what was posted while we were away
         wsWasUp = true;
@@ -1281,9 +1359,16 @@
         if (forMe) mentions[m.room] = (mentions[m.room] || 0) + 1;
       }
       if (forMe && (document.hidden || m.room !== current)) notify(m);
-      loadRooms();
+      updateRoom(m);
     };
-    ws.onclose = () => { setLive(false, "reconnecting"); if (!$("app").hidden) wsTimer = setTimeout(connect, 3000); };
+    ws.onclose = (ev) => {
+      if (ev.code === 4401) { signOut("Signed out. Sign in again."); return; }
+      setLive(false, "reconnecting");
+      if ($("app").hidden) return;
+      const delay = ev.code === 4408 ? 0 : Math.min(30000, reconnectDelay * (1 + Math.random() * 0.25));
+      if (ev.code !== 4408) reconnectDelay = Math.min(30000, reconnectDelay * 2);
+      wsTimer = setTimeout(connect, delay);
+    };
   }
 
   // Shown at the bottom of the feed the moment the user sends, until the POST resolves. It is a plain `.msg` without a

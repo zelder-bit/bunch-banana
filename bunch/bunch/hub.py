@@ -16,6 +16,8 @@ from .config import Settings
 from .llm import LLM, LLMError
 from .store import HUB_SENDER, Store, text_of, valid_name
 
+VIEWER_INLINE_BODY_CHARS = 2_000  # longer bodies are fetched when the viewer expands a message
+
 WORKER_CLIS = ("claude", "codex", "agy")
 CACHE_WEIGHT = 0.1  # a cached input token costs about a tenth of a fresh one (Anthropic, OpenAI, Google)
 WORKER_POWERS = ("answer", "read", "full")  # no tools / read files in dir / edit + run in dir
@@ -165,7 +167,8 @@ class Hub:
     def message_json(m) -> dict:
         return {
             "id": m["id"], "room": m["room"], "sender": m["sender"], "human": bool(m["human"]),
-            "to": _recips(m), "summary": m["summary"], "body": m["body"],
+            "to": _recips(m), "summary": m["summary"], "size": len(m["body"] or ""),
+            "body": m["body"] if len(m["body"] or "") <= VIEWER_INLINE_BODY_CHARS else None,
             "reply_to": m["reply_to"], "created": m["created"],
         }
 
@@ -619,6 +622,7 @@ class Hub:
             for m in rows:
                 j = self.message_json(m)
                 j.pop("body")
+                j.pop("size")
                 j["snippet"] = " ".join(m["excerpt"].split())
                 out.append(j)
             return out
@@ -633,7 +637,9 @@ class Hub:
         out = []
         for m in rows:
             j = self.message_json(m)
-            body = j.pop("body")  # bodies can be huge; send a line around the match instead
+            j.pop("body")
+            j.pop("size")
+            body = m["body"]  # bodies can be huge; send a line around the match instead
             j["snippet"] = j["summary"] if not body or q.lower() in j["summary"].lower() else _snippet(body, q)
             out.append(j)
         return out
