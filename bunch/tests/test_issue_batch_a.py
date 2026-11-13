@@ -28,3 +28,16 @@ def test_stale_first_responder_cleared_at_start(tmp_path, caplog):  # #136
     with caplog.at_level("WARNING", logger="bunch"), TestClient(create_app(s, FakeLLM())) as c:
         assert c.app.state.hub.store.setting("first_responder") == ""
     assert "ghost" in caplog.text
+
+
+def test_401_is_logged_once_per_address_and_reason(env, caplog):  # #137
+    c, keys, _app, _ = env
+    with caplog.at_level("WARNING", logger="bunch"):
+        assert c.get("/api/v1/read").status_code == 401
+        assert c.get("/api/v1/read", headers=h("secret-wrong-key")).status_code == 401
+        assert c.get("/api/v1/read", headers=h("secret-wrong-key")).status_code == 401  # same reason: not logged again
+    lines = [r.getMessage() for r in caplog.records if "401 on" in r.getMessage()]
+    assert len(lines) == 2
+    assert "no key" in lines[0] and "unknown key" in lines[1]
+    assert "secret-wrong-key" not in caplog.text
+    assert c.get("/api/v1/read", headers=h(keys["alice"])).status_code == 200

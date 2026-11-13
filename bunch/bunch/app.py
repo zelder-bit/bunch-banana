@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -195,6 +196,13 @@ def _bearer(value: str | None) -> str:
     if value and value.lower().startswith("bearer "):
         return value[7:].strip()
     return ""
+
+
+def _denied(detail: str, authorization: str | None) -> HTTPException:
+    """A 401 for a bad key. The reason (never the key) rides along for the log line in create_app."""
+    e = HTTPException(401, detail, headers={"WWW-Authenticate": "Bearer"})
+    e.reason = "unknown key" if _bearer(authorization) else "no key"  # type: ignore[attr-defined]
+    return e
 
 
 def _worker_view(cfg: dict, admin: bool) -> dict:
@@ -384,6 +392,22 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                        max_age=30 * 86400, same_site="lax", https_only=s.secure_cookies)
     failed_logins: dict[str, list[float]] = {}   # per client address: recent failed sign-ins and bad admin tokens
     failed_names: dict[str, list[float]] = {}    # per account name: recent failed passwords, from any address
+    denied_at: dict[tuple[str, str], float] = {}  # (address, reason) -> last logged; bounded below
+
+    @app.exception_handler(HTTPException)
+    async def log_denied(request: Request, exc: HTTPException):
+        reason = getattr(exc, "reason", None)
+        if exc.status_code == 401 and reason and (request.url.path == "/mcp" or request.url.path.startswith("/api/v1/")):
+            who, now = (request.client.host if request.client else "?"), time.time()
+            if now - denied_at.get((who, reason), 0) >= 60:
+                if len(denied_at) >= 256:  # drop the stale ones, then the oldest, so it can't grow for ever
+                    for k in [k for k, v in denied_at.items() if now - v >= 60] or [min(denied_at, key=denied_at.get)]:  # type: ignore[arg-type]
+                        del denied_at[k]
+                denied_at[(who, reason)] = now
+                log.warning("401 on %s from %s (%s), user-agent %r", request.url.path, who, reason,
+                            (request.headers.get("user-agent") or "")[:100])
+        return await http_exception_handler(request, exc)
+
     app.add_middleware(BodyLimit, limit_for=lambda path: (
         s.max_file + 4096 if path == "/api/v1/machine/file" or path.endswith(("/folder/file", "/folder/bundle"))
         else max(s.max_request, s.max_body * 4 + 10_000)))  # a max_body message can be 4 bytes a char, as JSON
@@ -392,13 +416,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     def agent_of(authorization: str | None) -> str:
         row = store.agent_by_key(_bearer(authorization))
         if not row:
-            raise HTTPException(401, "invalid or missing agent key", headers={"WWW-Authenticate": "Bearer"})
+            raise _denied("invalid or missing agent key", authorization)
         return row["name"]
 
     def machine_of(authorization: str | None):
         row = store.machine_by_key(_bearer(authorization))
         if not row:
-            raise HTTPException(401, "invalid or missing machine key", headers={"WWW-Authenticate": "Bearer"})
+            raise _denied("invalid or missing machine key", authorization)
         return row
 
     def machine_agent(m, agent: str):
