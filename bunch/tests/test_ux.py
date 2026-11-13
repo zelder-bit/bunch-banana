@@ -8,6 +8,7 @@ import pytest
 from bunch import autoreply
 from bunch.autoreply import autoreply_once
 from bunch.router import route
+from bunch.hub import MAX_OFFERS, post_id
 
 from .test_bunch import _load_worker, _machine, _on, adm, env, h  # noqa: F401  (env is a fixture)
 
@@ -442,3 +443,71 @@ def test_stale_routing_mark_does_not_block_the_room(env):
     assert c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"])).text == "no new messages"
     hub.routing[mid] = ("r", time.time() - 61)
     assert "hello all" in c.get("/api/v1/read", params={"room": "r"}, headers=h(k["bob"])).text
+
+
+@pytest.mark.parametrize("reason", ["paused", "rate limit", "empty text", "text too long"])
+def test_rejected_worker_reply_is_not_offered_again(env, reason):
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")
+    mid = post_id(hub.post("person", "r", "@alice hello", human=True))
+    assert _job_ids(c, key) == [mid]
+    text = "answer"
+    if reason == "paused":
+        hub.post("bob", "r", "another answer")
+        hub.s = dataclasses.replace(hub.s, max_chain=1)
+    elif reason == "rate limit":
+        hub.post("alice", "elsewhere", "earlier answer")
+        hub.s = dataclasses.replace(hub.s, posts_per_min=1)
+    elif reason == "empty text":
+        text = " "
+    else:
+        text = "x" * (hub.s.max_body + 1)
+    for _ in range(2):  # a repeated submission must not repeat the note
+        r = c.post("/api/v1/machine/post", headers=h(key),
+                   json={"agent": "alice", "room": "r", "text": text, "re": mid})
+        assert r.status_code == 400 and reason in r.text
+        assert hub.offered[("alice", mid)] == MAX_OFFERS
+        assert _job_ids(c, key) == []
+        hub.offered.clear()
+        assert _job_ids(c, key) == []
+    notes = _from(c, "r", "alice")
+    assert len(notes) == 1
+    assert notes[0]["reply_to"] == mid and not notes[0]["human"]
+    assert notes[0]["summary"].startswith("(alice's answer was not posted: ")
+    assert reason in notes[0]["summary"]
+    if reason == "paused":
+        assert hub.paused("r")
+
+
+def test_rejected_unsolicited_worker_post_has_no_note(env):
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")
+    mid = post_id(hub.post("person", "r", "hello", human=True))
+    for reply_to in (None, mid, mid + 100):
+        r = c.post("/api/v1/machine/post", headers=h(key),
+                   json={"agent": "alice", "room": "r", "text": "", "re": reply_to})
+        assert r.status_code == 400
+    assert not _from(c, "r", "alice")
+    assert not hub.offered
+
+
+def test_failed_rejection_note_still_stops_offers(env, monkeypatch):
+    c, k, app, llm = env
+    hub = app.state.hub
+    key = _machine(c)
+    _on(c, "alice")
+    mid = post_id(hub.post("person", "r", "@alice hello", human=True))
+    assert _job_ids(c, key) == [mid]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("note failed")
+    monkeypatch.setattr(hub.store, "add_message", fail)
+    r = c.post("/api/v1/machine/post", headers=h(key),
+               json={"agent": "alice", "room": "r", "text": "", "re": mid})
+    assert r.status_code == 400 and "empty text" in r.text
+    assert hub.offered[("alice", mid)] == MAX_OFFERS
+    assert _job_ids(c, key) == []
