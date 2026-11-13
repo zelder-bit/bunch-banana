@@ -763,6 +763,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def admin_messages(request: Request, room: str, before: int | None = None, after: int | None = None,
                              limit: int = 100, authorization: str | None = Header(None)):
         viewer(request, authorization)
+        room = room.strip().lower().lstrip("#")
         limit = max(1, min(limit, 500))
         if after is not None:  # catch-up after a reconnect: oldest first
             rows = store.q("SELECT * FROM messages WHERE room=? AND id>? ORDER BY id LIMIT ?", (room, after, limit))
@@ -1042,6 +1043,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_worker(name, cfg)
             hub.broadcast({"type": "agents"})
             return {"name": name, "machine": cfg["machine"]}  # its machine speaks for it: no key to hand out
+        hub.agents_changed()
         return {"name": name, "key": key, "note": "shown once; store it on the agent's machine"}
 
     @app.put("/api/admin/agents/{name}/info")
@@ -1052,10 +1054,19 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         if not row or row["kind"] != "agent":
             raise HTTPException(404, "no such agent")
         fields = body.model_dump(exclude_none=True)
+        model = (fields.get("model") or "").strip()
+        if model and llm.enabled:  # a model the gateway doesn't have would fail on every message
+            try:
+                known = await llm.models()
+            except LLMError:
+                known = None  # gateway down: don't block the edit
+            if known is not None and model not in known:
+                raise HTTPException(400, f"the gateway has no model '{model}'")
         store.set_agent_info(name, **fields)
         if (fields.get("model") or "").strip():
             store.set_worker(name, None)  # an auto agent is answered by the hub, not a worker
         row = store.agent(name)
+        hub.agents_changed()
         return {"name": name, "description": row["description"], "model": row["model"], "system": row["system"]}
 
     @app.put("/api/admin/agents/{name}/worker")
@@ -1123,6 +1134,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.create_user(name, body.password, body.admin)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        hub.agents_changed()
         return {"name": name, "admin": body.admin}
 
     @app.put("/api/admin/users/{name}/password")
@@ -1155,6 +1167,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(404, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        hub.agents_changed()
         return {"name": name, "admin": body.admin}
 
     @app.delete("/api/admin/users/{name}")
@@ -1171,22 +1184,29 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             raise HTTPException(400, str(e))
         if not deleted:
             raise HTTPException(404, "no such user")
+        hub.agents_changed()
         return {"deleted": name}
 
     @app.post("/api/admin/agents/{name}/rotate")
     async def admin_rotate(request: Request, name: str, authorization: str | None = Header(None)):
         require_admin(request, authorization)
         try:
-            return {"name": name, "key": store.rotate_key(name)}
+            key = store.rotate_key(name)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        hub.agents_changed()
+        return {"name": name, "key": key}
 
     @app.put("/api/admin/agents/{name}/budget")
     async def admin_budget(request: Request, name: str, body: BudgetIn, authorization: str | None = Header(None)):
         require_admin(request, authorization)
-        if not store.agent(name):
+        row = store.agent(name)
+        if not row or row["kind"] != "agent":
             raise HTTPException(404, "no such agent")
+        if body.daily_tokens is not None and body.daily_tokens < 0:
+            raise HTTPException(400, "daily_tokens can't be negative (0 = no budget, leave it out for the default)")
         store.set_budget(name, body.daily_tokens)
+        hub.agents_changed()
         return {"name": name, "daily_tokens": hub.budget(name)}
 
     @app.put("/api/admin/agents/{name}/first")
@@ -1199,6 +1219,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
             store.set_setting("first_responder", name)
         elif store.setting("first_responder") == name:
             store.set_setting("first_responder", "")
+        hub.agents_changed()
         return {"first_responder": store.setting("first_responder") or None}
 
     @app.delete("/api/admin/agents/{name}")
@@ -1206,6 +1227,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         require_admin(request, authorization)
         if not store.delete_agent(name):
             raise HTTPException(404, "no such agent")
+        hub.agents_changed(gone=name)
         return {"deleted": name}
 
     @app.websocket("/ws")

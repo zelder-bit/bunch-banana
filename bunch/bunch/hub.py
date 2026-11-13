@@ -131,6 +131,13 @@ class Hub:
                     q.get_nowait()
                 q.put_nowait({"type": "lagged"})
 
+    def agents_changed(self, gone: str | None = None) -> None:
+        """Every open viewer reloads its agent list (names, budgets, first responder, people).
+        gone: an agent that was just deleted, so nothing stays queued for it."""
+        if gone:
+            self.held.pop(gone, None)
+        self.broadcast({"type": "agents"})
+
     def _notify(self, mid: int) -> None:
         self.broadcast({"type": "message", "message": self.message_json(self.store.message(mid))})
         self._event.set()
