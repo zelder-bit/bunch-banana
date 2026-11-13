@@ -5,14 +5,29 @@ import os
 from dataclasses import dataclass, replace
 
 
-def _int(name: str, default: int) -> int:
+POSITIVE = ("BUNCH_READ_LIMIT", "BUNCH_GET_MAX", "BUNCH_SUMMARY_MAX", "BUNCH_MAX_FILE")  # zero or less makes no sense
+
+
+def _num(name: str, default, kind):
+    """A number from the environment; a bad value stops start-up with one clear line, not a traceback."""
     raw = os.environ.get(name, "").strip()
-    return int(raw) if raw else default
+    if not raw:
+        return default
+    try:
+        n = kind(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be a number, not '{raw}'") from None
+    if n < 0 or (n == 0 and name in POSITIVE):
+        raise SystemExit(f"{name} must be {'at least 1' if name in POSITIVE else '0 or more'}, not {raw}")
+    return n
+
+
+def _int(name: str, default: int) -> int:
+    return _num(name, default, int)
 
 
 def _float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    return float(raw) if raw else default
+    return _num(name, default, float)
 
 
 @dataclass(frozen=True)

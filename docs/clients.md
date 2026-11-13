@@ -133,6 +133,8 @@ python3 clients/worker.py install --hub http://bunch.lan:8700 --key bunchm_xxx
 loginctl enable-linger $USER     # keep it running when nobody is logged in
 ```
 
+Running `install` again keeps the settings already in that file (power, folders, timeouts) unless you pass them again, and says what it kept. After **New key** in the viewer, `python3 clients/worker.py rotate-key --key bunchm_new` changes only the key and restarts the worker.
+
 This writes `~/.config/bunch/bunch-worker.env` (mode 600, with the key and your `PATH`, so the service finds `~/.local/bin`) and a systemd user service, `bunch-worker`, that starts at boot. Logs: `journalctl --user -u bunch-worker -f`. Remove it with `python3 clients/worker.py uninstall`.
 
 A machine paired like this allows **answer only**, so in an agent's **Powers** list the other choices say the machine doesn't allow them yet. To let its agents read a folder, or edit files and run commands in it, add `--max-power read` or `--max-power full` and `--dirs ~/code/app` (folders separated by `:`) to the install command. On a machine that's already paired, set `WORKER_MAX_POWER` and `WORKER_DIRS` in `~/.config/bunch/bunch-worker.env` and run `systemctl --user restart bunch-worker`. Read **Powers** below before you do.
@@ -180,7 +182,7 @@ SVG files are accepted too and shown as images (sandboxed, never as a page).
 | `WORKER_MAX_POWER` | `answer` | Highest power this machine allows. |
 | `WORKER_ROOM_FOLDERS` | off | `1` lets this machine's agents work in a room's shared folder (see below). |
 | `WORKER_ROOMS_DIR` | `~/.local/share/bunch-worker/rooms` | Where this machine keeps its copy of each room's folder. |
-| `WORKER_DIRS` | (none) | Folders `read`/`full` may run in (colon-separated). |
+| `WORKER_DIRS` | (none) | Folders `read`/`full` may run in, colon-separated (`;` on Windows). |
 | `WORKER_SHARE_OLLAMA` | (off) | `1` lists this machine's Ollama models in the viewer, to add to the gateway ([models.md](models.md#models-on-paired-machines)). |
 | `WORKER_OLLAMA_URL` | `http://localhost:11434` | Where that Ollama listens. |
 | `WORKER_TIMEOUT` | 600 | Seconds before a CLI run is stopped. |
@@ -246,7 +248,7 @@ Machine endpoints (machine key, JSON; `clients/worker.py` uses them):
 | Method & path | Body / query | Returns |
 |---|---|---|
 | `POST /api/v1/machine/hello` | `{hostname, addresses, clis, max_power, dirs, ollama?: {port, models}}` | `{machine, agents: [config…]}` |
-| `GET /api/v1/machine/read` | `wait` (s, max 60) | `{jobs: [{agent, id, room, sender, human, text, parent, room_summary}]}` |
+| `GET /api/v1/machine/read` | `wait` (s, max 60) | `{jobs: [{agent, id, room, sender, human, wake, text, parent, room_summary, recent, note, folder, created, age}]}` (`age`: seconds since the message was sent, by the hub's clock; `recent`: the latest lines of the room; `note`: the room's bot-mode note; `folder`: the room's shared folder, if any) |
 | `POST /api/v1/machine/post` | `{agent, room, text, re?}` | `ok #id` (only for this machine's agents) |
 | `POST /api/v1/machine/report` | `{agent, status: online\|busy\|cooling, tokens?, calls?, until?, room?}` | `ok used/budget` or `over budget used/budget` |
 | `POST /mcp` | JSON-RPC | MCP (Streamable HTTP, JSON responses) |

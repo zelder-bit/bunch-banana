@@ -90,7 +90,7 @@ def test_a_slow_agent_does_not_hold_up_another(env):
     _auto(c, "aa", "bb")
     gate = None
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         if user == "aa":
             await gate.wait()
         return f"{user} says hi", 10
@@ -121,7 +121,7 @@ def test_queued_message_is_answered_even_if_it_gets_old_while_waiting(env, monke
     _auto(c, "aa")
     gate, calls = None, []
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         calls.append(1)
         if len(calls) == 1:
             await gate.wait()
@@ -171,7 +171,7 @@ def test_loop_cancel_stops_running_answers(env):
     _auto(c, "aa")
     cancelled = []
 
-    async def chat(model, messages, max_tokens, user=None):
+    async def chat(model, messages, max_tokens, user=None, **kw):
         try:
             await asyncio.sleep(60)
         except asyncio.CancelledError:
@@ -247,6 +247,49 @@ def test_router_timeout_setting_reads_the_environment(monkeypatch):
     assert load().router_timeout == 8.0
     monkeypatch.setenv("BUNCH_ROUTER_TIMEOUT", "3.5")
     assert load().router_timeout == 3.5
+
+
+def _quiet_worker(monkeypatch, said):
+    w = _load_worker()
+    monkeypatch.setattr(w, "report", lambda *a, **kw: "")
+    wk = w.Worker()
+    wk.agents = {"bob": {"cli": "claude", "power": "read", "dir": "/x"}}
+    wk.reply = lambda job, text: said.append(text)
+    return w, wk
+
+
+def test_worker_names_a_missing_folder(env, monkeypatch, tmp_path):
+    """#69: an allowed folder that isn't there was reported as "claude is not installed"."""
+    said = []
+    w, wk = _quiet_worker(monkeypatch, said)
+    gone = str(tmp_path / "gone")
+    monkeypatch.setattr(w, "effective_power", lambda cfg, *a, **kw: ("read", gone))
+    wk.handle({"agent": "bob", "id": 1, "room": "r", "sender": "human", "human": True, "text": "hi",
+               "created": time.time(), "age": 1})
+    assert len(said) == 1 and gone in said[0] and "missing" in said[0]
+
+
+def test_worker_judges_backlog_by_the_hubs_clock(env, monkeypatch):
+    """#69: a worker whose clock runs ahead dropped every job without a word."""
+    said = []
+    w, wk = _quiet_worker(monkeypatch, said)
+    job = {"agent": "bob", "id": 1, "room": "r", "sender": "human", "human": True, "text": "hi"}
+    # sent ten minutes before this worker started: skipped, and the room is told
+    wk.handle({**job, "created": time.time(), "age": 600 + w.STALE_AFTER})
+    assert len(said) == 1 and said[0].startswith("(skipped: sent before")
+    # a fresh message is not stale even if "created" (hub clock) looks an hour old to this machine
+    monkeypatch.setattr(w, "effective_power", lambda cfg, *a, **kw: ("read", "/definitely/not/here"))
+    wk.handle({**job, "created": time.time() - 3600, "age": 2})
+    assert len(said) == 2 and "missing" in said[1]
+
+
+def test_machine_read_sends_the_age(env):
+    c, k, app, llm = env
+    key = _machine(c)
+    _on(c, "alice")
+    app.state.hub.post("savannah", "r", "@alice hello", human=True)
+    jobs = c.get("/api/v1/machine/read", headers=h(key)).json()["jobs"]
+    assert jobs and 0 <= jobs[0]["age"] < 60
 
 
 # --------------------------------------------------------------- #63: jobs survive a worker that never answers

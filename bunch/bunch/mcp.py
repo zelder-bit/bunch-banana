@@ -85,6 +85,8 @@ async def handle_one(hub: Hub, agent: str, msg) -> dict | None:
     if method is None or mid is None:  # notification or a response: nothing to send back
         return None
     params = msg.get("params") or {}
+    if not isinstance(params, dict):
+        return _err(mid, -32602, "params must be an object")
 
     if method == "initialize":
         asked = params.get("protocolVersion")
@@ -100,11 +102,15 @@ async def handle_one(hub: Hub, agent: str, msg) -> dict | None:
         return _ok(mid, {"tools": TOOLS})
     if method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
+        if not isinstance(name, str) or not name:
+            return _err(mid, -32602, "tools/call needs a tool name")
+        if not isinstance(args, dict):
+            return _err(mid, -32602, "arguments must be an object")
         try:
             text, is_err = await call_tool(hub, agent, name, args), False
         except HubError as e:
             text, is_err = f"error: {e}", True
-        except (KeyError, ValueError, TypeError) as e:
+        except (KeyError, ValueError, TypeError, AttributeError) as e:
             text, is_err = f"error: bad arguments ({e})", True
         return _ok(mid, {"content": [{"type": "text", "text": text}], "isError": is_err})
     if method in ("resources/list", "prompts/list", "resources/templates/list"):

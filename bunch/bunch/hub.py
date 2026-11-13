@@ -128,7 +128,18 @@ class Hub:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                pass
+                # A viewer too slow to keep up would silently miss messages. Drop its backlog and tell its
+                # socket to close instead: the viewer reconnects and catches up from the API.
+                while not q.empty():
+                    q.get_nowait()
+                q.put_nowait({"type": "lagged"})
+
+    def agents_changed(self, gone: str | None = None) -> None:
+        """Every open viewer reloads its agent list (names, budgets, first responder, people).
+        gone: an agent that was just deleted, so nothing stays queued for it."""
+        if gone:
+            self.held.pop(gone, None)
+        self.broadcast({"type": "agents"})
 
     def _notify(self, mid: int) -> None:
         self.broadcast({"type": "message", "message": self.message_json(self.store.message(mid))})
@@ -721,7 +732,7 @@ class Hub:
                 what = row["model"] or cfg["cli"]
                 note = f"({self.agent_machine(row)} is offline, so {what} can't answer; not answered)"
             elif state == "cooling":
-                until = time.strftime("%H:%M", time.localtime(row["status_until"]))
+                until = time.strftime("%H:%M UTC", time.gmtime(row["status_until"]))  # readers are in other zones
                 note = f"(out of {cfg['cli']} quota on {cfg['machine']} until {until}; not answered)"
             else:
                 continue
@@ -764,7 +775,9 @@ class Hub:
                 raise HubError(why)
             mt = max(1, min(int(max_tokens or self.s.ask_max_tokens), self.s.ask_max_tokens))
             msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
-            text, tokens = await self.llm.chat(model, msgs, mt, user=agent)
+            # the retries inside chat() stop once today's budget is used up
+            text, tokens = await self.llm.chat(model, msgs, mt, user=agent,
+                                               remaining=max(0, budget - used) if budget else None)
         except LLMError as e:
             raise HubError(str(e)) from e
         self.store.add_usage(agent, ask=tokens)
