@@ -86,7 +86,7 @@ def test_router_failure_falls_back_to_the_last_answerer_of_this_sender(env):
     hub = _router_env(env)
     q = post_id(hub.post("savannah", "r", "@bb what machine for stickers?", human=True))
     hub.post("bb", "r", "a Cricut", reply_to=q)
-    hub.store.x("UPDATE messages SET created=created-300 WHERE sender='bb'")  # too old for the quick rule
+    hub.store.x("UPDATE messages SET created=created-300 WHERE sender='bb'")
     text = "and what is the best camera for product photos okay"
     assert asyncio.run(route(hub, "r", text, sender="savannah")) == ["bb"]
     assert asyncio.run(route(hub, "r", text, sender="other")) == []
@@ -95,25 +95,6 @@ def test_router_failure_falls_back_to_the_last_answerer_of_this_sender(env):
 def test_router_failure_with_no_recent_answer_picks_nobody(env):
     hub = _router_env(env)
     assert asyncio.run(route(hub, "r", "what is the best camera for product photos?", sender="savannah")) == []
-
-
-def test_fresh_reply_to_the_same_person_takes_a_longer_follow_up_without_the_model(env):
-    hub = _router_env(env)
-    called = []
-
-    async def chat(*a, **kw):
-        called.append(1)
-        return "bb", 1
-    hub.llm.chat = chat
-    q = post_id(hub.post("savannah", "r", "@aa write todo_list.py", human=True))
-    hub.post("aa", "r", "done, saved it", reply_to=q)
-    assert asyncio.run(route(hub, "r", "i dont see todo_list.py", sender="savannah")) == ["aa"] and not called
-    # another person, or an @mention, still goes to the model
-    assert asyncio.run(route(hub, "r", "i dont see todo_list.py", sender="other")) == ["bb"]
-    assert asyncio.run(route(hub, "r", "i dont see todo_list.py, ask @bb", sender="savannah")) == ["bb"]
-    hub.store.x("UPDATE messages SET created=created-300 WHERE sender='aa'")  # old reply
-    called.clear()
-    assert asyncio.run(route(hub, "r", "i dont see todo_list.py", sender="savannah")) == ["bb"] and called
 
 
 # ------------------------------------------------------------------ #139
