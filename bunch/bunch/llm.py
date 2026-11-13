@@ -35,6 +35,7 @@ class LLM:
         self._hosts_at = float("-inf")
         self._probes: dict[str, tuple[float, bool]] = {}
         self._probe_locks: dict[str, asyncio.Lock] = {}
+        self.model_names: set[str] | None = None  # every model the gateway listed on the last model_info(); None = never
 
     def _http(self) -> httpx.AsyncClient:
         """One shared client, so connections to the gateway are reused."""
@@ -175,6 +176,7 @@ class LLM:
                             "model": p.get("model") or "", "stored": bool(i.get("db_model")),
                             "description": i.get("description") or "",
                             "context": i.get("max_input_tokens") or i.get("max_tokens")})
+        self.model_names = {m["name"] for m in out}
         return out
 
     async def model_hosts(self, info: list[dict] | None = None) -> dict[str, str]:

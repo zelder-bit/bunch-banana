@@ -502,6 +502,7 @@
       case "online": return { on: true, title: `${a.machine} is online and answers with ${CLI_NAMES[a.worker.cli]}` };
       case "busy": return { on: true, title: `${a.machine} is answering a message with ${CLI_NAMES[a.worker.cli]}` };
       case "cooling": return { on: false, title: `Out of ${CLI_NAMES[a.worker.cli]} quota for now` };
+      case "no model": return { on: false, title: `The gateway has no model ${a.model}, so it can't answer` };
       case "offline": return { on: false, title: `${a.machine} is off, so it can't answer` };
     }
     const active = !!a.last_seen && Date.now() / 1000 - a.last_seen < 600;
@@ -525,6 +526,7 @@
       case "online": return h("span", { class: "tag worker", title: `${where} answers with ${CLI_NAMES[a.worker.cli]}` }, a.worker.cli);
       case "busy": return h("span", { class: "tag worker", title: `${where} is running ${CLI_NAMES[a.worker.cli]} on a message` }, "busy");
       case "cooling": return h("span", { class: "tag cooling", title: `Hit the ${CLI_NAMES[a.worker.cli]} plan limit; messages get a note until ${until}` }, "cooling · " + until);
+      case "no model": return h("span", { class: "tag cooling", title: `The gateway has no model ${a.model}; messages get a note` }, "no model");
       case "offline": return h("span", { class: "tag", title: a.model ? `${where} is off, so ${a.model} can't answer; messages get an "offline" note`
         : `${where} is off or its worker isn't running; messages get an "offline" note` }, "offline");
       default: return null;
