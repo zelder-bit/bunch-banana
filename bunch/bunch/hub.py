@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from .config import Settings
 from .llm import LLM, LLMError
-from .store import HUB_SENDER, Store, valid_name
+from .store import HUB_SENDER, Store, text_of, valid_name
 
 WORKER_CLIS = ("claude", "codex", "agy")
 CACHE_WEIGHT = 0.1  # a cached input token costs about a tenth of a fresh one (Anthropic, OpenAI, Google)
@@ -146,10 +146,14 @@ class Hub:
                 del self.offered[key]
         self.broadcast({"type": "agents"})
 
-    def _notify(self, mid: int) -> None:
-        self.broadcast({"type": "message", "message": self.message_json(self.store.message(mid))})
+    def _wake(self) -> None:
+        """Wake current waiters and give future waiters a fresh event."""
         self._event.set()
         self._event = asyncio.Event()
+
+    def _notify(self, mid: int) -> None:
+        self.broadcast({"type": "message", "message": self.message_json(self.store.message(mid))})
+        self._wake()
 
     async def wait_for_new(self, timeout: float) -> None:
         try:
@@ -259,8 +263,7 @@ class Hub:
                 self.store.x("UPDATE messages SET recipients=? WHERE id=?", ("," + ",".join(recips) + ",", mid))
                 self.broadcast({"type": "routed", "message": self.message_json(self.store.message(mid))})
                 self._unavailable_notices(mid)
-        self._event.set()             # wake readers: the message can be read now
-        self._event = asyncio.Event()  # (a set event must be replaced, as in _notify, or waiters spin)
+        self._wake()  # wake readers: the message can be read now
 
     def _routing_holds(self) -> dict[str, int]:
         """Room -> the first message there whose recipients are still being chosen. An entry older than a
@@ -451,10 +454,10 @@ class Hub:
         room (a double send), so it isn't answered from scratch a second time."""
         if not m["human"]:
             return None
-        text = " ".join((m["body"] or m["summary"] or "").split())
+        text = " ".join((text_of(m) or "").split())
         for p in self.store.q("SELECT * FROM messages WHERE room=? AND sender=? AND id<? AND created>? "
                               "ORDER BY id DESC LIMIT 5", (m["room"], m["sender"], m["id"], m["created"] - DUPLICATE_WINDOW)):
-            if " ".join((p["body"] or p["summary"] or "").split()) == text and \
+            if " ".join((text_of(p) or "").split()) == text and \
                     self.store.one("SELECT 1 FROM messages WHERE reply_to=? "
                                    "AND COALESCE(body, summary) NOT LIKE '(%; not answered)'", (p["id"],)):
                 # Only the answer to the first copy in between: a double send (or a resend after a send that
@@ -476,7 +479,7 @@ class Hub:
 
     def baton(self, m) -> str | None:
         """The one agent a bot-mode message hands work to: the first one it asks or opens a line with."""
-        return self._baton(m["body"] or m["summary"] or "", m["sender"])
+        return self._baton(text_of(m) or "", m["sender"])
 
     def _baton(self, text: str, sender: str) -> str | None:
         text = text.lower()
@@ -491,7 +494,7 @@ class Hub:
 
     def routed(self, m) -> bool:
         """A new bot-mode message from an agent that names no agent: the router picked who it asks."""
-        text = (m["body"] or m["summary"] or "").lower()
+        text = (text_of(m) or "").lower()
         return not m["human"] and m["reply_to"] is None and self.bot(m["room"]) and \
             not any(self.store.agent(n.rstrip(".")) for n in MENTION_RE.findall(text))
 
@@ -504,7 +507,7 @@ class Hub:
             self._shingle_cache.popitem(last=False)
 
         def shingles(row):
-            key = (row["id"], row["body"] or row["summary"])
+            key = (row["id"], text_of(row))
             if key not in cache:
                 cache[key] = _shingles(key[1])
             cache.move_to_end(key)
@@ -530,7 +533,7 @@ class Hub:
     def _bot_turn(self, mid: int) -> None:
         """After an agent posts in a bot room: [done] ends bot mode; a looping handoff gets a note."""
         m = self.store.message(mid)
-        if DONE_RE.search(m["body"] or m["summary"]):
+        if DONE_RE.search(text_of(m)):
             self.store.set_room_bot(m["room"], False)
             self.broadcast({"type": "rooms"})
             return
@@ -551,7 +554,7 @@ class Hub:
         if self.bot(m["room"]):
             asked = self.baton(m) == agent or (self.routed(m) and agent in _recips(m))
             return asked and not self.stall(m)
-        if not addresses(m["body"] or m["summary"], agent) or self.agent_hops(m) >= MAX_AGENT_HOPS:
+        if not addresses(text_of(m), agent) or self.agent_hops(m) >= MAX_AGENT_HOPS:
             return False
         root = m
         while root and not root["human"]:
@@ -640,7 +643,7 @@ class Hub:
         m = self.store.message(int(mid))
         if not m:
             raise HubError(f"no message #{mid}")
-        text = m["body"] or m["summary"]
+        text = text_of(m)
         offset = max(0, int(offset or 0))
         chunk = text[offset: offset + self.s.get_max]
         head = f"#{m['id']} {m['sender']} in {m['room']}"
