@@ -14,7 +14,7 @@ import logging
 import re
 import time
 
-from .hub import Hub, HubError
+from .hub import ECHO_SIMILARITY, Hub, HubError, _shingles
 from .store import text_of
 
 log = logging.getLogger("bunch.autoreply")
@@ -67,6 +67,39 @@ def _own_reply(text: str, name: str) -> str:
     return "\n".join(lines).strip()
 
 
+SUMMARY_RE = re.compile(r"^[\s#*_>-]*summary of\b", re.I)
+MIN_ECHO_WORDS = 15  # shorter replies may quote context freely
+
+
+def _is_echo(raw: str, name: str, others: set[str], context: list[str]) -> bool:
+    """True when a model went on with the prompt instead of answering it: it addresses itself, continues the
+    room summary, copies the summary or recent messages, or writes lines for other speakers. Conservative:
+    a real answer that quotes a little context is not an echo."""
+    text = _own_reply(raw, name)
+    if re.match(rf"^[\W_]*(?:@{re.escape(name)}\b|(?:hey|hi|hello)[\s,]+@?{re.escape(name)}\b)", text, re.I):
+        return True
+    if SUMMARY_RE.match(text):
+        return True
+    words = len(re.findall(r"\w+", text))
+    if words >= MIN_ECHO_WORDS:  # share of the reply's word trigrams found in the prompt context
+        mine = _shingles(text)
+        theirs = set().union(*(_shingles(c) for c in context if c))
+        if mine and len(mine & theirs) / len(mine) >= ECHO_SIMILARITY:
+            return True
+    lines, in_code, other = [ln for ln in raw.split("\n") if ln.strip()], False, 0
+    first = SPEAKER_RE.match(lines[0]) if lines else None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+        elif in_code or (i == 0 and first and first.group(1).lower() == name.lower()):
+            continue
+        else:
+            sp = SPEAKER_RE.match(line) or re.match(r"^\s*[*@]*([\w.-]+)[*]*:\s", line)
+            if sp and sp.group(1).lower() != name.lower() and (SPEAKER_RE.match(line) or sp.group(1) in others):
+                other += 1
+    return other >= 1 and (not text or (other >= 2 and other * 2 >= len(lines)))
+
+
 async def _save_files(hub: Hub, name: str, room: str, text: str) -> str:
     """Writes the `save: path` + code block pairs of a reply to the room folder; returns the reply with one
     status line per file. A failed write is only reported: the reply is posted anyway."""
@@ -117,19 +150,30 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
         system += "\n\n" + note
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
     empty: list[str] = []
+    context = [parts[0], recent or ""]
+    others = st.agent_names() - {name}
+
+    async def ask(prompt: str) -> tuple[str, bool]:
+        raw = (await hub.ask(name, agent["model"], prompt, system, hub.s.ask_max_tokens,
+                             raw=True, empty_notice=empty.append)).strip()
+        return _own_reply(raw, name), _is_echo(raw, name, others, context)
     try:
-        text = (await hub.ask(name, agent["model"], "\n\n".join(parts), system, hub.s.ask_max_tokens,
-                              raw=True, empty_notice=empty.append)).strip()
+        prompt = "\n\n".join(parts)
+        text, echo = await ask(prompt)
+        if echo:  # it went on with the prompt: one more try, told what to do
+            log.info("%s: echo for #%s, retrying", name, m["id"])
+            text, echo = await ask(f"{prompt}\n\nAnswer only message #{m['id']}, in your own words, as {name}. "
+                                   "Do not summarize the room, do not write for other people, do not address yourself.")
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
-    text = _own_reply(text, name)
-    if FILLER_RE.match(text):
+    if FILLER_RE.match(text) or echo:
         text = ""
     if not text:
         if not m["human"]:
             _gave_up[(name, m["id"])] = m["created"]
             return  # don't answer another agent with noise; they can ask again
-        text = f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)"
+        text = (f"({agent['model']} gave no usable answer; ask again or rephrase)" if echo else
+                f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)")
     if has_folder:
         text = await _save_files(hub, name, m["room"], text)
     hub.post(name, m["room"], text, reply_to=m["id"])
