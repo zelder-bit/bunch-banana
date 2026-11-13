@@ -853,6 +853,17 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         hub.broadcast({"type": "rooms"})
         return {"room": room, "bot": body.on}
 
+    @app.delete("/api/admin/rooms/{room}/summary")
+    async def admin_clear_summary(request: Request, room: str, authorization: str | None = Header(None)):
+        """A stale summary pulls agents back to old topics: empty it and summarize only what comes next."""
+        require_admin(request, authorization)
+        room = room.strip().lower().lstrip("#")
+        if not store.room(room):
+            raise HTTPException(404, "no such room")
+        store.clear_summary(room)
+        hub.broadcast({"type": "rooms"})
+        return {"room": room, "summary": ""}
+
     @app.delete("/api/admin/rooms/{room}")
     async def admin_delete_room(request: Request, room: str, authorization: str | None = Header(None)):
         require_admin(request, authorization)
