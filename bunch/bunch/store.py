@@ -139,6 +139,11 @@ USAGE_COLUMNS = {
 _ph = PasswordHasher()
 
 
+def text_of(row) -> str:
+    """Full message text; short messages keep it in summary with no body."""
+    return row["body"] or row["summary"]
+
+
 def hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
@@ -626,7 +631,7 @@ class Store:
             self.x("UPDATE rooms SET summary='', summary_upto=0 WHERE name=? AND summary_upto>=?", (row["room"], mid))
             # files only this message cited would stay on disk with nothing pointing at them
             # (a short message keeps its text in summary, with no body)
-            ids = {int(i) for i in re.findall(r"\(file:(\d+)\)", row["body"] or row["summary"] or "")}
+            ids = {int(i) for i in re.findall(r"\(file:(\d+)\)", text_of(row) or "")}
             self.delete_files(ids=[i for i in sorted(ids) if not self.one(
                 "SELECT 1 FROM messages WHERE body LIKE ? OR (body IS NULL AND summary LIKE ?) LIMIT 1",
                 (f"%(file:{i})%", f"%(file:{i})%"))])

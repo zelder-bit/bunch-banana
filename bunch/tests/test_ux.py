@@ -181,7 +181,7 @@ def test_loop_cancel_stops_running_answers(env):
     llm.chat = chat
 
     async def scenario():
-        hub._event = asyncio.Event()
+        hub._wake()
         hub.post("human", "r", "@aa hi", human=True)
         t = asyncio.create_task(autoreply.autoreply_loop(hub))
         await asyncio.sleep(0.3)

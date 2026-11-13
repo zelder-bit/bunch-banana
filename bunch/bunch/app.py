@@ -27,7 +27,7 @@ from . import folders
 from .hub import CACHE_WEIGHT, MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError, post_id
 from .llm import LLM, LLMError
 from .router import route, route_agent_post
-from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store
+from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store, text_of
 from .summarizer import summarizer_loop
 
 log = logging.getLogger("bunch")
@@ -350,7 +350,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        hub._event = asyncio.Event()  # bind to the running loop
+        hub._wake()  # bind to the running loop
         tasks = []
         if s.summary_model and llm.enabled:
             tasks.append(asyncio.create_task(summarizer_loop(hub)))
@@ -724,10 +724,10 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
                                  if shared else None, "id": r["id"], "room": r["room"], "sender": r["sender"],
                                  "human": bool(r["human"]), "wake": True, "created": r["created"],
                                  "age": max(0.0, time.time() - r["created"]),
-                                 "text": r["body"] or r["summary"], "room_summary": hub.room_summary(r["room"]),
+                                 "text": text_of(r), "room_summary": hub.room_summary(r["room"]),
                                  "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
                                  "parent": {"id": parent["id"], "sender": parent["sender"],
-                                            "text": parent["body"] or parent["summary"]} if parent else None})
+                                            "text": text_of(parent)} if parent else None})
             if jobs or time.monotonic() >= deadline:
                 return {"jobs": jobs}
             await hub.wait_for_new(max(0.05, deadline - time.monotonic()))

@@ -15,6 +15,7 @@ import re
 import time
 
 from .hub import Hub, HubError
+from .store import text_of
 
 log = logging.getLogger("bunch.autoreply")
 
@@ -58,13 +59,9 @@ def _own_reply(text: str, name: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _text(m) -> str:
-    return m["body"] or m["summary"]
-
-
 async def answer(hub: Hub, agent, m) -> None:
     name, st = agent["name"], hub.store
-    body = _text(m)
+    body = text_of(m)
     if not m["human"] and not hub.wakes(m, name):
         return
     await hub.wait_turn(m, name)  # agents asked together answer in turn, each seeing the earlier answers
@@ -85,7 +82,7 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
         parent = st.message(m["reply_to"])
         if parent:
             parts.append(f"It replies to #{parent['id']} from {parent['sender']}:\n"
-                         f"{_text(parent)[:MAX_INPUT_CHARS // 3]}")
+                         f"{text_of(parent)[:MAX_INPUT_CHARS // 3]}")
     parts.append(f"Message #{m['id']} from {m['sender']}:\n{body[:MAX_INPUT_CHARS]}")
     system = agent["system"] or DEFAULT_SYSTEM.format(name=name)
     note = hub.room_note(m["room"])
