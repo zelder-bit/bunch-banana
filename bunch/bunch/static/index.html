@@ -936,7 +936,9 @@
   function attachments(text) {
     return [...text.matchAll(FILE_REF)].map(m => h("a", { href: "/api/admin/files/" + m[2], target: "_blank", rel: "noopener", class: "attach" },
       h("img", { src: "/api/admin/files/" + m[2], alt: m[1] || "attachment", loading: "lazy",
-        onerror: (e) => e.target.replaceWith(document.createTextNode("📎 " + (m[1] || "file") + " (download)")) })));
+        onerror: (e) => e.target.replaceWith(IMG_TYPES[(m[1] || "").split(".").pop().toLowerCase()]
+          ? h("span", { class: "muted", title: m[1] || "attachment" }, "picture removed")
+          : document.createTextNode("📎 " + (m[1] || "file") + " (download)")) })));
   }
   function plain(text) { return text.replace(FILE_REF, "").trim(); }
 
