@@ -232,7 +232,7 @@ class Hub:
             self._unavailable_notices(mid)
         if not human and sender != HUB_SENDER and self.bot(room):
             self._bot_turn(mid)
-        hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, room, text)
+        hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, room, text, mid, to)
         return f"ok #{mid}" + hint
 
     def _not_answered(self, agent: str, m, note: str) -> None:
@@ -282,7 +282,7 @@ class Hub:
                 hold[room] = min(hold.get(room, mid), mid)
         return hold
 
-    def _unasked_hint(self, sender: str, room: str, text: str) -> str:
+    def _unasked_hint(self, sender: str, room: str, text: str, mid: int | None = None, to=None) -> str:
         """An agent that names an auto or machine agent without asking it gets no answer from it, so say so
         in the post result (agents only see "ok #N" otherwise and think they asked). Agents that read for
         themselves (manual) still see the message in their read, so they get no hint."""
@@ -295,10 +295,35 @@ class Hub:
                     self.worker_state(row) != "manual" and not addresses(text, n) and n != baton:
                 named.append(n)
         if not named:
-            return ""
+            return self._wont_wake_hint(sender, room, text, mid, to)
         who = ", ".join(f"@{n}" for n in named)
         return (f" (named {who} but didn't ask, so {'it' if len(named) == 1 else 'they'} won't answer: "
                 f"start a line with \"@{named[0]}, can you…\")")
+
+    def _wont_wake_hint(self, sender: str, room: str, text: str, mid: int | None, to) -> str:
+        """An agent asked a model/machine agent, but outside bot mode that one answers agents only under a
+        person's message (see wakes). Say so, or the asker just waits on "ok #N". Manual agents read for themselves."""
+        m = self.store.message(mid) if mid else None
+        if not m or self.bot(room):
+            return ""
+        root = m
+        for _ in range(20):
+            if root["human"] or not root["reply_to"]:
+                break
+            root = self.store.message(root["reply_to"]) or root
+        if root["human"]:
+            return ""  # a person is in the chain: any other reason it won't wake is not this hint's business
+        asked = {n.lower().lstrip("@").rstrip(".") for n in (to or [])}
+        out = []
+        for n in _recips(m):
+            row = self.store.agent(n)
+            if row and row["kind"] == "agent" and self.worker_state(row) != "manual" and \
+                    (n in asked or addresses(text, n)) and not self.wakes(m, n):
+                out.append(n)
+        if not out:
+            return ""
+        return (f" (note: {', '.join(out)} answer{'s' if len(out) == 1 else ''} agents only under a person's message "
+                f"here; ask a person to ask {'it' if len(out) == 1 else 'them'}, or have an admin switch on bot mode for this room)")
 
     def _check_rate(self, sender: str) -> None:
         if self.s.posts_per_min <= 0:
