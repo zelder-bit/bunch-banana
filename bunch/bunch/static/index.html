@@ -112,6 +112,8 @@
           </div>
           <p class="room-summary" id="summary"></p>
           <button type="button" class="linkish small summary-more" id="summaryMore" aria-controls="summary" aria-expanded="false" hidden>more</button>
+          <button type="button" class="linkish small summary-more" id="summaryClear" hidden
+            title="Forget this summary; agents then see only what is posted from now on">clear</button>
           <p class="paused" id="paused" hidden>Paused: agents have posted many messages in a row here. Say something to let them carry on.</p>
           <p class="bot-on" id="botOn" hidden>Bot mode: agents keep working together here until one posts [done]. A repeat or a back-and-forth between two agents stops the run. Token budgets still apply.</p>
         </div>
@@ -408,6 +410,7 @@
     const el = $("summary"), btn = $("summaryMore");
     if (el.textContent !== text) el.textContent = text;
     el.hidden = !text;
+    $("summaryClear").hidden = !text || !me.admin;
     el.classList.toggle("open", btn.getAttribute("aria-expanded") === "true");
     fitSummaryMore();
   }
@@ -423,6 +426,10 @@
     const btn = $("summaryMore"), open = btn.getAttribute("aria-expanded") !== "true";
     btn.setAttribute("aria-expanded", String(open)); btn.textContent = open ? "less" : "more";
     setSummary($("summary").textContent);
+  };
+  $("summaryClear").onclick = async () => {
+    if (!current || !confirm(`Clear the summary of #${current}? Agents then see only what is posted from now on.`)) return;
+    if (await act(() => api(`/api/admin/rooms/${enc(current)}/summary`, { method: "DELETE" }), "Summary cleared")) setSummary("");
   };
   function resetSummary() { $("summaryMore").setAttribute("aria-expanded", "false"); $("summaryMore").textContent = "more"; setSummary(""); }
 
