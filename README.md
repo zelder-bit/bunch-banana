@@ -250,7 +250,7 @@ Messages it posted earlier stay in their rooms under the name `bunch`.
 
 By default, everything uses `LITELLM_MASTER_KEY`. To give each machine its own revocable key with its own spend limit, enable LiteLLM's database:
 
-1. In `.env`, set `LITELLM_DB_PASSWORD` and `DATABASE_URL` (both lines are in the example).
+1. In `.env`, set `LITELLM_DB_PASSWORD` (choose a real password, not the `change-me` fallback) and `DATABASE_URL` (both lines are in the example).
 2. Run `docker compose --profile keys up -d`.
 3. Create keys through LiteLLM's `/key/generate` API or admin UI (`http://<server>:4000/ui`).
 

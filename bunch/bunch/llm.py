@@ -198,7 +198,7 @@ class LLM:
             try:
                 _, writer = await asyncio.wait_for(
                     asyncio.open_connection(url.hostname, url.port), PROBE_TIMEOUT)
-            except (OSError, asyncio.TimeoutError):
+            except (TimeoutError, OSError):
                 reachable = False
             else:
                 writer.close()

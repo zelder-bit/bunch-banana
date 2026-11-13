@@ -3,8 +3,8 @@
 
 services:
   litellm:
-    # Pin a specific tag once you've tested one (see https://github.com/BerriAI/litellm/releases).
-    image: ghcr.io/berriai/litellm:${LITELLM_TAG:-main-stable}
+    # Pinned to a tested tag; override with LITELLM_TAG to follow a newer one.
+    image: ghcr.io/berriai/litellm:${LITELLM_TAG:-v1.106.4}
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     env_file: .env            # provider keys + Ollama URLs live here, never in git
     volumes:

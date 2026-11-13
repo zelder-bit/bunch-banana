@@ -80,7 +80,7 @@ def _snippet(text: str, q: str, width: int = 160) -> str:
 
 def post_id(result: str) -> int:
     """The message id in a post result ("ok #12", maybe followed by a hint)."""
-    return int(re.search(r"#(\d+)", result)[1])
+    return int(re.search(r"#(\d+)", result)[1])  # type: ignore[index]  # only called on "ok #N" results
 
 
 def mentions(text: str, name: str) -> bool:
@@ -119,7 +119,7 @@ class Hub:
         self.store = store
         self.s = settings
         self.llm = llm
-        self._shingle_cache = OrderedDict()  # bounded rooms and recent texts; edits change the cache key
+        self._shingle_cache: OrderedDict = OrderedDict()  # bounded rooms and recent texts; edits change the cache key
         self.listeners: set[asyncio.Queue] = set()  # web viewer sockets
         self._event = asyncio.Event()                # wakes long-polling readers
         self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
@@ -160,7 +160,7 @@ class Hub:
     async def wait_for_new(self, timeout: float) -> None:
         try:
             await asyncio.wait_for(self._event.wait(), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     @staticmethod
@@ -244,7 +244,9 @@ class Hub:
 
     def rejected_reply(self, agent: str, room: str, reply_to: int | None, why: str) -> None:
         try:
-            m = self.store.message(reply_to) if reply_to is not None else None
+            if reply_to is None:
+                return
+            m = self.store.message(reply_to)
             room = (room or "").strip().lower().lstrip("#")
             if not m or room != m["room"] or agent not in _recips(m):
                 return
@@ -609,15 +611,15 @@ class Hub:
         if self.store.fts:
             match = '"' + q.replace('"', '""') + '"'
             where = "messages_fts MATCH ?"
-            args = [match]
+            fargs = [match]
             if room:
                 where += " AND m.room=?"
-                args.append(room.strip().lower().lstrip("#"))
+                fargs.append(room.strip().lower().lstrip("#"))
             rows = self.store.q(
                 "SELECT m.*, snippet(messages_fts, -1, '', '', '…', 32) AS excerpt "
                 "FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid "
                 f"WHERE {where} ORDER BY bm25(messages_fts), m.id DESC LIMIT ?",
-                (*args, max(1, min(int(limit), 200))))
+                (*fargs, max(1, min(int(limit), 200))))
             out = []
             for m in rows:
                 j = self.message_json(m)
@@ -628,12 +630,12 @@ class Hub:
             return out
         like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         where = "(summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')"
-        args: list = [like, like]
+        largs: list = [like, like]
         if room:
             where += " AND room=?"
-            args.append(room.strip().lower().lstrip("#"))
+            largs.append(room.strip().lower().lstrip("#"))
         rows = self.store.q(f"SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?",
-                            (*args, max(1, min(int(limit), 200))))
+                            (*largs, max(1, min(int(limit), 200))))
         out = []
         for m in rows:
             j = self.message_json(m)
@@ -675,7 +677,7 @@ class Hub:
             "FROM rooms r LEFT JOIN messages m ON m.room=r.name "
             "LEFT JOIN cursors c ON c.room=r.name AND c.agent=? GROUP BY r.name ORDER BY r.name",
             (agent, f",{agent},", agent, f",{agent},", agent))
-        recent = {}
+        recent: dict[str, list[str]] = {}
         if fallback:
             for m in self.store.q(
                 "SELECT * FROM (SELECT room,sender,summary,id, "
@@ -809,7 +811,8 @@ class Hub:
         m = self.store.machine((cfg.get("machine") or "").strip())
         if not m:
             raise HubError("pick a machine (add one under Machines first)")
-        cli = {"gemini": "agy"}.get(cfg.get("cli"), cfg.get("cli"))
+        cli = cfg.get("cli")
+        cli = "agy" if cli == "gemini" else cli
         if cli not in WORKER_CLIS:
             raise HubError(f"cli must be one of {', '.join(WORKER_CLIS)}")
         found = [c["cli"] for c in json.loads(m["clis"] or "[]")]
@@ -885,7 +888,7 @@ class Hub:
                 parts.append(f"context {m['context']}")
             if m.get("description"):
                 parts.append(" ".join(m["description"].split()))
-            lines.append(name + (" [" + ", ".join(parts) + "]" if parts else ""))
+            lines.append(name + (" [" + ", ".join(parts) + "]" if parts else ""))  # type: ignore[arg-type]  # model_host is a str whenever host is set
         return "models:\n" + "\n".join(lines)
 
     def agent_machine(self, row, machines=None) -> str | None:
@@ -948,7 +951,7 @@ class Hub:
         note = " ".join((note or "").split())
         if note and not room:
             raise HubError("note requires room")
-        empty = []
+        empty: list[str] = []
         if not self.llm.enabled:
             raise HubError("no model gateway configured (LITELLM_URL)")
         model = (model or "").strip()

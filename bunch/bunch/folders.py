@@ -148,7 +148,7 @@ class GitFolder:
                      lambda env: _git(self.root, "update-index", "-z", "--index-info", env=env,  # mode 0 = remove
                                       data=b"0 " + b"0" * 40 + b"\t" + path.encode() + b"\0"))
 
-    def history(self, limit: int = 30) -> list[dict]:
+    def history(self, limit: int = 30) -> list[dict]:  # type: ignore[valid-type]  # a method named `list` shadows the builtin
         raw = _git(self.root, "log", f"-n{int(limit)}", "--format=%h%x1f%an%x1f%at%x1f%s%x1e", BRANCH).decode(errors="replace")
         out = []
         for rec in raw.split("\x1e"):
@@ -157,7 +157,7 @@ class GitFolder:
                 out.append({"id": f[0], "who": f[1], "when": float(f[2]), "what": f[3]})
         return out[:-1] if out and out[-1]["what"] == "start of the room folder" else out
 
-    def branches(self) -> list[dict]:
+    def branches(self) -> list[dict]:  # type: ignore[valid-type]  # a method named `list` shadows the builtin
         """Work that didn't fit onto main: one side branch per agent run that conflicted."""
         raw = _git(self.root, "for-each-ref", "--format=%(refname:short)%1f%(committerdate:unix)%1f%(subject)",
                    "refs/heads/agent/").decode(errors="replace")
@@ -272,10 +272,10 @@ class PlainFolder:
             os.rmdir(d)
             d = os.path.dirname(d)
 
-    def history(self, limit: int = 30) -> list[dict]:
+    def history(self, limit: int = 30) -> list[dict]:  # type: ignore[valid-type]  # a method named `list` shadows the builtin
         return []
 
-    def branches(self) -> list[dict]:
+    def branches(self) -> list[dict]:  # type: ignore[valid-type]  # a method named `list` shadows the builtin
         return []
 
 

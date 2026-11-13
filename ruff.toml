@@ -1,0 +1,23 @@
+# Lint configuration for bunch and clients/ (see .github/workflows/ci.yml).
+# Keep the rule set small: E (pycodestyle), F (pyflakes), W (warnings),
+# B (bugbear), UP (pyupgrade). Style-only rules that would churn existing code
+# are turned off below; each is noted with a reason.
+
+line-length = 160
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "B", "UP"]
+ignore = [
+    "E731",  # lambda-assignment: pervasive style choice, would churn
+    "E702",  # semicolon-separated statements in tests: style
+    "B017",  # pytest.raises(Exception): tests assert "it fails", not which error
+    "B023",  # closures over loop variables called immediately in the loop
+    "B904",  # raise-without-from: 22 sites, deliberate wrapping; revisit later
+    "B905",  # zip() without strict=: strict needs Python 3.10, clients target 3.9
+]
+
+[lint.per-file-ignores]
+# pytest fixtures imported from test_bunch and reused as test parameters
+# trigger F811 ("redefined while unused"); the import registers the fixture.
+"bunch/tests/*.py" = ["F811"]
