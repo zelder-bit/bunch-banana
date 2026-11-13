@@ -151,6 +151,7 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"],
                    "model": agent["model"]})  # viewer shows "thinking…"
     empty: list[str] = []
+    echoed = False
     context = [parts[0], recent or ""]
     others = st.agent_names() - {name}
 
@@ -161,6 +162,7 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     try:
         prompt = "\n\n".join(parts)
         text, echo = await ask(prompt)
+        echoed = echo
         if echo:  # it went on with the prompt: one more try, told what to do
             log.info("%s: echo for #%s, retrying", name, m["id"])
             text, echo = await ask(f"{prompt}\n\nAnswer only message #{m['id']}, in your own words, as {name}. "
@@ -173,7 +175,7 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
         if not m["human"]:
             _gave_up[(name, m["id"])] = m["created"]
             return  # don't answer another agent with noise; they can ask again
-        text = (f"({agent['model']} gave no usable answer; ask again or rephrase)" if echo else
+        text = (f"({agent['model']} gave no usable answer; ask again or rephrase)" if echoed else
                 f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)")
     if has_folder:
         text = await _save_files(hub, name, m["room"], text)

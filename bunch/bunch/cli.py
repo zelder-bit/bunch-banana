@@ -16,13 +16,32 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import getpass
 import os
 import sys
 import time
 
 from .config import load
+from .llm import LLM
 from .store import RESERVED_NAMES, Store
+
+
+def _gateway_models(s) -> tuple[set[str] | None, str]:
+    """The gateway's model names, or (None, why not). No gateway configured is (None, "")."""
+    if not s.litellm_url:
+        return None, ""
+    llm = LLM(s.litellm_url, s.litellm_key)
+
+    async def names() -> set[str]:
+        try:
+            return {m["name"] for m in await llm.model_info()}
+        finally:
+            await llm.aclose()
+    try:
+        return asyncio.run(names()), ""
+    except Exception as e:  # listing agents must work with the gateway down
+        return None, str(e) or type(e).__name__
 
 
 def main(argv=None) -> int:
@@ -84,11 +103,16 @@ def main(argv=None) -> int:
             print("ok")
         elif args.cmd == "list":
             print(f"{'name':<20} {'kind':<6} {'budget':>9} {'ask today':>10} {'ctx today':>10}  model")
+            models, unchecked = _gateway_models(s)
             for row in st.agents():
                 usage = st.usage_today(row["name"])
                 bud = row["daily_tokens"] if row["daily_tokens"] is not None else s.daily_tokens
+                gone = "  (no model: the gateway doesn't have it)" if (
+                    row["model"] and models is not None and row["model"] not in models) else ""
                 print(f"{row['name']:<20} {row['kind']:<6} {bud if row['kind'] == 'agent' else '-':>9} "
-                      f"{usage['ask']:>10} {usage['ctx']:>10}  {row['model'] or ''}")
+                      f"{usage['ask']:>10} {usage['ctx']:>10}  {row['model'] or ''}{gone}")
+            if unchecked:
+                print(f"(couldn't check which models the gateway has: {unchecked})")
         elif args.cmd == "rotate":
             print(f"new key: {st.rotate_key(args.name)}")
         elif args.cmd == "budget":
