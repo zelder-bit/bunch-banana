@@ -18,6 +18,10 @@ class LLMError(Exception):
     pass
 
 
+class LLMUnreachable(LLMError):
+    """The model or gateway couldn't be reached or timed out: says nothing about the request itself."""
+
+
 class LLM:
     def __init__(self, base_url: str, key: str, timeout: float = 180.0, think_max_tokens: int = 4_096,
                  model_probe: bool = True):
@@ -65,7 +69,7 @@ class LLM:
                 self._hosts_at = time.monotonic()
         host = self._hosts.get(model)
         if self.model_probe and host and not await self._reachable(host):
-            raise LLMError(f"{model} can't answer: its model server {host} isn't reachable from the hub "
+            raise LLMUnreachable(f"{model} can't answer: its model server {host} isn't reachable from the hub "
                            "(machine off, address changed, or a firewall)")
         payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
         if user:
@@ -115,7 +119,7 @@ class LLM:
             model = payload["model"]
             host = self._hosts.get(model)
             target = f"{model} on {host}" if host else model
-            raise LLMError(f"{target}: {_transport_error(e, self.timeout)}") from e
+            raise LLMUnreachable(f"{target}: {_transport_error(e, self.timeout)}") from e
         if r.status_code != 200:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
         data = _json(r)
@@ -137,7 +141,7 @@ class LLM:
         try:
             r = await self._http().get(f"{self.base_url}/v1/models", headers=self._headers(), timeout=30.0)
         except httpx.HTTPError as e:
-            raise LLMError(_transport_error(e, 30.0)) from e
+            raise LLMUnreachable(_transport_error(e, 30.0)) from e
         if r.status_code != 200:
             raise LLMError(f"gateway {r.status_code}: {_short_error(r)}")
         try:
@@ -152,7 +156,7 @@ class LLM:
         try:
             r = await self._http().request(method, f"{self.base_url}{path}", json=body, headers=self._headers(), timeout=timeout)
         except httpx.HTTPError as e:
-            raise LLMError(_transport_error(e, timeout)) from e
+            raise LLMUnreachable(_transport_error(e, timeout)) from e
         if r.status_code != 200:
             msg = _short_error(r)
             if NO_DB_RE.search(msg):
