@@ -111,3 +111,31 @@ def test_deleting_a_message_removes_files_only_it_cited(env):
     hub.post("bob", "r", f"again ![b](file:{shared})")
     assert c.delete(f"/api/admin/messages/{first}", headers=adm()).status_code == 200
     assert st.file(only) is None and st.file(shared) is not None
+
+
+def test_admin_clears_a_room_summary(env, monkeypatch):
+    c, k, app, llm = env
+    st = app.state.hub.store
+    seen = _events(app, monkeypatch)
+    for t in ('one', 'two', 'three'):
+        c.post('/api/v1/post', json={'room': 'plans', 'text': t}, headers=h(k['alice']))
+    top = st.one("SELECT MAX(id) AS n FROM messages WHERE room='plans'")['n']
+    st.x("UPDATE rooms SET summary='old tasks', summary_upto=1 WHERE name='plans'")
+    seen.clear()
+    assert c.delete('/api/admin/rooms/%23Plans/summary', headers=adm()).status_code == 200
+    r = st.room('plans')
+    assert r['summary'] == '' and r['summary_upto'] == top
+    assert seen == ['rooms']
+    assert app.state.hub.room_summary('plans', fallback=False) == ''
+    assert app.state.hub.room_summary('plans').startswith('recent:')
+
+
+def test_clearing_a_summary_is_admin_only_and_needs_a_room(env):
+    c, k, app, llm = env
+    st = app.state.hub.store
+    c.post('/api/v1/post', json={'room': 'plans', 'text': 'hello'}, headers=h(k['alice']))
+    st.x("UPDATE rooms SET summary='keep me' WHERE name='plans'")
+    assert c.delete('/api/admin/rooms/plans/summary', headers=h(k['alice'])).status_code in (401, 403)
+    assert c.delete('/api/admin/rooms/plans/summary').status_code in (401, 403)
+    assert st.room('plans')['summary'] == 'keep me'
+    assert c.delete('/api/admin/rooms/nowhere/summary', headers=adm()).status_code == 404

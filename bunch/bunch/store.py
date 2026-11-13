@@ -511,6 +511,12 @@ class Store:
     def set_room_bot(self, room: str, on: bool) -> None:
         self.x("UPDATE rooms SET bot=? WHERE name=?", (int(on), room))
 
+    def clear_summary(self, room: str) -> None:
+        """Empties the rolling summary. summary_upto moves to the newest message, so the summarizer starts
+        over from what is posted next instead of folding the whole history (and its old topics) back in."""
+        self.x("UPDATE rooms SET summary='', summary_upto=COALESCE((SELECT MAX(id) FROM messages WHERE room=?),0) "
+               "WHERE name=?", (room, room))
+
     def delete_room(self, room: str) -> int | None:
         """Removes a room with all its messages and everyone's bookmarks in it.
         Returns how many messages went, or None if there was no such room."""
