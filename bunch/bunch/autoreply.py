@@ -26,6 +26,14 @@ DEFAULT_SYSTEM = ("You are {name}, an AI agent in a shared chat room with other 
                   "write its name without @. Write only your own reply, as plain text: never write lines "
                   "for other speakers or in the 'sender>to re#id:' format of the list.")
 MAX_INPUT_CHARS = 12_000
+MAX_SAVES = 5  # files written from one reply
+SAVE_HELP = ("To save a file in the room's shared folder, put a line `save: <relative/path>` directly above a "
+             "fenced code block holding the whole file. You cannot run anything.")
+NO_FOLDER_HELP = ("You cannot upload, save or run anything here: put code in your reply, and never claim "
+                  "you saved, uploaded or ran something.")
+# "save: path" (maybe in backticks/bold) right above a fenced block (maybe with a language tag)
+SAVE_RE = re.compile(r"^[ \t]*[*_]*save[*_]*:[*_]*[ \t]*[`*_]*([^\s`*]+?)[`*_]*[ \t]*\n[ \t]*```[^\n]*\n(.*?)^[ \t]*```[ \t]*$",
+                     re.I | re.M | re.S)
 _room_locks: dict[tuple[int, str], asyncio.Lock] = {}  # (event loop, room): auto agents answer one at a time
 
 
@@ -59,6 +67,23 @@ def _own_reply(text: str, name: str) -> str:
     return "\n".join(lines).strip()
 
 
+async def _save_files(hub: Hub, name: str, room: str, text: str) -> str:
+    """Writes the `save: path` + code block pairs of a reply to the room folder; returns the reply with one
+    status line per file. A failed write is only reported: the reply is posted anyway."""
+    notes = []
+    for mt in list(SAVE_RE.finditer(text))[:MAX_SAVES]:
+        path = mt.group(1)
+        try:
+            await hub.files_write(name, room, path, mt.group(2).encode())
+            notes.append(f"(saved {path} to the room folder)")
+        except HubError as e:
+            notes.append(f"(could not save {path}: {e})")
+        except Exception as e:  # never lose the reply over a file
+            log.warning("%s: save %s failed: %s", name, path, e)
+            notes.append(f"(could not save {path}: {type(e).__name__})")
+    return text + "\n\n" + "\n".join(notes) if notes else text
+
+
 async def answer(hub: Hub, agent, m) -> None:
     name = agent["name"]
     body = text_of(m)
@@ -86,6 +111,8 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
     parts.append(f"Message #{m['id']} from {m['sender']}:\n{body[:MAX_INPUT_CHARS]}")
     system = agent["system"] or DEFAULT_SYSTEM.format(name=name)
     note = hub.room_note(m["room"])
+    has_folder = bool(st.folder(m["room"]))
+    system += "\n\n" + (SAVE_HELP if has_folder else NO_FOLDER_HELP)
     if note:  # bot mode: keep handing work on instead of waiting for the person
         system += "\n\n" + note
     hub.broadcast({"type": "typing", "agent": name, "room": m["room"]})  # viewer shows "thinking…"
@@ -103,6 +130,8 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
             _gave_up[(name, m["id"])] = m["created"]
             return  # don't answer another agent with noise; they can ask again
         text = f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)"
+    if has_folder:
+        text = await _save_files(hub, name, m["room"], text)
     hub.post(name, m["room"], text, reply_to=m["id"])
     st.x("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), name))
 
