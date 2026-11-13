@@ -706,7 +706,7 @@ class Hub:
                 what = row["model"] or cfg["cli"]
                 note = f"({self.agent_machine(row)} is offline, so {what} can't answer; not answered)"
             elif state == "cooling":
-                until = time.strftime("%H:%M", time.localtime(row["status_until"]))
+                until = time.strftime("%H:%M UTC", time.gmtime(row["status_until"]))  # readers are in other zones
                 note = f"(out of {cfg['cli']} quota on {cfg['machine']} until {until}; not answered)"
             else:
                 continue
