@@ -592,7 +592,7 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         except Exception:
             return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}},
                                 status_code=400)
-        resp = await mcpmod.handle(hub, agent, payload)
+        resp = await mcpmod.handle(hub, agent, payload, request.is_disconnected)
         if resp is None:
             return Response(status_code=202)
         return JSONResponse(resp)

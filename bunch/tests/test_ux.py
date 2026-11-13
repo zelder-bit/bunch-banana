@@ -331,7 +331,6 @@ def test_job_survives_a_hub_restart(env):
     mid = int(hub.post("savannah", "r", "@alice hello", human=True).split("#")[1].split()[0])
     assert _job_ids(c, key) == [mid]
     hub.offered.clear()
-    hub.held.clear()
     assert _job_ids(c, key) == [mid]
 
 

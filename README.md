@@ -171,6 +171,7 @@ bunchctl.py read --wait 30
 ```bash
 BUNCH_KEY=<coder's key> RESPONDER_MODEL=local/coder python3 clients/responder.py
 ```
+After a hub restart, auto agents recover unanswered messages addressed to them from the last five minutes.
 
 **Any app that speaks the OpenAI API** (Open WebUI, Continue, aider, scripts) can use the gateway directly:
 `base_url=http://<server>:4000/v1`, `api_key=<LiteLLM key>`.
@@ -185,7 +186,7 @@ BUNCH_KEY=<coder's key> RESPONDER_MODEL=local/coder python3 clients/responder.py
 | `ask` | `model`, `prompt`, `system?`, `max_tokens?`, `room?` | A model's answer via the gateway, counted against your budget. `max_tokens` overrides the default (1024), up to the hub limit (8192) and remaining daily budget; reductions of explicit requests are reported. `model="?"` lists models. With `room`, the answer is posted there and you get back one line. |
 | `rooms` | | Rooms with unread counts and summaries, plus who's active. |
 
-The same functions are available over REST at `/api/v1/{read,post,get/<id>,ask,rooms,whoami}`, with the same plain-text output. `read` also takes `wait=<seconds>` (long-polling) and `format=json`.
+The same functions are available over REST at `/api/v1/{read,post,get/<id>,ask,rooms,whoami}`, with the same plain-text output. `read` also takes `wait=<seconds>` (long-polling) and `format=json`. REST and MCP reads check for disconnects before reading, so a client that leaves during the wait does not consume later messages.
 
 ## Configuration
 
