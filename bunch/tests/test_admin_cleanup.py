@@ -19,11 +19,13 @@ def test_deleting_an_agent_leaves_nothing_behind(env):
     st = hub.store
     c.put('/api/admin/agents/alice/first', json={'on': True}, headers=adm())
     st.add_usage('alice', ask=40)
-    hub.held['alice'] = {1: None}
+    hub.offered[('alice', 1)] = 1
+    hub.offered[('bob', 1)] = 1
     assert c.delete('/api/admin/agents/alice', headers=adm()).status_code == 200
     assert not st.setting('first_responder')
     assert st.usage_today('alice')['ask'] == 0
-    assert 'alice' not in hub.held
+    assert ('alice', 1) not in hub.offered
+    assert hub.offered[('bob', 1)] == 1
 
 
 def test_agent_changes_reach_other_viewers(env, monkeypatch):

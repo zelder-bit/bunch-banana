@@ -119,7 +119,6 @@ class Hub:
         self._event = asyncio.Event()                # wakes long-polling readers
         self._hosts: dict[str, str] = {}            # gateway model -> host, from LiteLLM
         self._hosts_at = 0.0
-        self.held: dict[str, dict[int, None]] = {}  # unused since #63 (see unanswered); kept for callers
         self.routing: dict[int, tuple[str, float]] = {}  # message id -> (room, since): shown, recipients still being chosen
         self.offered: dict[tuple[str, int], int] = {}  # (worker agent, message id) -> times handed to its worker
 
@@ -140,7 +139,8 @@ class Hub:
         """Every open viewer reloads its agent list (names, budgets, first responder, people).
         gone: an agent that was just deleted, so nothing stays queued for it."""
         if gone:
-            self.held.pop(gone, None)
+            for key in [k for k in self.offered if k[0] == gone]:
+                del self.offered[key]
         self.broadcast({"type": "agents"})
 
     def _notify(self, mid: int) -> None:

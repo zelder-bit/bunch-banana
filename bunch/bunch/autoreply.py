@@ -122,7 +122,7 @@ def _note(hub: Hub, agent, m, why: str) -> None:
 
 def _state(hub: Hub) -> dict:
     """Per hub: the task answering for each agent, and the messages waiting for it."""
-    return hub.__dict__.setdefault("_autoreply", {"tasks": {}, "queue": {}})
+    return hub.__dict__.setdefault("_autoreply", {"tasks": {}, "queue": {}, "answering": {}})
 
 
 def read_new(hub: Hub, agent) -> list:
@@ -183,7 +183,11 @@ async def _drain(hub: Hub, name: str) -> None:
             if not agent or not agent["model"]:
                 state["queue"].pop(name, None)
                 return
-            await serve_message(hub, agent, m)
+            state["answering"][name] = m["id"]
+            try:
+                await serve_message(hub, agent, m)
+            finally:
+                state["answering"].pop(name, None)
     except asyncio.CancelledError:
         raise
     except Exception:  # serve_message handles its own; this is the last net so the task never dies silently
@@ -203,8 +207,17 @@ async def autoreply_once(hub: Hub, wait: bool = True) -> None:
     state = _state(hub)
     for a in hub.store.auto_agents():
         name = a["name"]
-        if rows := read_new(hub, a):
-            state["queue"].setdefault(name, []).extend(rows)  # kept even while its task is busy
+        rows = read_new(hub, a)
+        if hub.worker_state(a) != "offline":
+            # The cursor can outlive the queue after a restart. Recover only fresh work.
+            rows += [m for m in hub.unanswered(name) if m["created"] >= cutoff]
+        pending = {m["id"] for m in state["queue"].get(name, [])}
+        pending.add(state["answering"].get(name))
+        for m in rows:
+            if m["id"] in pending or m["id"] in hub.routing or (name, m["id"]) in _gave_up:
+                continue
+            state["queue"].setdefault(name, []).append(m)
+            pending.add(m["id"])
         if state["queue"].get(name) and name not in state["tasks"]:
             state["tasks"][name] = asyncio.create_task(_drain(hub, name))
     if wait and state["tasks"]:

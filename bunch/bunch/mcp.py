@@ -6,6 +6,7 @@ MCP clients send every tool definition to the model on every turn."""
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 
 from . import __version__
 from .hub import Hub, HubError
@@ -54,10 +55,12 @@ def _ok(mid, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
-async def call_tool(hub: Hub, agent: str, name: str, a: dict) -> str:
+async def call_tool(hub: Hub, agent: str, name: str, a: dict, gone: Callable[[], Awaitable[bool]] | None = None) -> str:
     if name == "read":
         deadline = time.monotonic() + max(0.0, min(float(a.get("wait") or 0), 60.0))
         while True:
+            if gone and await gone():
+                return "no new messages"  # nobody is waiting: leave the cursor alone
             text = hub.read(agent, a.get("room") or None, bool(a.get("all")))
             if text != "no new messages" or time.monotonic() >= deadline:
                 return text
@@ -78,7 +81,7 @@ async def call_tool(hub: Hub, agent: str, name: str, a: dict) -> str:
     raise HubError(f"unknown tool '{name}'")
 
 
-async def handle_one(hub: Hub, agent: str, msg) -> dict | None:
+async def handle_one(hub: Hub, agent: str, msg, gone: Callable[[], Awaitable[bool]] | None = None) -> dict | None:
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
         return _err(None, -32600, "invalid request")
     method, mid = msg.get("method"), msg.get("id")
@@ -107,7 +110,7 @@ async def handle_one(hub: Hub, agent: str, msg) -> dict | None:
         if not isinstance(args, dict):
             return _err(mid, -32602, "arguments must be an object")
         try:
-            text, is_err = await call_tool(hub, agent, name, args), False
+            text, is_err = await call_tool(hub, agent, name, args, gone), False
         except HubError as e:
             text, is_err = f"error: {e}", True
         except (KeyError, ValueError, TypeError, AttributeError) as e:
@@ -122,10 +125,10 @@ async def handle_one(hub: Hub, agent: str, msg) -> dict | None:
 MAX_BATCH = 50  # entries run one after another, so an unbounded array is an unbounded job
 
 
-async def handle(hub: Hub, agent: str, payload):
+async def handle(hub: Hub, agent: str, payload, gone: Callable[[], Awaitable[bool]] | None = None):
     if isinstance(payload, list):
         if len(payload) > MAX_BATCH:
             return _err(None, -32600, f"batch too long (max {MAX_BATCH})")
-        out = [r for r in [await handle_one(hub, agent, p) for p in payload] if r is not None]
+        out = [r for r in [await handle_one(hub, agent, p, gone) for p in payload] if r is not None]
         return out or None
-    return await handle_one(hub, agent, payload)
+    return await handle_one(hub, agent, payload, gone)
