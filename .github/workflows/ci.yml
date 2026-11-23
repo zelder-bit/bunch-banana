@@ -16,6 +16,7 @@ jobs:
         with:
           python-version: "3.15"
       - run: pip install -r requirements-dev.txt
+      - run: python -m playwright install --with-deps chromium
       - run: pytest -q --cov=bunch --cov-report=term
       - run: pip install pip-audit && pip-audit -r requirements.txt
 
