@@ -125,7 +125,8 @@ def test_unread_survives_reload_and_reconnect(hub, page):
     page.evaluate("window.__hold = false")
     badge(3)  # a room that isn't open catches up too, not only the open one
 
-    page.click('#rooms [data-room="other"]')
+    with page.expect_response(lambda r: r.url.endswith("/api/admin/rooms/other/read") and r.ok):
+        page.click('#rooms [data-room="other"]')
     page.wait_for_selector("#feed .msg >> text=posted while offline")
     page.click('#rooms [data-room="live"]')
     page.wait_for_selector("#feed .msg >> text=first")

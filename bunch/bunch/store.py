@@ -699,8 +699,10 @@ class Store:
     def read_counts(self, person: str) -> dict[str, tuple[int, int]]:
         """room -> (unread, addressed to person) past what the viewer has shown them: their cursor's last_id,
         or before their first report, their first_id (people start with nothing unread)."""
+        # Driven from rooms so each room reads only its unread range of the messages(room,id) index.
         return {r["room"]: (r["unread"], r["mention"]) for r in self.q(
-            "SELECT m.room, COUNT(*) AS unread, COUNT(CASE WHEN instr(m.recipients,?)>0 THEN 1 END) AS mention "
-            "FROM messages m LEFT JOIN cursors c ON c.agent=? AND c.room=m.room "
-            "WHERE m.sender!=? AND m.id>max(COALESCE(c.last_id,0), ?) GROUP BY m.room",
-            (f",{person},", person, person, self.agent_first_id(person)))}
+            "SELECT r.name AS room, COUNT(*) AS unread, COUNT(CASE WHEN instr(m.recipients,?)>0 THEN 1 END) AS mention "
+            "FROM rooms r LEFT JOIN cursors c ON c.agent=? AND c.room=r.name "
+            "JOIN messages m ON m.room=r.name AND m.id>max(COALESCE(c.last_id,0), ?) "
+            "WHERE m.sender!=? GROUP BY r.name",
+            (f",{person},", person, self.agent_first_id(person), person))}

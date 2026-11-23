@@ -317,6 +317,7 @@
     clearTimeout(wsTimer);   // a reconnect may already be queued
     if (ws) { ws.onclose = null; ws.onmessage = null; try { ws.close(); } catch {} ws = null; }
     loadRooms.cancel(); loadAgents.cancel(); bodyCache.clear();
+    for (const k of Object.keys(readSent)) delete readSent[k];   // the next person on this tab reports their own reads
     timers.forEach(clearInterval); timers = []; started = false;
     $("app").hidden = true; $("login").hidden = false;
     $("err").textContent = msg || ""; $("err").hidden = !msg;
@@ -1338,7 +1339,8 @@
     const room = current, id = lastShownId();
     if (!room || document.hidden || id <= (readSent[room] || 0)) return;
     readSent[room] = id;
-    api(`/api/admin/rooms/${enc(room)}/read`, { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
+    api(`/api/admin/rooms/${enc(room)}/read`, { method: "POST", body: JSON.stringify({ id }) })
+      .catch(() => { if (readSent[room] === id) delete readSent[room]; });   // a later call retries
   }
   function countNew(m) {   // a live message in a room that isn't open
     if (m.room === current || m.sender === me.name) return;
