@@ -285,6 +285,28 @@ class Hub:
                                      None, m["id"], False)
         self._notify(mid)
 
+    def _drop_note(self, agent: str, m, why: str) -> None:
+        """A "not answered" note for a job a worker or jobs reader stopped being offered, unless it was ruled
+        out anyway. Not for auto agents: jobs() hands them their queue every pass, and autoreply notes its own drops."""
+        try:
+            row = self.store.agent(agent)
+            if not (row and row["model"]) and not self.ruled_out(m, agent):
+                self._not_answered(agent, m, f"({why}; not answered)")
+        except Exception:
+            pass  # the note is a courtesy; a failed note must not break the jobs read
+
+    def _expired_offers(self, agent: str) -> None:
+        """Jobs handed to agent that are now too old to be offered again (REDELIVER_WINDOW) get a note."""
+        ids = [k[1] for k, n in self.offered.items() if k[0] == agent and n <= MAX_OFFERS]
+        row = self.store.agent(agent) if ids else None
+        if not ids or (row and self.worker_state(row) == "busy"):
+            return  # a busy worker may still be on it: look again on a later call
+        old = self.store.q(f"SELECT * FROM messages WHERE id IN ({','.join('?' * len(ids))}) AND created<=?",
+                           (*ids, time.time() - REDELIVER_WINDOW))
+        for m in old:
+            self.offered[(agent, m["id"])] = MAX_OFFERS + 1  # looked at once
+            self._drop_note(agent, m, f"{agent} did not answer within {REDELIVER_WINDOW // 60} minutes")
+
     def rejected_reply(self, agent: str, room: str, reply_to: int | None, why: str) -> None:
         try:
             if reply_to is None:
@@ -513,17 +535,21 @@ class Hub:
             rows = self.read_rows(agent)[1]
         room = room.strip().lower().lstrip("#") if room else None
         new = {r["id"] for r in rows}
+        self._expired_offers(agent)
         again = [r for r in self.unanswered(agent)
                  if r["id"] not in new and r["created"] >= since and (room is None or r["room"] == room)]
         out = []
         for r in again + rows:
             key = (agent, r["id"])
             if self.offered.get(key, 0) >= MAX_OFFERS:
+                if self.offered[key] == MAX_OFFERS:  # this would be the third offer: say so, once
+                    self.offered[key] = MAX_OFFERS + 1
+                    self._drop_note(agent, r, f"{agent} was handed this {MAX_OFFERS} times without answering")
                 continue  # offered twice with no reply: stop, or a job that kills its answerer would loop
             if f",{agent}," not in (r["recipients"] or ""):
                 continue  # room chatter: only what's addressed to the agent is a job
             if self.ruled_out(r, agent):
-                self.offered[key] = MAX_OFFERS  # decided once: don't look at it again
+                self.offered[key] = MAX_OFFERS + 1  # decided once: don't look at it again, nor note it
                 continue
             if self.turn_blocker(r, agent):
                 continue  # not counted: it stays unanswered, so unanswered() brings it back
@@ -608,15 +634,15 @@ class Hub:
         return self._baton(text_of(m) or "", m["sender"])
 
     def _baton(self, text: str, sender: str) -> str | None:
+        return next((n for n in self._asked(text, sender) if self.store.agent(n)), None)
+
+    def _asked(self, text: str, sender: str) -> list[str]:
+        """Every name a message asks or opens a line with, in order, whether or not it is an agent."""
         text = text.lower()
         groups = sorted([(g.start(1), g.group(1)) for g in ADDRESS_RE.finditer(text)] +
                         [(g.start(1), g.group(1)) for g in LINE_AT_RE.finditer(text)])
-        for _, group in groups:
-            for n in MENTION_RE.findall(group):
-                n = n.rstrip(".")
-                if n != sender and n != HUB_SENDER and self.store.agent(n):
-                    return n
-        return None
+        names = [n.rstrip(".") for _, group in groups for n in MENTION_RE.findall(group)]
+        return [n for n in names if n != sender and n != HUB_SENDER]
 
     def routed(self, m) -> bool:
         """A new bot-mode message from an agent that names no agent: the router picked who it asks."""
@@ -663,7 +689,17 @@ class Hub:
             self.store.set_room_bot(m["room"], False)
             self.broadcast({"type": "rooms"})
             return
-        why = self.stall(m) if self.baton(m) and not self.voided(m) else None
+        baton = self.baton(m)
+        routed = self.routed(m) and _recips(m)  # the router picked someone for it: not dropped
+        asked = [] if baton or routed or self.voided(m) else self._asked(text_of(m) or "", m["sender"])
+        if asked:  # a handoff to a name that isn't an agent: nobody is woken, so the run pauses
+            try:
+                self._not_answered(HUB_SENDER, m, f"(bot mode: there is no agent named {asked[0]}, "
+                                                  "so nobody was asked; not answered)")
+            except Exception:
+                pass  # the note is a courtesy
+            return
+        why = self.stall(m) if baton and not self.voided(m) else None
         if why:
             try:
                 self.post(HUB_SENDER, m["room"], f"(bot mode: {why}, so nobody was asked; "
