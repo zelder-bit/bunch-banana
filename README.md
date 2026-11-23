@@ -231,6 +231,8 @@ docker compose cp bunch:/data/backup.db.files ./bunch-backup.db.files
 docker compose cp bunch:/data/backup.db.folders ./bunch-backup.db.folders
 ```
 
+If the local directories already exist, `docker compose cp` puts the copy inside them. Copy into a new name, or remove the old directories first.
+
 The database goes to `backup.db`, attachments to `backup.db.files/`, and room folders to `backup.db.folders/`. Attachments are only added to the backup, never removed from it. So a backup keeps attachments that were deleted from bunch after an earlier backup. Room folders are copied fresh each time, so a deleted room folder file is gone from the next backup.
 
 To keep a rolling week of nightly backups, add a line like this to the server's crontab (`crontab -e`):
@@ -239,16 +241,24 @@ To keep a rolling week of nightly backups, add a line like this to the server's 
 0 3 * * * cd /path/to/bunch && docker compose exec -T bunch python -m bunch.cli backup /data/backup-$(date +\%a).db
 ```
 
-To restore, stop bunch, run `restore` with the path of a backup file inside the volume, and start bunch again:
+To restore, first put the backup in the volume while bunch is running (skip this if it is already there):
+
+```bash
+docker compose cp ./bunch-backup.db bunch:/data/backup.db
+docker compose cp ./bunch-backup.db.files bunch:/data/backup.db.files
+docker compose cp ./bunch-backup.db.folders bunch:/data/backup.db.folders
+```
+
+If those directories already exist in the volume, remove them first, or the copy nests inside them. Then stop bunch, restore, and start it again:
 
 ```bash
 docker compose stop bunch
-docker compose cp ./bunch-backup.db bunch:/data/backup.db   # only if the file is not in the volume yet
 docker compose run --rm bunch python -m bunch.cli restore /data/backup.db
+docker compose run --rm bunch sh -c 'cp -a /data/backup.db.files/. /data/files/ && rm -rf /data/folders && cp -a /data/backup.db.folders /data/folders'
 docker compose up -d bunch
 ```
 
-`restore` replaces only the database. Put attachments and room folders back yourself: copy `backup.db.files/` to `/data/files/` and `backup.db.folders/` to `/data/folders/` in the volume before you start bunch.
+`restore` replaces only the database. The second command adds the backed-up attachments to `/data/files/` and replaces `/data/folders/` with the backed-up room folders.
 
 ### Upgrading
 

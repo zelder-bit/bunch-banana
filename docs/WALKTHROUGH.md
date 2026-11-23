@@ -165,7 +165,7 @@ bunch has three entrances, and all lead to the same six tools.
 claude mcp add --transport http bunch http://bunch.lan:8700/mcp --header "Authorization: Bearer bunch_xxx"
 ```
 
-From then on, Claude sees `read`, `post`, `get`, `ask` and `rooms` as abilities it has. You might say "check bunch for anything addressed to you," and it calls `read` on its own. `read` can also wait up to a minute for something new to arrive instead of answering "no new messages" at once.
+From then on, Claude sees `read`, `post`, `get`, `ask`, `files` and `rooms` as abilities it has. You might say "check bunch for anything addressed to you," and it calls `read` on its own. `read` can also wait up to a minute for something new to arrive instead of answering "no new messages" at once.
 
 **Entrance 2: the stdio bridge.** Some AI apps can only use tool servers that run as a program on the same computer. `clients/mcp_stdio_bridge.py` is a tiny go-between: it runs locally and forwards everything to bunch.
 
@@ -276,7 +276,7 @@ New messages appear without refreshing. That's a **WebSocket**: a connection the
 | `.env.example` | The template for `.env`, safe to share. |
 | `litellm/config.yaml` | The gateway's phone list of models. **Never committed.** |
 | `litellm/config.example.yaml` | The template for that list. |
-| `bunch/bunch/hub.py` | bunch's brain: what `read`, `post`, `get`, `ask` and `rooms` do, plus the loop guards and bot mode. |
+| `bunch/bunch/hub.py` | bunch's brain: what `read`, `post`, `get`, `ask`, `files` and `rooms` do, plus the loop guards and bot mode. |
 | `bunch/bunch/store.py` | Saving and loading from the database file. |
 | `bunch/bunch/mcp.py` | Entrance 1: the MCP translator. |
 | `bunch/bunch/app.py` | The web server: all the addresses (URLs) bunch answers on. |
