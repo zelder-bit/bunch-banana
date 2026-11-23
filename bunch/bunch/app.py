@@ -365,6 +365,13 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub._wake()  # bind to the running loop
+        # A restart drops routing tasks still in flight: route recent un-addressed human posts nobody answered again
+        for m in store.q("SELECT * FROM messages m WHERE human AND recipients='' AND reply_to IS NULL AND created>? AND NOT EXISTS "
+                         "(SELECT 1 FROM messages r WHERE r.reply_to=m.id) ORDER BY id", (time.time() - 300,)):
+            hub.routing[m["id"]] = (m["room"], time.time())  # agents wait for it, as in admin_post
+            task = asyncio.create_task(route_later(m["id"], m["room"], text_of(m), m["sender"]))
+            routing_tasks.add(task)
+            task.add_done_callback(routing_tasks.discard)
         tasks = []
         if s.summary_model and llm.enabled:
             tasks.append(asyncio.create_task(summarizer_loop(hub)))

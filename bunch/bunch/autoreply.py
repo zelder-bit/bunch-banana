@@ -44,7 +44,7 @@ def forget_room(room: str) -> None:
 _gave_up: dict[tuple[str, int], float] = {}  # agent messages a model returned nothing for: don't retry every pass
 STALE_AFTER = 300  # ignore messages older than this (e.g. backlog when an agent first becomes auto)
 # Small models copy the notes they see in the room, e.g. "(empty answer)" or "(agy failed: ...)": that's no answer.
-FILLER_RE = re.compile(r"^\((?:empty answer(?::[^\n]*)?|[\w.:/-]+ (?:failed|returned nothing|didn't answer)\b[^\n]*)\)$", re.I)
+FILLER_RE = re.compile(r"^\((?:empty answer(?::[^\n]*)?|[\w.:/-]+ (?:failed|returned nothing|gave no usable answer|didn't answer)\b[^\n]*)\)$", re.I)
 # ...and the "Recent messages" lines: "#12 alice>bob re#11: text". A model that goes on in that format
 # writes a whole made-up conversation, speaking for other agents and the human.
 SPEAKER_RE = re.compile(r"^\s*(?:#\d+\s+)?@?([\w.-]+)(?:>[\w.,@-]+(?:\s+re#\d+)?|\s+re#\d+):\s*")
@@ -165,12 +165,18 @@ async def _answer(hub: Hub, agent, m, body: str) -> None:
                                    "Do not summarize the room, do not write for other people, do not address yourself.")
     finally:
         hub.broadcast({"type": "typing", "agent": name, "room": m["room"], "done": True})
-    if FILLER_RE.match(text) or echo:
+    blanked = bool(text) and bool(FILLER_RE.match(text) or echo)
+    if blanked:
         text = ""
     if not text:
-        if not m["human"]:
-            _gave_up[(name, m["id"])] = m["created"]
-            return  # don't answer another agent with noise; they can ask again
+        if not m["human"]:  # don't answer another agent with noise, just one note; they can ask again
+            _gave_up[(name, m["id"])] = m["created"]  # kept in case the note fails
+            what = "gave no usable answer" if blanked or echoed else "returned nothing"
+            try:
+                hub._not_answered(name, m, f"({agent['model']} {what}; not answered)")
+            except Exception as e:
+                log.warning("%s: no note for #%s: %s", name, m["id"], e)
+            return
         text = (f"({agent['model']} gave no usable answer; ask again or rephrase)" if echoed else
                 f"(empty answer: {empty[0]})" if empty else f"({agent['model']} returned nothing; try again or rephrase)")
     if has_folder:
