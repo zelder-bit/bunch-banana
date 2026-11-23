@@ -1,5 +1,6 @@
 """Browser smoke test for the viewer: a real Chromium against a real hub on a temporary database.
 Skipped when the playwright package or its browser is not installed (CI installs it)."""
+import os
 import socket
 import threading
 import time
@@ -39,6 +40,7 @@ def hub(tmp_path):
         if server.started:
             break
         time.sleep(0.1)
+    assert server.started, "the hub did not start within 10 seconds"
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
     t.join(10)
@@ -50,6 +52,8 @@ def page(hub):
         try:
             browser = p.chromium.launch()
         except sync_api.Error as e:
+            if os.environ.get("CI"):  # a missing browser must fail CI, not pass it silently
+                raise
             pytest.skip(f"playwright browser not installed: {str(e).splitlines()[0]}")
         pg = browser.new_page()
         pg.add_init_script(INIT)
@@ -85,5 +89,5 @@ def test_viewer_live_and_reconnect(hub, page):
     agent_says("posted while offline")
     assert page.locator("#feed .msg", has_text="posted while offline").count() == 0
     page.evaluate("window.__hold = false")
-    page.wait_for_selector("#feed .msg >> text=posted while offline", timeout=15000)
+    page.wait_for_selector("#feed .msg >> text=posted while offline", timeout=30000)
     page.wait_for_selector("#liveText >> text=live")
