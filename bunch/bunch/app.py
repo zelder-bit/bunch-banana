@@ -47,6 +47,10 @@ class BotIn(BaseModel):
     on: bool
 
 
+class ReadIn(BaseModel):
+    id: int
+
+
 class PostIn(BaseModel):
     room: str
     text: str
@@ -816,14 +820,27 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     # agent keys, budgets and users are admin-only.
     @app.get("/api/admin/rooms")
     async def admin_rooms(request: Request, authorization: str | None = Header(None)):
-        viewer(request, authorization)
+        name, _ = viewer(request, authorization)
         out = []
         kinds = {f["room"]: f["kind"] for f in store.q("SELECT room, kind FROM folders")}
+        counts = store.read_counts(name)
         for r in hub.room_overview():
+            unread, mention = counts.get(r["name"], (0, 0))
             out.append({"name": r["name"], "summary": r["summary"],
                         "count": r["count"], "last_id": r["last_id"], "paused": r["paused"],
-                        "bot": bool(r["bot"]), "folder": kinds.get(r["name"])})
+                        "bot": bool(r["bot"]), "folder": kinds.get(r["name"]),
+                        "unread": unread, "mention": mention})
         return out
+
+    @app.post("/api/admin/rooms/{room}/read")
+    async def admin_read(request: Request, room: str, body: ReadIn, authorization: str | None = Header(None)):
+        """The viewer has shown this person the room up to `id`. The position only moves forward."""
+        name, _ = viewer(request, authorization)
+        room = room.strip().lower().lstrip("#")
+        if not store.room(room):
+            raise HTTPException(404, "no such room")
+        store.set_cursor(name, room, min(body.id, store.room_max_id(room)))
+        return {"room": room, "read": store.cursor(name, room)}
 
     @app.get("/api/admin/rooms/{room}/messages")
     async def admin_messages(request: Request, room: str, before: int | None = None, after: int | None = None,

@@ -186,6 +186,9 @@ MIGRATIONS = [
     _search_index,  # 2: searchable history, including messages already stored
     _cursor_all,  # 3: second read position, for `read all`
     lambda db: db.execute("ALTER TABLE agents ADD COLUMN first_id INTEGER NOT NULL DEFAULT 0"),  # 4: see create_agent
+    # 5: people's unread counts start here (read_counts), not with the whole history. People never take the
+    # agent read paths, where first_id also means "addressed before this name existed".
+    lambda db: db.execute("UPDATE agents SET first_id=(SELECT COALESCE(MAX(id),0) FROM messages) WHERE kind!='agent'"),
 ]
 
 
@@ -692,3 +695,14 @@ class Store:
 
     def joined_rooms(self, agent: str) -> dict[str, int]:
         return {r["room"]: r["last_id"] for r in self.q("SELECT room,last_id FROM cursors WHERE agent=?", (agent,))}
+
+    def read_counts(self, person: str) -> dict[str, tuple[int, int]]:
+        """room -> (unread, addressed to person) past what the viewer has shown them: their cursor's last_id,
+        or before their first report, their first_id (people start with nothing unread)."""
+        # Driven from rooms so each room reads only its unread range of the messages(room,id) index.
+        return {r["room"]: (r["unread"], r["mention"]) for r in self.q(
+            "SELECT r.name AS room, COUNT(*) AS unread, COUNT(CASE WHEN instr(m.recipients,?)>0 THEN 1 END) AS mention "
+            "FROM rooms r LEFT JOIN cursors c ON c.agent=? AND c.room=r.name "
+            "JOIN messages m ON m.room=r.name AND m.id>max(COALESCE(c.last_id,0), ?) "
+            "WHERE m.sender!=? GROUP BY r.name",
+            (f",{person},", person, self.agent_first_id(person), person))}
