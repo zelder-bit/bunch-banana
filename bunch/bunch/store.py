@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS usage(
 """
 
 # Columns added after the first release; ALTERed into older databases on startup.
+# Frozen: new columns go in MIGRATIONS only (an ALTER step), never in these dicts.
 AGENT_COLUMNS = {
     "description": "TEXT NOT NULL DEFAULT ''",
     "model": "TEXT",
@@ -173,10 +174,18 @@ def _search_index(db):
     db.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
 
 
+def _cursor_all(db):
+    # all_id: how far `read all` has looked in a room. Existing agents start where they are now.
+    db.execute("ALTER TABLE cursors ADD COLUMN all_id INTEGER NOT NULL DEFAULT 0")
+    db.execute("UPDATE cursors SET all_id=last_id")
+
+
 # Ordered, run-once changes to an existing database (see Store.__init__). Append; never reorder or remove.
 MIGRATIONS = [
     lambda db: None,  # 1: the schema as it was when versions were introduced
     _search_index,  # 2: searchable history, including messages already stored
+    _cursor_all,  # 3: second read position, for `read all`
+    lambda db: db.execute("ALTER TABLE agents ADD COLUMN first_id INTEGER NOT NULL DEFAULT 0"),  # 4: see create_agent
 ]
 
 
@@ -197,6 +206,12 @@ class Store:
         with self.lock:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA busy_timeout=5000")
+            self.db.execute("PRAGMA synchronous=NORMAL")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] > len(MIGRATIONS):
+                v = self.db.execute("PRAGMA user_version").fetchone()[0]
+                self.db.close()
+                raise RuntimeError(f"{path} has schema version {v}, newer than this code knows "
+                                   f"({len(MIGRATIONS)}); upgrade bunch instead of opening it")
             self.db.executescript(SCHEMA)
             have = {r["name"] for r in self.db.execute("PRAGMA table_info(agents)")}
             for col, decl in AGENT_COLUMNS.items():
@@ -287,8 +302,8 @@ class Store:
         self._check_new_name(name)
         key = "bunch_" + secrets.token_urlsafe(24)
         self.x(
-            "INSERT INTO agents(name,key_hash,kind,daily_tokens,created,description,model,system) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO agents(name,key_hash,kind,daily_tokens,created,description,model,system,first_id) "
+            "VALUES(?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(id),0) FROM messages))",
             (name, hash_key(key), "agent", daily_tokens, time.time(), description or "",
              model or None, system or None),
         )
@@ -318,7 +333,8 @@ class Store:
         self._check_new_name(name)
         if len(password or "") < 8:
             raise ValueError("password must be at least 8 characters")
-        self.x("INSERT INTO agents(name,key_hash,kind,created,pw_hash,is_admin) VALUES(?,NULL,'human',?,?,?)",
+        self.x("INSERT INTO agents(name,key_hash,kind,created,pw_hash,is_admin,first_id) "
+               "VALUES(?,NULL,'human',?,?,?,(SELECT COALESCE(MAX(id),0) FROM messages))",
                (name, time.time(), _ph.hash(password), int(admin)))
 
     def set_password(self, name: str, password: str) -> None:
@@ -385,7 +401,8 @@ class Store:
         if row and row["kind"] != "human":  # else the admin token would post as that agent, marked human
             raise ValueError(f"'{name}' is already an agent")
         self.x(
-            "INSERT OR IGNORE INTO agents(name,key_hash,kind,created) VALUES(?,NULL,'human',?)",
+            "INSERT OR IGNORE INTO agents(name,key_hash,kind,created,first_id) "
+            "VALUES(?,NULL,'human',?,(SELECT COALESCE(MAX(id),0) FROM messages))",
             (name, time.time()),
         )
 
@@ -654,12 +671,24 @@ class Store:
         row = self.one("SELECT last_id FROM cursors WHERE agent=? AND room=?", (agent, room))
         return row["last_id"] if row else None
 
-    def set_cursor(self, agent: str, room: str, last_id: int) -> None:
+    def agent_first_id(self, agent: str) -> int:
+        """Messages up to this id were sent before the agent existed (a reused name must not inherit them)."""
+        row = self.one("SELECT first_id FROM agents WHERE name=?", (agent,))
+        return row["first_id"] if row else 0
+
+    def set_cursor(self, agent: str, room: str, last_id: int, all_id: int | None = None) -> None:
+        """last_id: what a default read has passed. all_id: what `read all` has passed (a new cursor
+        starts both at the same place)."""
         self.x(
-            "INSERT INTO cursors(agent,room,last_id) VALUES(?,?,?) "
-            "ON CONFLICT(agent,room) DO UPDATE SET last_id=MAX(last_id, excluded.last_id)",
-            (agent, room, last_id),
+            "INSERT INTO cursors(agent,room,last_id,all_id) VALUES(?,?,?,COALESCE(?,?)) "
+            "ON CONFLICT(agent,room) DO UPDATE SET last_id=MAX(last_id, excluded.last_id), "
+            "all_id=MAX(all_id, COALESCE(?,all_id))",
+            (agent, room, last_id, all_id, last_id, all_id),
         )
+
+    def all_cursor(self, agent: str, room: str) -> int:
+        row = self.one("SELECT all_id FROM cursors WHERE agent=? AND room=?", (agent, room))
+        return row["all_id"] if row else 0
 
     def joined_rooms(self, agent: str) -> dict[str, int]:
         return {r["room"]: r["last_id"] for r in self.q("SELECT room,last_id FROM cursors WHERE agent=?", (agent,))}
