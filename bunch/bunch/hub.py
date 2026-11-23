@@ -39,6 +39,7 @@ DONE_RE = re.compile(r"^\s*\[done\]\s*$", re.I | re.M)
 ECHO_SIMILARITY = 0.6  # word-trigram overlap with a recent message that counts as a repeat
 ECHO_LOOKBACK = 8
 PING_PONG = 6  # this many agent messages in a row from just two agents is a back-and-forth
+BOT_PAUSED = "(bot mode is paused: a person posted; address an agent to resume the run)"
 BOT_NOTE = ("Bot mode is on in this room: you and the other agents work on the person's goal without "
             "waiting for them. Add something new each turn; don't restate what's in the recent messages. "
             "End with exactly one handoff that starts a line, like '@name, can you <next step>', or, when "
@@ -234,6 +235,7 @@ class Hub:
         self.store.ensure_room(room)
         if self.store.cursor(sender, room) is None:          # posting joins you, skipping old backlog
             self.store.set_cursor(sender, room, self.store.room_max_id(room))
+        live = human and not known & set(recips) and self.bot(room) and self.run_live(room)  # before this post voids it
         mid = self.store.add_message(room, sender, human, recips, summ, body, reply_to, auto)
         if routing and not recips:
             self.routing[mid] = (room, time.time())  # before anyone is woken
@@ -242,6 +244,11 @@ class Hub:
             self._unavailable_notices(mid)
         if not human and sender != HUB_SENDER and self.bot(room):
             self._bot_turn(mid)
+        if live:
+            try:
+                self.post(HUB_SENDER, room, BOT_PAUSED, reply_to=mid)
+            except HubError:
+                pass  # rate limit: the note is a courtesy
         hint = "" if human or sender == HUB_SENDER else self._unasked_hint(sender, room, text, mid, to)
         return f"ok #{mid}" + hint
 
@@ -578,13 +585,26 @@ class Hub:
             self.store.set_room_bot(m["room"], False)
             self.broadcast({"type": "rooms"})
             return
-        why = self.stall(m) if self.baton(m) else None
+        why = self.stall(m) if self.baton(m) and not self.voided(m) else None
         if why:
             try:
                 self.post(HUB_SENDER, m["room"], f"(bot mode: {why}, so nobody was asked; "
                                                  "say what's next or post [done])", reply_to=mid)
             except HubError:
                 pass  # rate limit: the note is a courtesy
+
+    def voided(self, m) -> bool:
+        """Bot mode pause: a person posted after m, or after the agent handoff m answers, so m hands to nobody."""
+        p = self.store.message(m["reply_to"]) if m["reply_to"] else None
+        since = p["id"] if p and not p["human"] else m["id"]
+        return bool(self.store.one("SELECT 1 FROM messages WHERE room=? AND id>? AND human LIMIT 1", (m["room"], since)))
+
+    def run_live(self, room: str) -> bool:
+        """Bot mode: the newest agent message since the room's latest human post holds the baton."""
+        last = self.store.one("SELECT MAX(id) AS id FROM messages WHERE room=? AND human", (room,))
+        x = self.store.one("SELECT * FROM messages WHERE room=? AND id>? AND NOT human AND sender!=? "
+                           "ORDER BY id DESC LIMIT 1", (room, last["id"] or 0, HUB_SENDER))
+        return bool(x and self.baton(x) and not self.stall(x) and not self.voided(x))
 
     def wakes(self, m, agent: str) -> bool:
         """Whether agent-written message m should get an answer from agent. In bot mode: agent holds
@@ -594,7 +614,7 @@ class Hub:
         human (it answers the human, not a second time via another agent)."""
         if self.bot(m["room"]):
             asked = self.baton(m) == agent or (self.routed(m) and agent in _recips(m))
-            return asked and not self.stall(m)
+            return asked and not self.stall(m) and not self.voided(m)
         if not addresses(text_of(m), agent) or self.agent_hops(m) >= MAX_AGENT_HOPS:
             return False
         root = m

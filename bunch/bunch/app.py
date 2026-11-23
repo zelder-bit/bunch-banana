@@ -851,8 +851,14 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         to = body.to
         known = store.agent_names()
         named = [n.rstrip(".") for n in MENTION_RE.findall((body.text or "").lower())]
-        addressed = to or body.re is not None or any(n in known for n in named)
-        pick = not addressed and bool((body.text or "").strip())
+        r = room.strip().lower().lstrip("#")
+        bot = hub.bot(r)
+        parent = store.message(body.re) if bot and body.re is not None else None
+        # bot mode: a reply addresses only an agent; an un-addressed post during a live run pauses it (hub.post
+        # leaves a note) instead of being routed
+        replied = body.re is not None and (not bot or bool(parent and parent["sender"] in known))
+        addressed = to or replied or any(n in known for n in named)
+        pick = not addressed and bool((body.text or "").strip()) and not (bot and hub.run_live(r))
         # Nobody named: show the message now and choose who answers in the background (#76). Waiting for the
         # router model first kept it off everyone's screen for seconds, and lost it if the hub went down.
         newest = store.one("SELECT MAX(id) AS id FROM messages")["id"] or 0
@@ -873,8 +879,12 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
 
     @app.put("/api/admin/rooms/{room}/bot")
     async def admin_room_bot(request: Request, room: str, body: BotIn, authorization: str | None = Header(None)):
-        """Bot mode: agents in this room hand work to each other without a person, until one posts [done]."""
-        require_admin(request, authorization)
+        """Bot mode: agents in this room hand work to each other without a person, until one posts [done].
+        Switching it on is for admins; any signed-in person can switch it off."""
+        if body.on:
+            require_admin(request, authorization)
+        else:
+            viewer(request, authorization)
         room = room.strip().lower().lstrip("#")
         if not store.room(room):
             raise HTTPException(404, "no such room")
