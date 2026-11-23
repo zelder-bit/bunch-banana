@@ -64,3 +64,14 @@ def test_newer_database_refused(tmp_path):
     c.close()
     with pytest.raises(RuntimeError, match="newer than this code"):
         Store(p)
+
+
+def test_reused_name_is_not_offered_old_jobs(tmp_path):
+    st, hub = mk(tmp_path)
+    st.ensure_room("r")
+    st.create_agent("old")
+    hub.post("sam", "r", "@old do this", human=True)
+    assert len(hub.jobs("old")) == 1
+    st.delete_agent("old")
+    st.create_agent("old")
+    assert hub.jobs("old") == []

@@ -516,8 +516,8 @@ class Hub:
             self.offered.clear()
         return self.store.q(
             "SELECT m.* FROM messages m WHERE m.created>? AND m.sender!=? AND instr(m.recipients, ?) > 0 "
-            "AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to=m.id AND r.sender=?) ORDER BY m.id",
-            (time.time() - REDELIVER_WINDOW, agent, f",{agent},", agent))
+            "AND m.id>? AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to=m.id AND r.sender=?) ORDER BY m.id",
+            (time.time() - REDELIVER_WINDOW, agent, f",{agent},", self.store.agent_first_id(agent), agent))
 
     def answered(self, mid: int, agent: str) -> bool:
         """agent has replied to message mid (an answer or a "not answered" note)."""
