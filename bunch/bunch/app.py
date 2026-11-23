@@ -618,14 +618,16 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @app.post("/mcp")
     async def mcp_post(request: Request, authorization: str | None = Header(None)):
         agent = agent_of(authorization)
-        ver = request.headers.get("mcp-protocol-version")
-        if ver is not None and ver not in mcpmod.PROTOCOLS:
-            raise HTTPException(400, f"unsupported MCP-Protocol-Version '{ver}'")
         try:
             payload = await request.json()
         except Exception:
             return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}},
                                 status_code=400)
+        ver = request.headers.get("mcp-protocol-version")
+        # initialize negotiates the version itself, so a newer client's header must not block it
+        is_init = isinstance(payload, dict) and payload.get("method") == "initialize"
+        if ver is not None and ver not in mcpmod.PROTOCOLS and not is_init:
+            raise HTTPException(400, f"unsupported MCP-Protocol-Version '{ver}'")
         resp = await mcpmod.handle(hub, agent, payload, request.is_disconnected)
         if resp is None:
             return Response(status_code=202)

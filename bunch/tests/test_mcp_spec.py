@@ -27,3 +27,10 @@ def test_protocol_version_header(env):
     assert c.post("/mcp", json=body, headers=ok).status_code == 200
     bad = {**h(k["alice"]), "MCP-Protocol-Version": "1999-01-01"}
     assert c.post("/mcp", json=body, headers=bad).status_code == 400
+
+
+def test_initialize_ignores_newer_protocol_header(env):
+    c, k, _, _ = env
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2099-01-01"}}
+    r = c.post("/mcp", json=body, headers={**h(k["alice"]), "MCP-Protocol-Version": "2099-01-01"})
+    assert r.status_code == 200 and r.json()["result"]["protocolVersion"] == PROTOCOLS[0]
