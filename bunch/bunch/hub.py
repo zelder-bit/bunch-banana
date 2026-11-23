@@ -10,7 +10,8 @@ import re
 import sqlite3
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 from urllib.parse import urlsplit
 
 from .config import Settings
@@ -32,6 +33,7 @@ MAX_AGENT_HOPS = 2  # at most this many agent messages in a reply chain below a 
 REDELIVER_WINDOW = 900  # a job a worker fetched but never answered is offered again while it is this fresh
 MAX_OFFERS = 2          # ...but only this many times in all, so a job that kills its worker can't loop
 TURN_WAIT = 180  # agents addressed together answer in turn; stop waiting on a slow one after this long
+ANSWERER_LIVE = 90  # a manual agent that asked for jobs this recently (responder.py polls every 50 s) takes its turn
 
 # Bot mode (per room, admins switch it on): agents hand work to each other without a person, until one
 # posts [done]. One baton per message, and a repeat or a two-agent back-and-forth stops the run.
@@ -55,6 +57,13 @@ ADDRESS_RE = re.compile(r"(?:^|[\n.!?])[\s>*_#-]*" + _GREETING + r"(" + _AT + r"
                         r"\s*(?:[,:\u2013\u2014-]|(?:can|could|please|would|will)\b)")
 # Bot mode also takes any line that starts with a mention as a handoff ("@bob what is\u2026"), as BOT_NOTE asks.
 LINE_AT_RE = re.compile(r"^[\s>*_#-]*" + _GREETING + r"(" + _AT + r")(?=[\s,:;!?]|$)", re.M)
+
+
+T = TypeVar("T")
+
+
+class ClientGone(Exception):
+    """The long-polling client hung up: leave its cursor alone."""
 
 
 class HubError(Exception):
@@ -131,6 +140,7 @@ class Hub:
         self._models: set[str] | None = None        # every model name the gateway has; None = unknown
         self.routing: dict[int, tuple[str, float]] = {}  # message id -> (room, since): shown, recipients still being chosen
         self.offered: dict[tuple[str, int], int] = {}  # (worker agent, message id) -> times handed to its worker
+        self.answerers: dict[str, float] = {}  # agent -> when it last asked for jobs (see turn_blocker)
 
     # ---------------------------------------------------------------- events
     def broadcast(self, event: dict) -> None:
@@ -151,6 +161,7 @@ class Hub:
         if gone:
             for key in [k for k in self.offered if k[0] == gone]:
                 del self.offered[key]
+            self.answerers.pop(gone, None)
         self.broadcast({"type": "agents"})
 
     def _wake(self) -> None:
@@ -167,6 +178,20 @@ class Hub:
             await asyncio.wait_for(self._event.wait(), timeout)
         except TimeoutError:
             pass
+
+    async def long_poll(self, fetch: Callable[[], T | None], wait: float,
+                        gone: Callable[[], Awaitable[bool]] | None = None) -> T | None:
+        """Calls fetch() until it returns non-None, or until `wait` seconds (clamped to 0..60) have
+        passed, sleeping on wait_for_new between tries. Checks gone() before each try and raises
+        ClientGone if it is true. Returns fetch()'s result, or None when the time ran out."""
+        deadline = time.monotonic() + max(0.0, min(wait, 60.0))
+        while True:
+            if gone and await gone():
+                raise ClientGone()
+            out = fetch()
+            if out is not None or time.monotonic() >= deadline:
+                return out
+            await self.wait_for_new(max(0.05, deadline - time.monotonic()))
 
     @staticmethod
     def message_json(m) -> dict:
@@ -460,6 +485,59 @@ class Hub:
             "AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to=m.id AND r.sender=?) ORDER BY m.id",
             (time.time() - REDELIVER_WINDOW, agent, f",{agent},", agent))
 
+    def answered(self, mid: int, agent: str) -> bool:
+        """agent has replied to message mid (an answer or a "not answered" note)."""
+        return bool(self.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (mid, agent)))
+
+    def ruled_out(self, m, agent: str) -> bool:
+        """agent must not answer m (any more): already answered (e.g. the hub said the machine was
+        offline), a double send, or another agent's message that doesn't wake it (named in passing,
+        chain too deep, a bot-mode handoff a person's post voided). Answerers that queue work check
+        it again just before answering, since all of these can change while a job waits."""
+        return self.answered(m["id"], agent) or bool(self.duplicate_of(m)) or \
+            (not m["human"] and not self.wakes(m, agent))
+
+    def jobs(self, agent: str, rows: list | None = None, *, room: str | None = None,
+             since: float = 0.0) -> list:
+        """Messages `agent` should answer now, oldest first (sqlite rows from `messages`). The one place
+        that decides it, for workers, auto agents and JSON readers (responder.py) alike.
+
+        rows: the agent's freshly read rows, when the caller already called read_rows. None: read them here.
+        Read-before rows still unanswered come back too (in `room` only when given, created >= since):
+        waiting for their turn, or handed to an answerer that died, lost the response or was cut off by a
+        hub restart."""
+        self.answerers[agent] = time.time()
+        if len(self.answerers) > 5000:  # like offered: only recent callers matter
+            self.answerers = {agent: time.time()}
+        if rows is None:
+            rows = self.read_rows(agent)[1]
+        room = room.strip().lower().lstrip("#") if room else None
+        new = {r["id"] for r in rows}
+        again = [r for r in self.unanswered(agent)
+                 if r["id"] not in new and r["created"] >= since and (room is None or r["room"] == room)]
+        out = []
+        for r in again + rows:
+            key = (agent, r["id"])
+            if self.offered.get(key, 0) >= MAX_OFFERS:
+                continue  # offered twice with no reply: stop, or a job that kills its answerer would loop
+            if f",{agent}," not in (r["recipients"] or ""):
+                continue  # room chatter: only what's addressed to the agent is a job
+            if self.ruled_out(r, agent):
+                self.offered[key] = MAX_OFFERS  # decided once: don't look at it again
+                continue
+            if self.turn_blocker(r, agent):
+                continue  # not counted: it stays unanswered, so unanswered() brings it back
+            why = self.over_budget(agent)
+            if why:  # the hub enforces budgets, so a restarted answerer can't run past one
+                try:
+                    self.post(agent, r["room"], f"({why}; not answered)", reply_to=r["id"])
+                except HubError:
+                    pass  # rate limit / paused room: the note is a courtesy
+                continue
+            self.offered[key] = self.offered.get(key, 0) + 1
+            out.append(r)
+        return out
+
     def read(self, agent: str, room: str | None = None, everything: bool = False) -> str:
         header, rows, more = self.read_rows(agent, room, everything)
         lines = header + [self.fmt_line(m, agent, show_room=not room) for m in rows]
@@ -625,7 +703,8 @@ class Hub:
     def turn_blocker(self, m, agent: str) -> str | None:
         """Agents addressed in the same message answer one after another, local models first (they're
         quick), so each answer can build on the ones before it. Returns who agent is still waiting for,
-        or None when it's agent's turn. Agents that can't answer now (offline, cooling, manual) are skipped."""
+        or None when it's agent's turn. Agents that can't answer now (offline, cooling, manual unless it
+        reads jobs) are skipped."""
         if time.time() - m["created"] > TURN_WAIT:
             return None
         live = []
@@ -634,6 +713,8 @@ class Hub:
                 continue  # only named in passing: it won't answer, so don't wait for it
             row = self.store.agent(n)
             state = self.worker_state(row) if row else ""
+            if state == "manual" and time.time() - self.answerers.get(n, 0) < ANSWERER_LIVE:
+                state = "online"  # a jobs reader such as responder.py: takes its turn with the workers
             if state in ("auto", "online", "busy"):
                 live.append((state != "auto", n))
         order = [n for _, n in sorted(live, key=lambda x: x[0])]  # stable: keeps the addressed order
@@ -643,11 +724,6 @@ class Hub:
             if not self.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], n)):
                 return n
         return None
-
-    async def wait_turn(self, m, agent: str) -> None:
-        """Waits until turn_blocker lets agent answer m (for auto agents, which answer in-process)."""
-        while self.turn_blocker(m, agent):
-            await self.wait_for_new(5)
 
     def agent_hops(self, m) -> int:
         """Agent messages in m's reply chain since the last human message (m included)."""

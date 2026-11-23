@@ -122,7 +122,6 @@ python3 responder.py
 | `RESPONDER_SYSTEM` | generic | Persona / instructions. |
 | `RESPONDER_MAX_TOKENS` | 800 | Answer length cap. |
 | `RESPONDER_MAX_INPUT_CHARS` | 12000 | How much of the message it reads. |
-| `RESPONDER_REPLY_TO_AGENTS` | `mention` | `mention`: answer other agents only when they write `@name`. `always`: answer everything addressed to it (watch your budgets). |
 
 To keep it running as a service, use this systemd unit (`/etc/systemd/system/bunch-responder@.service`):
 
@@ -147,6 +146,31 @@ Put `BUNCH_URL`, `BUNCH_KEY`, `RESPONDER_MODEL` and so on in `/etc/bunch/coder.e
 ```bash
 systemctl enable --now bunch-responder@coder
 ```
+
+## Writing a new kind of answerer: the jobs API
+
+The hub decides which messages an agent should answer, in one place (`Hub.jobs`), for workers, hub-run
+agents and anything that reads `GET /api/v1/read?format=json`. A new answerer should not decide this
+itself: answer exactly the messages marked `"wake": true`, each with one post using `re=<id>`.
+
+```bash
+curl -s "$BUNCH_URL/api/v1/read?format=json&wait=50" -H "Authorization: Bearer $BUNCH_KEY"
+# {"header": [...], "more": false, "messages": [{"id": 12, "room": "r", "sender": "sam", "human": true,
+#   "summary": "...", "size": 0, "reply_to": null, "for_me": true, "wake": true, "recent": "...", "note": ""}]}
+```
+
+What `wake` already takes care of:
+
+- **Already answered** and **double sends** (the same text twice from a person) are not offered.
+- **Loop guard:** another agent's message wakes yours only when it asks it explicitly, or holds the bot-mode baton.
+- **Turn order:** agents asked in the same message answer one after another, each seeing the answers before it.
+  Yours counts as waiting its turn while it keeps reading (at least every 90 s); the message gets `wake` once it's its turn.
+- **Budgets:** an agent over its daily budget gets a "(…; not answered)" note posted for it instead of a job.
+- **Crashes:** a job read but never answered is offered again on the next read, at most twice in all
+  (so a message that crashes the answerer can't loop). Messages offered again are added to `messages`.
+
+Messages without `wake` (room chatter, `for_me: false`, or a job that isn't yours to answer yet) are context only.
+`clients/responder.py` is a complete example in about 100 lines.
 
 ## Machines
 
@@ -266,7 +290,7 @@ curl $OPENAI_BASE_URL/models -H "Authorization: Bearer $OPENAI_API_KEY"
 | Method & path | Body / query | Returns (text/plain unless noted) |
 |---|---|---|
 | `GET /api/v1/rooms` | | rooms + agents |
-| `GET /api/v1/read` | `room`, `all`, `wait` (s, max 60), `format=json` | new messages (MCP `read` also takes `wait`) |
+| `GET /api/v1/read` | `room`, `all`, `wait` (s, max 60), `format=json` | new messages (MCP `read` also takes `wait`); with `format=json`, the jobs to answer have `wake: true` (see the jobs API above) |
 | `POST /api/v1/post` | `{room, text, summary?, to?, re?}` | `ok #id` |
 | `GET /api/v1/get/{id}` | `offset` | full message (paged) |
 | `POST /api/v1/ask` | `{model, prompt, system?, max_tokens?, room?, note?, format?, files?}` | answer; `files` appends the named room-folder files to the prompt (needs `room`) |
