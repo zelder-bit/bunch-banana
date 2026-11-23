@@ -426,6 +426,10 @@ class Hub:
         def upto(rm: str, mid: int) -> int:
             return min(mid, hold[rm] - 1) if rm in hold else mid
 
+        born = st.agent_first_id(agent)  # a reused name must not inherit the old agent's addressed messages
+        # "mine": room-wide, or addressed to me since I exist
+        mine = "(recipients='' OR (instr(recipients, ?) > 0 AND id>?))"
+
         def ready(found: list) -> list:
             return [r for r in found if r["id"] < hold.get(r["room"], r["id"] + 1)] if hold else found
 
@@ -434,8 +438,9 @@ class Hub:
             if not st.room(room):
                 raise HubError(f"no room '{room}'")
             cur = st.cursor(agent, room)
-            relevant = "1=1" if everything else "(recipients='' OR instr(recipients, ?) > 0)"
-            args = () if everything else (me_like,)
+            # all: from the all position on, minus what a default read already passed (<= cur and mine)
+            lo, relevant = (st.all_cursor(agent, room), f"NOT (id<=? AND {mine})") if everything else (cur, mine)
+            args = (cur, me_like, born) if everything else (me_like, born)
             if cur is None:  # first visit: summary + short tail instead of the whole backlog
                 r = st.room(room)
                 if r["summary"]:
@@ -443,27 +448,33 @@ class Hub:
                 else:
                     total = st.one("SELECT COUNT(*) AS n FROM messages WHERE room=?", (room,))["n"]
                     header.append(f"joined {room} ({total} msgs; latest below)")
-                rows = st.q(f"SELECT * FROM messages WHERE room=? AND sender!=? AND {relevant} "
-                            f"ORDER BY id DESC LIMIT ?", (room, agent, *args, self.s.join_tail))[::-1]
+                rows = st.q(f"SELECT * FROM messages WHERE room=? AND sender!=? AND "
+                            f"{'1=1' if everything else mine} ORDER BY id DESC LIMIT ?",
+                            (room, agent, *(() if everything else (me_like, born)), self.s.join_tail))[::-1]
                 st.set_cursor(agent, room, upto(room, st.room_max_id(room)))
                 return header, ready(rows), False
             rows = st.q(f"SELECT * FROM messages WHERE room=? AND id>? AND sender!=? AND {relevant} "
-                        f"ORDER BY id LIMIT ?", (room, cur, agent, *args, limit + 1))
+                        f"ORDER BY id LIMIT ?", (room, lo, agent, *args, limit + 1))
             rows = ready(rows)
             more = len(rows) > limit
             rows = rows[:limit]
-            st.set_cursor(agent, room, rows[-1]["id"] if more else upto(room, st.room_max_id(room)))
+            pos = rows[-1]["id"] if more else upto(room, st.room_max_id(room))
+            st.set_cursor(agent, room, pos, pos if everything else None)
             return header, rows, more
 
         # All rooms: joined rooms (room-wide + addressed to me) and anywhere I'm @mentioned.
-        joined_clause = "1=1" if everything else "(m.recipients='' OR instr(m.recipients, ?) > 0)"
-        args = () if everything else (me_like,)
+        mine_m = "(m.recipients='' OR (instr(m.recipients, ?) > 0 AND m.id>?))"
+        if everything:  # from the all position on, minus what a default read already passed
+            lo_sql, joined_clause, args = "COALESCE(c.all_id,0)", f"NOT (m.id<=c.last_id AND {mine_m})", (me_like, born)
+        else:
+            lo_sql, joined_clause, args = "COALESCE(c.last_id,0)", mine_m, (me_like, born)
         rows = st.q(
             "SELECT m.* FROM messages m LEFT JOIN cursors c ON c.agent=? AND c.room=m.room "
-            "WHERE m.sender!=? AND m.id>COALESCE(c.last_id,0) AND ("
-            f"  (c.last_id IS NOT NULL AND {joined_clause}) OR instr(m.recipients, ?) > 0"
+            f"WHERE m.sender!=? AND m.id>{lo_sql} AND ("
+            f"  (c.last_id IS NOT NULL AND {joined_clause}) "
+            "OR (c.last_id IS NULL AND instr(m.recipients, ?) > 0 AND m.id>?)"
             ") ORDER BY m.id LIMIT ?",
-            (agent, agent, *args, me_like, limit + 1),
+            (agent, agent, *args, me_like, born, limit + 1),
         )
         rows = ready(rows)
         more = len(rows) > limit
@@ -473,11 +484,12 @@ class Hub:
             for r in rows:
                 last[r["room"]] = r["id"]
             for rm, mid in last.items():
-                st.set_cursor(agent, rm, mid)
+                st.set_cursor(agent, rm, mid, mid if everything else None)
         else:
             touched = set(st.joined_rooms(agent)) | {r["room"] for r in rows}
             for rm in touched:
-                st.set_cursor(agent, rm, upto(rm, st.room_max_id(rm)))
+                pos = upto(rm, st.room_max_id(rm))
+                st.set_cursor(agent, rm, pos, pos if everything else None)
         return header, rows, more
 
     def fmt_line(self, m, agent: str, show_room: bool) -> str:
