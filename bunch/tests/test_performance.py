@@ -153,8 +153,10 @@ def test_admin_list_shapes_and_batched_queries(tmp_path):
     rooms, agents = asyncio.run(lists())
     count = len(queries)
     assert rooms == [
-        {'name': 'empty', 'summary': '', 'count': 0, 'last_id': 0, 'paused': False, 'bot': False, 'folder': None},
-        {'name': 'general', 'summary': '', 'count': 1, 'last_id': 1, 'paused': False, 'bot': False, 'folder': None}]
+        {'name': 'empty', 'summary': '', 'count': 0, 'last_id': 0, 'paused': False, 'bot': False, 'folder': None,
+         'unread': 0, 'mention': 0},
+        {'name': 'general', 'summary': '', 'count': 1, 'last_id': 1, 'paused': False, 'bot': False, 'folder': None,
+         'unread': 1, 'mention': 0}]
     worker = next(a for a in agents if a['name'] == 'worker')
     assert worker == dict(name='worker', kind='agent', last_seen=None, description='', model=None,
                          daily_tokens=h.s.daily_tokens, budget_set=None, system=None,

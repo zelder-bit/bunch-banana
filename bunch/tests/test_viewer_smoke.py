@@ -91,3 +91,45 @@ def test_viewer_live_and_reconnect(hub, page):
     page.evaluate("window.__hold = false")
     page.wait_for_selector("#feed .msg >> text=posted while offline", timeout=30000)
     page.wait_for_selector("#liveText >> text=live")
+
+
+def test_unread_survives_reload_and_reconnect(hub, page):
+    key = httpx.post(hub + "/api/admin/agents", json={"name": "alice"}, headers=adm()).json()["key"]
+
+    def agent_says(room, text):
+        r = httpx.post(hub + "/api/v1/post", json={"room": room, "text": text}, headers=h(key))
+        assert r.status_code == 200, r.text
+
+    def badge(n):
+        page.wait_for_selector(f'#rooms [data-room="other"] .badge:text-is("{n}")', timeout=30000)
+
+    agent_says("live", "first")
+    agent_says("other", "before")
+    page.goto(hub)
+    page.click("#modeToggle")
+    page.fill("#tokenIn", ADMIN)
+    page.press("#tokenIn", "Enter")
+    page.click('#rooms [data-room="live"]')
+    page.wait_for_selector("#liveText >> text=live")
+    badge(1)
+
+    agent_says("other", "while live is open")
+    badge(2)
+    page.reload()  # the hub keeps the counts, not the page
+    page.wait_for_selector("#liveText >> text=live")
+    badge(2)
+
+    page.evaluate("window.__hold = true; window.__socks.forEach(s => s.close())")
+    page.wait_for_selector("#liveText >> text=reconnecting")
+    agent_says("other", "posted while offline")
+    page.evaluate("window.__hold = false")
+    badge(3)  # a room that isn't open catches up too, not only the open one
+
+    page.click('#rooms [data-room="other"]')
+    page.wait_for_selector("#feed .msg >> text=posted while offline")
+    page.click('#rooms [data-room="live"]')
+    page.wait_for_selector("#feed .msg >> text=first")
+    page.reload()  # opening the room reported it as read
+    page.wait_for_selector("#liveText >> text=live")
+    page.wait_for_selector('#rooms [data-room="other"]')
+    assert page.locator('#rooms [data-room="other"] .badge').count() == 0

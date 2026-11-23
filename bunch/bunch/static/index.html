@@ -146,7 +146,8 @@
   let rooms = [];
   let me = { name: "human", admin: false };
   let people = [];                                 // everyone you can @mention: agents and humans
-  const unread = {}, mentions = {};               // per room: new messages / new messages addressed to me
+  const unread = {}, mentions = {};               // per room: new messages / new messages addressed to me (the hub's counts, plus live ones since)
+  const readSent = {};                             // per room: the newest id reported to the hub as shown
   let unseenHere = 0;                              // new messages in the open room while the tab is hidden
   let ws = null, wsTimer = null, started = false, timers = [];
 
@@ -384,9 +385,13 @@
     roomRefreshes.add(events);
     try {
       rooms = await api("/api/admin/rooms");
+      for (const r of rooms) {   // the open room is on screen: nothing there is unread
+        unread[r.name] = r.name === current ? 0 : r.unread;
+        mentions[r.name] = r.name === current ? 0 : r.mention;
+      }
       for (const m of events) {
         const r = rooms.find(r => r.name === m.room);
-        if (r && m.id > (r.last_id || 0)) { r.count++; r.last_id = m.id; }
+        if (r && m.id > (r.last_id || 0)) { r.count++; r.last_id = m.id; countNew(m); }
       }
     } finally { roomRefreshes.delete(events); }
     $("rooms").replaceChildren(...rooms.map(roomRow));
@@ -1052,6 +1057,7 @@
       else $("feed").replaceChildren(...(msgs.length === PAGE ? [earlierBtn()] : []), ...msgs.map(renderMsg));
     });
     $("feed").scrollTop = $("feed").scrollHeight;
+    markRead();
     await loadRooms();
     if (name !== current) return;
     if (!narrow.matches) $("text").focus();   // on a phone that would pop the keyboard over the room
@@ -1272,7 +1278,7 @@
     $("sideBadge").classList.toggle("at", at);
     $("sideBtn").setAttribute("aria-label", "Rooms and agents" + (elsewhere ? `, ${elsewhere} new message${elsewhere === 1 ? "" : "s"} in other rooms` : ""));
   }
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { unseenHere = 0; updateTitle(); } });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { unseenHere = 0; updateTitle(); markRead(); } });
   const canNotify = "Notification" in window && window.isSecureContext;   // browsers only allow it on https or localhost
   function showNotifyBtn() { $("notify").hidden = !canNotify || Notification.permission !== "default"; }
   $("notify").onclick = async () => {
@@ -1327,19 +1333,31 @@
     if (next || pend) feed.insertBefore(row, next || pend); else feed.append(row);   // a message still being sent stays last
     if (atBottom || m.sender === me.name) feed.scrollTop = feed.scrollHeight;
   }
+  // Tell the hub how far the open room has been shown to this person (it keeps the unread counts). Forward only.
+  function markRead() {
+    const room = current, id = lastShownId();
+    if (!room || document.hidden || id <= (readSent[room] || 0)) return;
+    readSent[room] = id;
+    api(`/api/admin/rooms/${enc(room)}/read`, { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
+  }
+  function countNew(m) {   // a live message in a room that isn't open
+    if (m.room === current || m.sender === me.name) return;
+    unread[m.room] = (unread[m.room] || 0) + 1;
+    if ((m.to || []).includes(me.name)) mentions[m.room] = (mentions[m.room] || 0) + 1;
+  }
   async function catchUp() {
-    if (!current) return;
     const room = current;
     let after = lastShownId();
     const limit = 500;
-    while (room === current) {
+    while (room && room === current) {
       const msgs = await api(`/api/admin/rooms/${enc(room)}/messages?after=${after}&limit=${limit}`);
-      if (room !== current) return;
+      if (room !== current) break;
       bulk(() => msgs.forEach(appendMsg));
       if (msgs.length < limit) break;
       after = msgs[msgs.length - 1].id;
     }
-    await loadRooms();
+    markRead();
+    await loadRooms();   // every room's counts, not just the open one
   }
   function setLive(on, text) { $("live").classList.toggle("on", on); $("liveText").textContent = text; }
   function connect() {
@@ -1373,9 +1391,9 @@
       if (m.room === current) {
         appendMsg(m);
         if (document.hidden && m.sender !== me.name) unseenHere++;
-      } else {
-        unread[m.room] = (unread[m.room] || 0) + 1;
-        if (forMe) mentions[m.room] = (mentions[m.room] || 0) + 1;
+        markRead();
+      } else if (rooms.some(r => r.name === m.room && m.id > (r.last_id || 0))) {
+        countNew(m);   // not already in the hub's counts; an unknown room's counts come with loadRooms
       }
       if (forMe && (document.hidden || m.room !== current)) notify(m);
       updateRoom(m);
