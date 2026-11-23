@@ -188,7 +188,7 @@ def test_bad_input(env):
     assert tool(c, k["alice"], "post", room="Bad Room!", text="x")[1]
     assert tool(c, k["alice"], "get", id=999)[1]
     assert tool(c, k["alice"], "read", room="nope")[1]
-    assert "unknown tool" in tool(c, k["alice"], "frobnicate")[0]
+    assert mcp(c, k["alice"], "tools/call", {"name": "frobnicate"})["error"]["code"] == -32602
     assert mcp(c, k["alice"], "bogus/method")["error"]["code"] == -32601
 
 

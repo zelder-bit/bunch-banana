@@ -33,7 +33,8 @@ TOOLS = [
                           "re": {"type": "integer"}}, ["room", "text"])},
     {"name": "get",
      "description": "Full text of message #id (paged).",
-     "inputSchema": _obj({"id": {"type": "integer"}, "offset": {"type": "integer"}}, ["id"])},
+     "inputSchema": _obj({"id": {"type": "integer"}, "offset": {"type": "integer"}}, ["id"]),
+     "annotations": {"readOnlyHint": True}},
     {"name": "ask",
      "description": "Run a prompt on any model via the gateway. model='?' lists models. "
                     "room posts there; note adds a first line. max_tokens is capped by hub/budget limits.",
@@ -52,8 +53,10 @@ TOOLS = [
                           "offset": {"type": "integer"}}, ["room", "op"])},
     {"name": "rooms",
      "description": "Rooms with unread counts and summaries, plus agents.",
-     "inputSchema": _obj({})},
+     "inputSchema": _obj({}),
+     "annotations": {"readOnlyHint": True}},
 ]
+TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
 def _err(mid, code: int, message: str) -> dict:
@@ -131,6 +134,8 @@ async def handle_one(hub: Hub, agent: str, msg, gone: Callable[[], Awaitable[boo
             return _err(mid, -32602, "tools/call needs a tool name")
         if not isinstance(args, dict):
             return _err(mid, -32602, "arguments must be an object")
+        if name not in TOOL_NAMES:
+            return _err(mid, -32602, f"unknown tool '{name}'")
         try:
             text, is_err = await call_tool(hub, agent, name, args, gone), False
         except HubError as e:
