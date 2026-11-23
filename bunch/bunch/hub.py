@@ -499,7 +499,8 @@ class Hub:
         s += f" {m['sender']}"
         rec = _recips(m)
         if rec:
-            s += ">" + ",".join("you" if r == agent else r for r in rec)
+            me = agent if m["id"] > self.store.agent_first_id(agent) else None  # an old agent's mail isn't "you"
+            s += ">" + ",".join("you" if r == me else r for r in rec)
         if m["reply_to"]:
             s += f" re#{m['reply_to']}"
         s += f": {m['summary']}"
@@ -903,16 +904,17 @@ class Hub:
     # ----------------------------------------------------------------- rooms
     def room_overview(self, agent: str = "", fallback: bool = False) -> list[dict]:
         # Aggregate once for the room lists; empty rooms still have zero counts.
+        first = self.store.agent_first_id(agent)  # addressed messages from before a reused name existed don't count
         rows = self.store.q(
             "SELECT r.*, COUNT(m.id) AS count, COALESCE(MAX(m.id),0) AS last_id, "
             "COUNT(CASE WHEN m.id>r.summary_upto THEN 1 END) AS newer, "
             "COUNT(CASE WHEN m.id>COALESCE(c.last_id,0) AND m.sender!=? "
-            "AND instr(m.recipients,?)>0 THEN 1 END) AS mine, "
+            "AND instr(m.recipients,?)>0 AND m.id>? THEN 1 END) AS mine, "
             "COUNT(CASE WHEN m.id>COALESCE(c.last_id,0) AND m.sender!=? "
-            "AND (m.recipients='' OR instr(m.recipients,?)>0) THEN 1 END) AS new "
+            "AND (m.recipients='' OR (instr(m.recipients,?)>0 AND m.id>?)) THEN 1 END) AS new "
             "FROM rooms r LEFT JOIN messages m ON m.room=r.name "
             "LEFT JOIN cursors c ON c.room=r.name AND c.agent=? GROUP BY r.name ORDER BY r.name",
-            (agent, f",{agent},", agent, f",{agent},", agent))
+            (agent, f",{agent},", first, agent, f",{agent},", first, agent))
         recent: dict[str, list[str]] = {}
         if fallback:
             for m in self.store.q(

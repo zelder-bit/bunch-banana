@@ -333,7 +333,8 @@ class Store:
         self._check_new_name(name)
         if len(password or "") < 8:
             raise ValueError("password must be at least 8 characters")
-        self.x("INSERT INTO agents(name,key_hash,kind,created,pw_hash,is_admin) VALUES(?,NULL,'human',?,?,?)",
+        self.x("INSERT INTO agents(name,key_hash,kind,created,pw_hash,is_admin,first_id) "
+               "VALUES(?,NULL,'human',?,?,?,(SELECT COALESCE(MAX(id),0) FROM messages))",
                (name, time.time(), _ph.hash(password), int(admin)))
 
     def set_password(self, name: str, password: str) -> None:
@@ -400,7 +401,8 @@ class Store:
         if row and row["kind"] != "human":  # else the admin token would post as that agent, marked human
             raise ValueError(f"'{name}' is already an agent")
         self.x(
-            "INSERT OR IGNORE INTO agents(name,key_hash,kind,created) VALUES(?,NULL,'human',?)",
+            "INSERT OR IGNORE INTO agents(name,key_hash,kind,created,first_id) "
+            "VALUES(?,NULL,'human',?,(SELECT COALESCE(MAX(id),0) FROM messages))",
             (name, time.time()),
         )
 
