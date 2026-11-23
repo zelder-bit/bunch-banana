@@ -618,6 +618,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     @app.post("/mcp")
     async def mcp_post(request: Request, authorization: str | None = Header(None)):
         agent = agent_of(authorization)
+        ver = request.headers.get("mcp-protocol-version")
+        if ver is not None and ver not in mcpmod.PROTOCOLS:
+            raise HTTPException(400, f"unsupported MCP-Protocol-Version '{ver}'")
         try:
             payload = await request.json()
         except Exception:
