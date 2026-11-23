@@ -25,7 +25,7 @@ from . import mcp as mcpmod
 from .autoreply import autoreply_loop, forget_room
 from .config import Settings, load
 from . import folders
-from .hub import CACHE_WEIGHT, MAX_OFFERS, MENTION_RE, WORKER_CLIS, WORKER_POWERS, Hub, HubError, post_id
+from .hub import CACHE_WEIGHT, MENTION_RE, WORKER_CLIS, WORKER_POWERS, ClientGone, Hub, HubError, post_id
 from .llm import LLM, LLMError
 from .router import route, route_agent_post
 from .store import DEFAULT_HUMAN_AVATAR, HUMAN_AVATARS, RESERVED_NAMES, Store, text_of
@@ -639,29 +639,36 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def api_read(request: Request, room: str | None = None, all: bool = False, wait: float = 0,
                        format: str = "text", authorization: str | None = Header(None)):
         agent = agent_of(authorization)
-        deadline = time.monotonic() + max(0.0, min(wait, 60.0))
-        while True:
-            if await request.is_disconnected():
-                return Response(status_code=499)  # the client gave up waiting: don't move its cursor for nobody
-            if format == "json":
-                header, rows, more = hub.read_rows(agent, room, all)
-                if rows or header or time.monotonic() >= deadline:
-                    out = {"header": header, "more": more,
-                           "messages": [{**hub.message_json(m), "for_me": agent in hub.message_json(m)["to"],
-                                         "size": len(m["body"] or "")} for m in rows]}
-                    for m, row in zip(out["messages"], rows):
-                        m.pop("body")
-                        if m["for_me"]:  # what responder.py needs to answer in context
-                            m["recent"] = hub.recent_lines(m["room"], m["id"])
-                            m["wake"] = bool(row["human"]) or hub.wakes(row, agent)
-                            m["note"] = hub.room_note(m["room"])
-                    store.add_usage(agent, ctx=sum(len(m["summary"]) for m in out["messages"]) // 4)
-                    return out
-            else:
-                text = hub.read(agent, room, all)
-                if text != "no new messages" or time.monotonic() >= deadline:
-                    return PlainTextResponse(text)
-            await hub.wait_for_new(max(0.05, deadline - time.monotonic()))
+
+        def fetch_json():
+            header, rows, more = hub.read_rows(agent, room, all)
+            todo = hub.jobs(agent, rows, room=room)  # the hub decides what to answer: wake = a job
+            if not (rows or header or todo):
+                return None
+            wake, seen = {r["id"] for r in todo}, {r["id"] for r in rows}
+            rows = rows + [r for r in todo if r["id"] not in seen]  # read before, offered again
+            out = {"header": header, "more": more,
+                   "messages": [{**hub.message_json(m), "for_me": agent in hub.message_json(m)["to"],
+                                 "size": len(m["body"] or "")} for m in rows]}
+            for m in out["messages"]:
+                m.pop("body")
+                if m["for_me"]:  # what responder.py needs to answer in context
+                    m["recent"] = hub.recent_lines(m["room"], m["id"])
+                    m["wake"] = m["id"] in wake
+                    m["note"] = hub.room_note(m["room"])
+            store.add_usage(agent, ctx=sum(len(m["summary"]) for m in out["messages"]) // 4)
+            return out
+
+        def fetch_text():
+            text = hub.read(agent, room, all)
+            return None if text == "no new messages" else PlainTextResponse(text)
+        try:
+            got = await hub.long_poll(fetch_json if format == "json" else fetch_text, wait, request.is_disconnected)
+        except ClientGone:
+            return Response(status_code=499)  # the client gave up waiting: don't move its cursor for nobody
+        if got is None:
+            return {"header": [], "more": False, "messages": []} if format == "json" else PlainTextResponse("no new messages")
+        return got
 
     @app.post("/api/v1/post")
     async def api_post(body: PostIn, authorization: str | None = Header(None)):
@@ -734,52 +741,26 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
     async def machine_read(request: Request, wait: float = 0, authorization: str | None = Header(None)):
         """New messages for this machine's agents, each with what answering it needs."""
         m = machine_of(authorization)
-        deadline = time.monotonic() + max(0.0, min(wait, 60.0))
-        while True:
-            if await request.is_disconnected():
-                return Response(status_code=499)  # worker restarted/crashed: leave the messages for its next read
-            jobs = []
-            for a in hub.machine_agents(m["name"]):
-                name = a["name"]
-                _h, rows, _more = hub.read_rows(name)
-                new = {r["id"] for r in rows}
-                # read before but still unanswered: waiting for their turn, or handed to a worker that died,
-                # lost the response, or was cut off by a hub restart
-                again = [r for r in hub.unanswered(name) if r["id"] not in new]
-                for r in again + rows:
-                    key = (name, r["id"])
-                    if hub.offered.get(key, 0) >= MAX_OFFERS:
-                        continue  # offered twice with no reply: stop, or a job that kills the worker would loop
-                    if f",{name}," not in (r["recipients"] or ""):
-                        continue  # room chatter: workers only answer what's addressed to them
-                    if store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (r["id"], name)):
-                        continue  # already answered, e.g. the hub said the machine was offline
-                    if hub.duplicate_of(r) or (not r["human"] and not hub.wakes(r, name)):
-                        hub.offered[key] = MAX_OFFERS  # decided once: don't look at it again
-                        continue  # a double send, or another agent only naming this one / chain too deep
-                    if hub.turn_blocker(r, name):
-                        continue  # the cursor moved on, but it stays unanswered: unanswered() brings it back
-                    why = hub.over_budget(name)
-                    if why:  # the hub enforces budgets, so a restarted worker can't run past one
-                        try:
-                            hub.post(name, r["room"], f"({why}; not answered)", reply_to=r["id"])
-                        except HubError:
-                            pass  # rate limit / paused room: the note is a courtesy
-                        continue
-                    hub.offered[key] = hub.offered.get(key, 0) + 1
-                    parent = store.message(r["reply_to"]) if r["reply_to"] else None
-                    shared = store.folder(r["room"])  # the room's shared folder, if it has one (#84)
-                    jobs.append({"agent": name, "folder": {"kind": shared["kind"], "about": folders.ABOUT[shared["kind"]]}
-                                 if shared else None, "id": r["id"], "room": r["room"], "sender": r["sender"],
-                                 "human": bool(r["human"]), "wake": True, "created": r["created"],
-                                 "age": max(0.0, time.time() - r["created"]),
-                                 "text": text_of(r), "room_summary": hub.room_summary(r["room"]),
-                                 "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
-                                 "parent": {"id": parent["id"], "sender": parent["sender"],
-                                            "text": text_of(parent)} if parent else None})
-            if jobs or time.monotonic() >= deadline:
-                return {"jobs": jobs}
-            await hub.wait_for_new(max(0.05, deadline - time.monotonic()))
+
+        def job(name: str, r) -> dict:
+            parent = store.message(r["reply_to"]) if r["reply_to"] else None
+            shared = store.folder(r["room"])  # the room's shared folder, if it has one (#84)
+            return {"agent": name, "folder": {"kind": shared["kind"], "about": folders.ABOUT[shared["kind"]]}
+                    if shared else None, "id": r["id"], "room": r["room"], "sender": r["sender"],
+                    "human": bool(r["human"]), "wake": True, "created": r["created"],
+                    "age": max(0.0, time.time() - r["created"]),
+                    "text": text_of(r), "room_summary": hub.room_summary(r["room"]),
+                    "recent": hub.recent_lines(r["room"], r["id"]), "note": hub.room_note(r["room"]),
+                    "parent": {"id": parent["id"], "sender": parent["sender"],
+                               "text": text_of(parent)} if parent else None}
+
+        def fetch():
+            jobs = [job(a["name"], r) for a in hub.machine_agents(m["name"]) for r in hub.jobs(a["name"])]
+            return {"jobs": jobs} if jobs else None
+        try:
+            return await hub.long_poll(fetch, wait, request.is_disconnected) or {"jobs": []}
+        except ClientGone:
+            return Response(status_code=499)  # worker restarted/crashed: leave the messages for its next read
 
     @app.post("/api/v1/machine/post")
     async def machine_post(body: MachinePostIn, authorization: str | None = Header(None)):

@@ -14,7 +14,7 @@ import logging
 import re
 import time
 
-from .hub import ECHO_SIMILARITY, Hub, HubError, _shingles
+from .hub import ECHO_SIMILARITY, MAX_OFFERS, Hub, HubError, _shingles
 from .store import text_of
 
 log = logging.getLogger("bunch.autoreply")
@@ -118,11 +118,7 @@ async def _save_files(hub: Hub, name: str, room: str, text: str) -> str:
 
 
 async def answer(hub: Hub, agent, m) -> None:
-    name = agent["name"]
-    body = text_of(m)
-    if not m["human"] and not hub.wakes(m, name):
-        return
-    await hub.wait_turn(m, name)  # agents asked together answer in turn, each seeing the earlier answers
+    body = text_of(m)  # Hub.jobs already decided it's this agent's turn to answer m
     lock = _room_locks.setdefault((id(asyncio.get_running_loop()), m["room"]), asyncio.Lock())
     async with lock:  # one at a time: later ones see earlier answers
         await _answer(hub, agent, m, body)
@@ -130,8 +126,8 @@ async def answer(hub: Hub, agent, m) -> None:
 
 async def _answer(hub: Hub, agent, m, body: str) -> None:
     name, st = agent["name"], hub.store
-    if st.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
-        return  # answered while waiting for the room
+    if hub.ruled_out(m, name):
+        return  # changed while it waited: answered (or noted), the first copy answered, or a voided handoff
     parts = [f"Room #{m['room']} summary: {hub.room_summary(m['room'])}"]
     recent = hub.recent_lines(m["room"], m["id"])
     if recent:
@@ -188,7 +184,7 @@ def _note(hub: Hub, agent, m, why: str) -> None:
     paused room just means no note."""
     name = agent["name"]
     try:
-        if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
+        if hub.answered(m["id"], name):
             return  # already answered or noted
         hub.post(name, m["room"], f"({name} didn't answer: {why}; ask again)", reply_to=m["id"])
     except Exception as e:
@@ -201,7 +197,8 @@ def _state(hub: Hub) -> dict:
 
 
 def read_new(hub: Hub, agent) -> list:
-    """The agent's new messages that are worth answering. Cheap and synchronous; the cursor moves here.
+    """The agent's messages to answer now (Hub.jobs), past the auto-only checks. Cheap and synchronous;
+    the cursor moves here.
     Staleness is decided now, once: a message that merely waits in the agent's queue behind a slow
     answer must not count as stale later."""
     name, st = agent["name"], hub.store
@@ -220,18 +217,18 @@ def read_new(hub: Hub, agent) -> list:
                 _note(hub, agent, m, "it was too old by the time I looked")
             continue
         out.append(m)
-    return out
+    todo = hub.jobs(name, out, since=cutoff)  # also brings back fresh unanswered work after a restart
+    ids = {m["id"] for m in todo}
+    for m in out:  # Hub.jobs ruled these out for good (double send, doesn't wake it): remember that here too
+        if m["id"] not in ids and hub.offered.get((name, m["id"]), 0) >= MAX_OFFERS:
+            _gave_up[(name, m["id"])] = m["created"]
+    return todo
 
 
 async def serve_message(hub: Hub, agent, m) -> None:
     name = agent["name"]
     if (name, m["id"]) in _gave_up:
         return
-    if hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
-        return  # already answered, e.g. with an "offline" note
-    if hub.duplicate_of(m):
-        _gave_up[(name, m["id"])] = m["created"]  # not re-queued every pass
-        return  # a double send: the first copy is answered
     try:
         await answer(hub, agent, m)
     except HubError as e:  # gateway down, budget used: say so once, don't retry forever
@@ -246,7 +243,7 @@ async def serve_message(hub: Hub, agent, m) -> None:
         log.exception("%s failed on #%s", name, m["id"])
         if m["human"]:
             _note(hub, agent, m, f"unexpected error ({type(e).__name__})")
-    if not hub.store.one("SELECT 1 FROM messages WHERE reply_to=? AND sender=?", (m["id"], name)):
+    if not hub.answered(m["id"], name):
         _gave_up[(name, m["id"])] = m["created"]  # nothing stored (note failed, or a silent return): don't ask the model again
 
 
@@ -286,9 +283,6 @@ async def autoreply_once(hub: Hub, wait: bool = True) -> None:
     for a in hub.store.auto_agents():
         name = a["name"]
         rows = read_new(hub, a)
-        if hub.worker_state(a) not in ("offline", "no model"):
-            # The cursor can outlive the queue after a restart. Recover only fresh work.
-            rows += [m for m in hub.unanswered(name) if m["created"] >= cutoff]
         pending = {m["id"] for m in state["queue"].get(name, [])}
         pending.add(state["answering"].get(name))
         for m in rows:

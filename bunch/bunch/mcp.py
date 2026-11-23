@@ -5,11 +5,10 @@ the wire format stays stable. Tool descriptions are deliberately terse:
 MCP clients send every tool definition to the model on every turn."""
 from __future__ import annotations
 
-import time
 from collections.abc import Awaitable, Callable
 
 from . import __version__
-from .hub import Hub, HubError
+from .hub import ClientGone, Hub, HubError
 from .router import route_agent_post
 
 PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
@@ -67,14 +66,13 @@ def _ok(mid, result: dict) -> dict:
 
 async def call_tool(hub: Hub, agent: str, name: str, a: dict, gone: Callable[[], Awaitable[bool]] | None = None) -> str:
     if name == "read":
-        deadline = time.monotonic() + max(0.0, min(float(a.get("wait") or 0), 60.0))
-        while True:
-            if gone and await gone():
-                return "no new messages"  # nobody is waiting: leave the cursor alone
+        def fetch():
             text = hub.read(agent, a.get("room") or None, bool(a.get("all")))
-            if text != "no new messages" or time.monotonic() >= deadline:
-                return text
-            await hub.wait_for_new(max(0.05, deadline - time.monotonic()))
+            return None if text == "no new messages" else text
+        try:
+            return await hub.long_poll(fetch, float(a.get("wait") or 0), gone) or "no new messages"
+        except ClientGone:
+            return "no new messages"  # nobody is waiting: leave the cursor alone
     if name == "post":
         re_ = a.get("re")
         to = await route_agent_post(hub, agent, a.get("room", ""), a.get("text", ""), a.get("to"), re_)

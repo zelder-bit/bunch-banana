@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """responder: turns any model into a chat participant. Python 3.8+, no dependencies.
 
-It waits for messages addressed to its agent name (@name, or replies to it),
-answers humans always and other agents only when they @mention it (loop guard),
-asks a model for an answer through the hub, and replies in the same room.
+It waits for messages addressed to its agent name (@name, or replies to it) and
+answers the ones the hub marks `wake` (the hub's jobs API decides: double sends,
+loop guard, turn order with other agents asked in the same message, budgets, and
+offering a job again after a crash). It asks a model through the hub and replies
+in the same room.
 Each answer sees only: the room summary, one-line summaries of the latest
 messages, the message itself, and the message it replies to. No growing
 history, so token use stays flat.
@@ -17,7 +19,6 @@ Run one per persona/model you want in the chat (each with its own agent key).
 import http.client
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -26,7 +27,6 @@ import urllib.request
 
 HUB = os.environ.get("BUNCH_URL", "http://127.0.0.1:8700").rstrip("/")
 KEY = os.environ.get("BUNCH_KEY", "")
-MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,31})")  # same as the hub's
 MODEL = os.environ.get("RESPONDER_MODEL", "")
 SYSTEM = os.environ.get("RESPONDER_SYSTEM",
                         "You are an AI agent in a shared chat room with other agents and a human. "
@@ -34,8 +34,6 @@ SYSTEM = os.environ.get("RESPONDER_SYSTEM",
                         "If you need another agent, @mention them.")
 MAX_TOKENS = int(os.environ.get("RESPONDER_MAX_TOKENS", "800"))
 MAX_INPUT_CHARS = int(os.environ.get("RESPONDER_MAX_INPUT_CHARS", "12000"))
-# "mention" (default): reply to agents only when they write @<my name>. "always": reply to every addressed msg.
-REPLY_TO_AGENTS = os.environ.get("RESPONDER_REPLY_TO_AGENTS", "mention")
 
 
 def req(method, path, body=None, params=None, timeout=120):
@@ -61,12 +59,9 @@ def room_summary(room):
 
 
 def answer(m, me):
-    body = full_text(m["id"]) if m["size"] else m["summary"]
-    # Loop guard: answer humans always, other agents only when they explicitly ask us ("@me, can you…").
-    asked = m["wake"] if "wake" in m else me in (n.rstrip(".") for n in MENTION_RE.findall(body.lower()))  # older hubs
-    if not m["human"] and REPLY_TO_AGENTS != "always" and not asked:
-        print(f"  skipped #{m['id']} (agent message that doesn't ask @{me})", file=sys.stderr)
+    if not m.get("wake"):  # the hub decides what is ours to answer now
         return
+    body = full_text(m["id"]) if m["size"] else m["summary"]
     parts = [m["note"]] if m.get("note") else []  # bot mode (older hubs don't send it)
     parts.append(f"Room #{m['room']} summary: {room_summary(m['room']) or '(none)'}")
     if m.get("recent"):  # older hubs don't send it
@@ -104,7 +99,7 @@ def main():
         try:
             batch = req("GET", "/api/v1/read", params={"format": "json", "wait": 50}, timeout=90)
             for m in batch["messages"]:
-                if m["for_me"]:
+                if m.get("wake"):
                     print(f"#{m['id']} from {m['sender']} in {m['room']}", file=sys.stderr)
                     try:
                         answer(m, me)
