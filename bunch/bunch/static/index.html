@@ -640,9 +640,13 @@
       const rank = ["answer", "read", "full"];
       const allowed = m ? rank.indexOf(m.max_power || "answer") : 2;
       const capped = m && rank.indexOf(power.value) > allowed;
+      // What this CLI can run. Older workers don't say: agy never had answer-only, the others can run anything.
+      const powers = c?.powers?.length ? c.powers : p.cli === "agy" ? ["read", "full"] : null;
+      const cant = v => !!powers && !powers.includes(v);
+      if (cant(power.value)) { power.value = powers[0]; dirField.hidden = false; }  // so a new or old agy agent can still be saved
       for (const o of power.options) {  // the machine would run these as less anyway; keep a saved one visible
-        o.disabled = !!m && o.value !== power.value && rank.indexOf(o.value) > allowed;
-        o.textContent = (p.cli === "agy" && o.value === "answer" ? "Answer only: agy won't answer" : POWER_LABELS[o.value]) + (m && rank.indexOf(o.value) > allowed ? ` (${m.name} doesn't allow it yet)` : "");
+        o.disabled = o.value !== power.value && (cant(o.value) || !!m && rank.indexOf(o.value) > allowed);
+        o.textContent = (cant(o.value) && o.value === "answer" ? `Answer only: ${CLI_NAMES[p.cli]} won't answer` : POWER_LABELS[o.value]) + (m && rank.indexOf(o.value) > allowed ? ` (${m.name} doesn't allow it yet)` : "");
       }
       const d = dir.value.trim().replace(/\/+$/, "");
       const outside = m && power.value !== "answer" && !capped && (!(m.dirs || []).length
@@ -651,7 +655,7 @@
         + (m && allowed < 2 ? raisePowerHow(m) + ". " : "")
         + (outside ? `That folder isn't in ${m.name}'s WORKER_DIRS (${(m.dirs || []).join(", ") || "none"}), so it will run as answer only. ` : "")
         + (power.value !== "full" ? "Pictures need \"Edit files and run commands\". " : "")
-        + (p.cli === "agy" ? "agy has no answer-only mode: on answer power it does not answer, including when capped by the machine. " : "Answer only means no files and no commands for Claude and Codex. ")
+        + (cant("answer") ? `${CLI_NAMES[p.cli]} has no answer-only mode: on answer power it does not answer, including when capped by the machine. ` : "Answer only means no files and no commands for Claude and Codex. ")
         + (power.value === "full" ? "Anyone who can @mention this agent can make it change files and run commands. WORKER_DIRS chooses the start folder for every CLI, including Claude; a CLI with a shell is not confined to it. Only a separate OS user, a container or a sandbox confines an agent."
           : power.value === "read" ? (p.cli === "claude" ? "Can read inside its folder only and quote it into the chat."
             : `Can read and quote files in the folder. ${CLI_NAMES[p.cli] || p.cli} may also read files outside it, anything `

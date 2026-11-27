@@ -1055,12 +1055,16 @@ class Hub:
         cli = "agy" if cli == "gemini" else cli
         if cli not in WORKER_CLIS:
             raise HubError(f"cli must be one of {', '.join(WORKER_CLIS)}")
-        found = [c["cli"] for c in json.loads(m["clis"] or "[]")]
+        reported = json.loads(m["clis"] or "[]")
+        found = [c["cli"] for c in reported]
         if found and cli not in found:
             raise HubError(f"{m['name']} doesn't have {cli} (it has {', '.join(found)})")
         power = cfg.get("power") or "answer"
         if power not in WORKER_POWERS:
             raise HubError(f"power must be one of {', '.join(WORKER_POWERS)}")
+        can = next((c.get("powers") for c in reported if c["cli"] == cli), None)
+        if can and power not in can:
+            raise HubError(f"{cli} on {m['name']} can't run on {power} power (it can: {', '.join(can)})")
         # No folder of its own is fine: the agent then uses its power only in rooms that have a shared folder (#84).
 
         def num(key, default, lo, hi):

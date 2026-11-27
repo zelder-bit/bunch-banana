@@ -1210,6 +1210,30 @@ def test_worker_builds_lean_cli_commands():
     assert json.loads(argv[argv.index("--settings") + 1]) == {"permissions": {"allow": ["command(*)"]}}  # #133
 
 
+def test_detect_clis_reports_what_each_cli_can_run(monkeypatch):
+    w = _load_worker()
+    monkeypatch.setattr(w.shutil, "which", lambda c: "/bin/" + c)
+    monkeypatch.setattr(w, "_run", lambda argv, timeout=30: "1.2.3 (x)")
+    got = {c["cli"]: c["powers"] for c in w.detect_clis()}
+    assert got == {"claude": ["answer", "read", "full"], "codex": ["answer", "read", "full"], "agy": ["read", "full"]}
+
+
+def test_hello_keeps_valid_powers_and_agents_respect_them(env):
+    c, k, app, _ = env
+    key = _machine(c, clis=[{"cli": "agy", "version": "1", "models": []}])  # an older worker: no powers
+    assert "powers" not in c.get("/api/admin/machines", headers=adm()).json()[0]["clis"][0]
+    agy = {"mode": "worker", "machine": "workstation", "cli": "agy", "power": "answer"}
+    assert c.put("/api/admin/agents/alice/worker", json=agy, headers=adm()).status_code == 200
+    hello = lambda powers: c.post("/api/v1/machine/hello", headers=h(key), json={"clis": [
+        {"cli": "agy", "version": "1", "models": [], "powers": powers}]})
+    assert hello("junk").status_code == 200 and "powers" not in c.get("/api/admin/machines", headers=adm()).json()[0]["clis"][0]
+    assert hello(["full", "bogus", "read", 3]).status_code == 200
+    assert c.get("/api/admin/machines", headers=adm()).json()[0]["clis"][0]["powers"] == ["read", "full"]
+    r = c.put("/api/admin/agents/alice/worker", json=agy, headers=adm())
+    assert r.status_code == 400 and "agy on workstation can't run on answer power (it can: read, full)" in r.text
+    assert c.put("/api/admin/agents/alice/worker", json={**agy, "power": "read"}, headers=adm()).status_code == 200
+
+
 def test_worker_parses_cli_output_and_limits():
     import json
     w = _load_worker()
