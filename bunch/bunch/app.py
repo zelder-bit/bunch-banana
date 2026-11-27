@@ -731,7 +731,9 @@ def create_app(settings: Settings | None = None, llm: LLM | None = None) -> Fast
         m = machine_of(authorization)
         power = body.max_power if body.max_power in WORKER_POWERS else "answer"
         clis = [{"cli": str(c.get("cli", ""))[:16], "version": str(c.get("version", ""))[:64],
-                 "models": [str(x)[:64] for x in (c.get("models") or [])][:50]}
+                 "models": [str(x)[:64] for x in (c.get("models") or [])][:50],
+                 # absent from an older worker: consumers then assume every power
+                 **({"powers": [p for p in WORKER_POWERS if p in c["powers"]]} if isinstance(c.get("powers"), list) else {})}
                 for c in body.clis[:10] if c.get("cli") in WORKER_CLIS]
         ollama = None
         if isinstance(body.ollama, dict) and isinstance(body.ollama.get("models"), list):

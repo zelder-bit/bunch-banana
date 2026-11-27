@@ -41,6 +41,7 @@ HUB = os.environ.get("BUNCH_URL", "http://127.0.0.1:8700").rstrip("/")
 KEY = os.environ.get("BUNCH_MACHINE_KEY", "")
 POWERS = ("answer", "read", "full")
 CLIS = ("claude", "codex", "agy")
+CLI_POWERS = {"claude": POWERS, "codex": POWERS, "agy": ("read", "full")}  # agy has no answer-only mode
 MAX_POWER = os.environ.get("WORKER_MAX_POWER", "answer").strip().lower()
 DIRS = [os.path.realpath(os.path.expanduser(d)) for d in os.environ.get("WORKER_DIRS", "").split(os.pathsep) if d]
 TIMEOUT = int(os.environ.get("WORKER_TIMEOUT", "600"))
@@ -368,7 +369,7 @@ def detect_clis():
         elif cli == "agy":  # "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)" per line
             models = [ln.split("\t")[0].strip() for ln in _run(["agy", "models"], 60).splitlines()
                       if "\t" in ln and ln.split("\t")[0].strip()]
-        found.append({"cli": cli, "version": version, "models": models})
+        found.append({"cli": cli, "version": version, "models": models, "powers": list(CLI_POWERS[cli])})
     return found
 
 
@@ -495,8 +496,9 @@ def parse_output(cli, out, err, rc):
             d = json.loads(out)
             text = d.get("response") or ""
             u = d.get("usage") or {}
-            cached = int(u.get("cache_read_tokens") or 0)  # part of total_tokens
-            tokens = int(u.get("total_tokens") or 0) - cached
+            cached = int(u.get("cache_read_tokens") or 0)
+            # agy 1.5.18 leaves cache reads out of input_tokens and total_tokens (input + output); older output had no input_tokens
+            tokens = int(u.get("total_tokens") or 0) - (0 if "input_tokens" in u else cached)
             if d.get("status") not in (None, "SUCCESS"):
                 err_ = d.get("error")
                 error = (err_.get("message") if isinstance(err_, dict) else err_) or text or d["status"]
